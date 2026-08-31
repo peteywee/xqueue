@@ -1,0 +1,13 @@
+# Credentials — never commit
+.env
+
+# Generated
+queue.json
+state.json
+post.log
+
+# Figures are binary and large; keep them local
+media/*
+!media/.gitkeep
+
+node_modules/

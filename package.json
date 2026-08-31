@@ -1,0 +1,18 @@
+{
+  "name": "xqueue",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Content queue, rule validator, and scheduled poster for the restaurant-operations X account",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "validate": "node src/cli.mjs validate",
+    "build": "node src/cli.mjs build",
+    "stats": "node src/cli.mjs stats",
+    "next": "node src/cli.mjs next",
+    "post": "node src/cli.mjs post",
+    "post:dry": "node src/cli.mjs post --dry-run",
+    "verify": "npm run test && npm run validate && npm run build"
+  }
+}
