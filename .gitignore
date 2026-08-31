@@ -1,8 +1,7 @@
 # Credentials — never commit
 .env
 
-# Generated
-queue.json
+# Generated (queue.json is intentionally tracked — see xqueue-integrity workflow)
 state.json
 post.log
 
