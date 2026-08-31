@@ -11,3 +11,8 @@ media/*
 !media/.gitkeep
 
 node_modules/
+
+# npm is not used here — the preinstall guard rejects it,
+# but a stray lockfile must never come back.
+package-lock.json
+yarn.lock

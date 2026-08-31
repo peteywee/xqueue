@@ -35,15 +35,15 @@ cp .env.example .env        # paste the four values
 cp ~/figures/*.png media/   # figure-1.png, figure-9.png, figure-14.png, figure-23.png
 ```
 
-No `npm install` — there are no dependencies.
+No `pnpm install` — there are no dependencies.
 
 ### 4. Verify before going live
 
 ```bash
-npm run verify              # tests, validation, queue build
+pnpm verify              # tests, validation, queue build
 node src/cli.mjs whoami     # confirms auth; should print your account
-npm run build -- --start 2026-09-07
-npm run post:dry            # read what it would send
+pnpm build --start 2026-09-07
+pnpm post:dry            # read what it would send
 ```
 
 Do not skip the dry run.
@@ -60,12 +60,12 @@ rest of the time.
 ## Weekly
 
 ```bash
-npm run stats     # remaining count — batch when it drops under 20
-npm run next 10   # read ahead, edit anything that's gone stale
+pnpm stats     # remaining count — batch when it drops under 20
+pnpm next 10   # read ahead, edit anything that's gone stale
 ```
 
 Editing is the point. Rewrite posts four days ahead of publication, then
-`npm run verify` and commit. The queue rebuilds in under a second.
+`pnpm verify` and commit. The queue rebuilds in under a second.
 
 ## Failure modes
 
@@ -94,7 +94,7 @@ posting is unaffected — comment out the figure attachment and keep publishing
 while you fix it. This is the least-proven part of the client.
 
 **Validation fails after an edit.**
-`npm run validate` names the post and the rule. Errors block publishing by
+`pnpm validate` names the post and the rule. Errors block publishing by
 design; fix the post rather than bypassing the check.
 
 ## Cost

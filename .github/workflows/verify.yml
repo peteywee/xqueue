@@ -12,19 +12,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: pnpm
 
-      # No dependencies by design — nothing to install, nothing to audit.
+      # No dependencies by design — this exists so the lockfile stays honest
+      # and the pnpm guard is exercised in CI.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: Validate the content library
-        run: npm run validate
+        run: pnpm validate
 
       - name: Build the queue
-        run: npm run build
+        run: pnpm build
 
       - name: Report
-        run: npm run stats
+        run: pnpm stats

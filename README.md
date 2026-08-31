@@ -8,8 +8,8 @@ the suite. Nothing to install, nothing to audit, nothing to break on a
 Chromebook.
 
 ```
-npm run verify     # test + validate + build. The gate.
-npm run post:dry   # what would publish right now
+pnpm verify     # test + validate + build. The gate.
+pnpm post:dry   # what would publish right now
 ```
 
 ## Why this exists instead of a scheduler subscription
@@ -47,14 +47,14 @@ state.json        what actually published; prevents double-posting
 
 | | |
 |---|---|
-| `npm run verify` | test + validate + build. Run before every commit. |
-| `npm test` | 63 tests |
-| `npm run validate` | every rule against the library; exits 1 on any error |
-| `npm run build` | regenerate `queue.json` from the markdown |
-| `npm run stats` | pillar split, runway, cost projection |
-| `npm run next` | what publishes next, rendered as it will appear |
-| `npm run post:dry` | dry run |
-| `npm run post` | publish anything due |
+| `pnpm verify` | test + validate + build. Run before every commit. |
+| `pnpm test` | 63 tests |
+| `pnpm validate` | every rule against the library; exits 1 on any error |
+| `pnpm build` | regenerate `queue.json` from the markdown |
+| `pnpm stats` | pillar split, runway, cost projection |
+| `pnpm next` | what publishes next, rendered as it will appear |
+| `pnpm post:dry` | dry run |
+| `pnpm post` | publish anything due |
 
 `build` flags: `--start 2026-09-07`, `--slots 14:30,22:15`,
 `--days 1,2,3,4,5`, `--tz America/Chicago`.
@@ -86,7 +86,7 @@ body goes in a fenced block
 ```
 ```
 
-Then `npm run verify`. Adding posts extends the runway automatically; the
+Then `pnpm verify`. Adding posts extends the runway automatically; the
 pillar cycle holds the 40/25/20/15 split as long as you add roughly in
 proportion.
 
