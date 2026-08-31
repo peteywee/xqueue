@@ -1,0 +1,68 @@
+name: XQueue Integrity
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+  schedule:
+    - cron: '17 6 * * *'
+      timezone: 'America/Chicago'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrity:
+    name: Validate production schedule
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Activate pnpm
+        run: corepack prepare pnpm@11.24.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Validate content
+        run: pnpm validate
+
+      - name: Verify committed queue
+        run: node scripts/xqueue-health.mjs
+
+      - name: Prove queue is reproducible
+        shell: bash
+        run: |
+          cp queue.json /tmp/queue.before.json
+
+          node scripts/xqueue-health.mjs --repair
+
+          cmp \
+            /tmp/queue.before.json \
+            queue.json

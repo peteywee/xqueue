@@ -16,3 +16,11 @@ node_modules/
 # but a stray lockfile must never come back.
 package-lock.json
 yarn.lock
+*.swp
+.post.lock
+*.bak
+*.pre-*
+*.before-*
+*~
+env.ts
+oauth2.ts

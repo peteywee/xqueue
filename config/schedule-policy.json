@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "campaignStart": "2026-08-31",
+  "timezone": "America/Chicago",
+  "slots": [
+    "14:30",
+    "22:15"
+  ],
+  "daysOfWeek": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "postsPerDay": 2,
+  "expectedPosts": 180,
+  "expectedPostingDays": 90
+}

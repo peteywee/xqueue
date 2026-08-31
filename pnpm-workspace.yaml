@@ -1,0 +1,3 @@
+allowBuilds:
+  '@xdevplatform/xurl': true
+  esbuild: true
