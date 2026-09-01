@@ -26,7 +26,6 @@ jobs:
   integrity:
     name: Validate production schedule
     runs-on: ubuntu-latest
-
     timeout-minutes: 10
 
     steps:
@@ -47,6 +46,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Assert generated queue is not tracked
+        shell: bash
+        run: |
+          if git ls-files --error-unmatch queue.json >/dev/null 2>&1; then
+            echo 'queue.json is generated and must not be tracked'
+            exit 1
+          fi
+
       - name: Test
         run: pnpm test
 
@@ -54,9 +61,7 @@ jobs:
         run: pnpm validate
 
       - name: Generate queue from production policy
-        run: |
-          rm -f queue.json
-          node scripts/xqueue-health.mjs --repair
+        run: node scripts/xqueue-health.mjs --repair
 
       - name: Verify generated queue
         run: node scripts/xqueue-health.mjs
@@ -65,12 +70,15 @@ jobs:
         shell: bash
         run: |
           cp queue.json /tmp/queue.first.json
-
           rm -f queue.json
           node scripts/xqueue-health.mjs --repair
-
-          cmp \
-            /tmp/queue.first.json \
-            queue.json
-
+          cmp /tmp/queue.first.json queue.json
           node scripts/xqueue-health.mjs
+
+      - name: Assert generated queue is portable
+        shell: bash
+        run: |
+          if grep -q '"sourceFile": "/' queue.json; then
+            echo 'queue.json contains an absolute sourceFile path'
+            exit 1
+          fi
