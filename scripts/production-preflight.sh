@@ -106,7 +106,7 @@ else
 fi
 
 if [[ -f state.json ]]; then
-  if node --input-type=module -e "import { readState } from './src/state-store.mjs'; const s=readState('./state.json'); console.log(JSON.stringify({posted:Object.keys(s.posted).length,spend:s.spend,inflight:s.inflight},null,2));"; then
+  if node --input-type=module -e "import { readState } from './src/state-store.mjs'; const s=readState('./state.json'); console.log(JSON.stringify({posted:Object.keys(s.posted).length,skipped:Object.keys(s.skipped).length,spend:s.spend,inflight:s.inflight},null,2));"; then
     pass 'state.json parses and satisfies the publication-ledger schema'
   else
     fail 'state.json is invalid; do not delete it or attempt live publication'
@@ -118,6 +118,7 @@ fi
 section 'REPOSITORY GATES'
 run_gate 'pnpm verify' pnpm verify
 run_gate 'pnpm validate:production' pnpm validate:production
+run_gate 'runtime backlog health' pnpm runtime:health
 run_gate 'authenticated X identity (read-only)' node src/cli.mjs whoami
 
 section 'QUEUE / MEDIA'

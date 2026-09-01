@@ -8,10 +8,12 @@ XQueue is deliberately fail-closed:
 - `config/schedule-policy.json` is the production scheduling policy.
 - `queue.json` is generated locally and is never committed.
 - `state.json` is the durable publication ledger and is never committed.
+- Posted, owner-skipped, and in-flight posts are distinct states.
 - Live publication requires the explicit `--live` path.
 - A live run publishes at most one overdue post.
 - Concurrent live publishers are blocked by `.xqueue-publish.lock`.
 - An ambiguous create-post outcome blocks automatic retries until the owner reconciles it.
+- Stale unresolved backlog blocks production cutover until the owner decides its disposition.
 
 ## First-time setup
 
@@ -70,7 +72,7 @@ The canonical cutover gate is:
 pnpm preflight:production
 ```
 
-This checks runtime versions, exact local Git state, credential-file permissions, publication-ledger validity, repository tests, deterministic queue regeneration, strict production media validation, authenticated X identity, dry-run publication behavior, figure 23, and the active scheduler configuration.
+This checks runtime versions, exact local Git state, credential-file permissions, publication-ledger validity, repository tests, deterministic queue regeneration, strict production media validation, runtime backlog health, authenticated X identity, dry-run publication behavior, figure 23, and the active scheduler configuration.
 
 The preflight never invokes `post:live` and never creates an X post. It exits nonzero on any blocking failure and ends with exactly one of:
 
@@ -134,13 +136,14 @@ journalctl --user -u xqueue.service --no-pager -n 100
 
 Use **one scheduler authority only**: cron or the user-systemd timer, never both.
 
-The publisher itself decides whether anything is due. Live mode publishes only the oldest due post in a run, so a machine waking from sleep cannot flush an entire backlog at once.
+The publisher itself decides whether anything is due. Live mode publishes only the oldest due post in a run, so a machine waking from sleep cannot flush an entire backlog at once. Runtime health provides the stronger cutover gate: unresolved posts older than the grace window must be dispositioned before a scheduler is enabled.
 
 ## Routine checks
 
 ```bash
 cd /home/patrick/xqueue
 pnpm health
+pnpm runtime:health
 pnpm stats
 pnpm next 10
 ```
@@ -152,13 +155,48 @@ pnpm verify
 pnpm preflight:production
 ```
 
+## Missed schedule / stale backlog
+
+`pnpm runtime:health` treats unresolved posts more than 20 minutes past their scheduled time as stale. It also fails if a publication is awaiting reconciliation.
+
+```bash
+pnpm runtime:health
+```
+
+If stale posts are reported, inspect them before doing anything live:
+
+```bash
+pnpm next 10
+pnpm post:dry
+```
+
+For each stale post, make an explicit owner decision. If the post should still publish, leave it unresolved and do not enable the scheduler until you deliberately decide how to handle the timing. If it should **not** be published because its window was missed, record that decision rather than pretending it was posted:
+
+```bash
+pnpm skip -- A1 --reason "missed during production hardening; do not backfill"
+```
+
+A skipped post is stored separately from a posted post and will never be selected for automatic publication. A mistaken skip can be reversed:
+
+```bash
+pnpm unskip -- A1
+```
+
+Re-run runtime health after dispositioning the backlog:
+
+```bash
+pnpm runtime:health
+```
+
+Do not bulk-mark missed posts as posted, and do not delete `state.json` to clear the backlog. Both actions would destroy the truth of the publication ledger.
+
 ## Publication state and crash recovery
 
 ### Normal state
 
-`state.json` records remote post IDs only after X confirms a successful create operation. Writes are atomic.
+`state.json` records remote post IDs only after X confirms a successful create operation. Writes are atomic. Owner-skipped posts are stored under a separate `skipped` map with a timestamp and reason.
 
-`pnpm stats` reports any in-flight publication state.
+`pnpm stats` reports posted, skipped, remaining, and in-flight state.
 
 ### Abandoned `prepared` attempt
 
@@ -201,6 +239,10 @@ pnpm validate:production
 
 Do not bypass the production media gate.
 
+### Runtime health reports stale backlog
+
+Do not simply enable the scheduler and let it catch up. Review each stale item and either retain it for deliberate publication or record an owner skip with a reason. Re-run `pnpm runtime:health` until the stale backlog is zero.
+
 ### `state.json` cannot be parsed
 
 Live publication must stop. Do not delete the file and retry; deletion would erase the local idempotency ledger and could duplicate historical posts. Preserve the file, restore from a known-good copy if available, and reconcile against the X account.
@@ -219,7 +261,7 @@ A concrete 429 rejection is treated as not accepted by X and does not create an 
 
 ### Machine slept through scheduled times
 
-When the machine resumes, overdue posts are eligible, but backlog protection publishes only one live post per invocation. Continue normal scheduler runs rather than manually flushing the queue.
+A short delay inside the runtime grace window is allowed. Once unresolved posts are stale, runtime health fails and the owner must disposition the backlog before scheduler cutover or recovery.
 
 ## What remains manual
 
@@ -228,6 +270,7 @@ When the machine resumes, overdue posts are eligible, but backlog protection pub
 - Follows and likes.
 - Legal advice or responses to individual legal situations.
 - Reconciliation after an ambiguous create-post outcome.
+- Explicit disposition of stale backlog.
 - Credential provisioning.
 - Choosing and installing exactly one production scheduler authority.
 
