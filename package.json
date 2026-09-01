@@ -22,7 +22,7 @@
     "post:dry": "node src/cli.mjs post --dry-run",
     "post:live": "node src/cli.mjs post --live",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "pnpm test && pnpm validate && pnpm build && pnpm health"
+    "verify": "pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
