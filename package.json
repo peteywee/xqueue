@@ -18,11 +18,12 @@
     "stats": "node src/cli.mjs stats",
     "next": "node src/cli.mjs next",
     "health": "node scripts/xqueue-health.mjs",
+    "preflight:production": "bash scripts/production-preflight.sh",
     "post": "node src/cli.mjs post --dry-run",
     "post:dry": "node src/cli.mjs post --dry-run",
     "post:live": "node src/cli.mjs post --live",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
+    "verify": "bash -n scripts/production-preflight.sh deploy/install-systemd-user.sh && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
