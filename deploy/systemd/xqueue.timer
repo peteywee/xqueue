@@ -1,0 +1,12 @@
+[Unit]
+Description=Run XQueue publication eligibility check every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=xqueue.service
+
+[Install]
+WantedBy=timers.target
