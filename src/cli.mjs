@@ -38,7 +38,10 @@ import {
   uploadMedia,
   whoAmI,
 } from './xdk-client.mjs';
-import { isDue } from './post-time.mjs';
+import {
+  isDue,
+  scheduledAt,
+} from './post-time.mjs';
 import {
   readState,
   writeStateAtomic,
@@ -53,6 +56,10 @@ import {
   reconcileAsNotPosted,
   reconcileAsPosted,
 } from './publication-state.mjs';
+import {
+  analyzeRuntime,
+  isResolved,
+} from './runtime-health.mjs';
 
 const ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -75,6 +82,21 @@ const opt = (name, fallback = null) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 };
+
+function positional() {
+  const values = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith('--')) {
+      if (['--reason', '--grace-minutes', '--posted'].includes(arg)) i++;
+      continue;
+    }
+    values.push(arg);
+  }
+
+  return values;
+}
 
 function loadDotenv() {
   const file = join(ROOT, '.env');
@@ -148,6 +170,12 @@ function isDefinitePostRejection(error) {
   return [400, 401, 403, 404, 409, 413, 422, 429].includes(status);
 }
 
+function requireQueue() {
+  const queue = readJSON(QUEUE, null);
+  if (!queue) throw new Error('No queue.json — run `pnpm build` first.');
+  return queue;
+}
+
 function cmdBuild() {
   const posts = loadLibrary(LIBRARY_DIR);
 
@@ -213,7 +241,9 @@ function cmdStats() {
   const queue = readJSON(QUEUE, null) ?? schedule(posts);
   const stats = queueStats(queue);
   const state = readState(STATE);
-  const done = Object.keys(state.posted).length;
+  const posted = Object.keys(state.posted).length;
+  const skipped = Object.keys(state.skipped).length;
+  const resolved = posted + skipped;
 
   console.log(`Library      ${posts.length} posts`);
 
@@ -227,8 +257,9 @@ function cmdStats() {
 
   console.log(`\nRunway       ${stats.postingDays} posting days, ${stats.weeks} weeks at 2/day`);
   console.log(`Window       ${stats.first} -> ${stats.last}`);
-  console.log(`Published    ${done} / ${queue.length}`);
-  console.log(`Remaining    ${queue.length - done}`);
+  console.log(`Published    ${posted} / ${queue.length}`);
+  console.log(`Skipped      ${skipped} / ${queue.length}`);
+  console.log(`Remaining    ${queue.length - resolved}`);
   console.log(
     `Inflight     ${state.inflight ? `${state.inflight.postId} (${state.inflight.status})` : 'none'}`,
   );
@@ -240,15 +271,13 @@ function cmdStats() {
 }
 
 function cmdNext() {
-  const queue = readJSON(QUEUE, null);
-  if (!queue) throw new Error('No queue.json — run `pnpm build` first.');
-
+  const queue = requireQueue();
   const state = readState(STATE);
   const requested = args.find((arg) => /^\d+$/.test(arg));
   const count = Number(requested ?? 6);
 
   const pending = queue
-    .filter((post) => !state.posted[post.id])
+    .filter((post) => !isResolved(state, post.id))
     .slice(0, count);
 
   for (const post of pending) {
@@ -264,9 +293,66 @@ function cmdNext() {
     console.log(text);
   }
 
+  const resolved = Object.keys(state.posted).length + Object.keys(state.skipped).length;
+  console.log(`\n${pending.length} shown, ${queue.length - resolved} unresolved in queue.`);
+}
+
+function cmdRuntimeHealth() {
+  const queue = requireQueue();
+  const state = readState(STATE);
+  const graceMinutes = Number(opt('grace-minutes', '20'));
+  const report = analyzeRuntime(queue, state, {
+    now: new Date(),
+    graceMinutes,
+  });
+
+  console.log('=== XQUEUE RUNTIME HEALTH ===');
+  console.log(`posted:      ${report.postedCount}`);
+  console.log(`skipped:     ${report.skippedCount}`);
+  console.log(`unresolved:  ${report.unresolvedCount}`);
+  console.log(`due now:     ${report.due.length}`);
+  console.log(`overdue:     ${report.overdue.length} (> ${report.graceMinutes} minute grace)`);
   console.log(
-    `\n${pending.length} shown, ${queue.length - Object.keys(state.posted).length} remaining in queue.`,
+    `inflight:    ${report.inflight ? `${report.inflight.postId} (${report.inflight.status})` : 'none'}`,
   );
+
+  if (report.next) {
+    console.log(
+      `next:        ${report.next.id} ${report.next.scheduledDate} ${report.next.scheduledTime} ${report.next.timezone}`,
+    );
+  } else {
+    console.log('next:        none');
+  }
+
+  if (report.overdue.length) {
+    console.log('\nOverdue unresolved posts:');
+    for (const post of report.overdue.slice(0, 20)) {
+      const minutes = Math.floor((Date.now() - scheduledAt(post).getTime()) / 60_000);
+      console.log(
+        `  ${post.id.padEnd(5)} ${post.scheduledDate} ${post.scheduledTime} ${post.timezone}  ${minutes}m overdue`,
+      );
+    }
+    if (report.overdue.length > 20) {
+      console.log(`  ... ${report.overdue.length - 20} more`);
+    }
+  }
+
+  if (report.inflight) {
+    console.error('\nXQUEUE RUNTIME HEALTH: FAIL — unresolved publication attempt requires reconciliation.');
+    process.exit(1);
+  }
+
+  if (report.overdue.length) {
+    console.error(
+      '\nXQUEUE RUNTIME HEALTH: FAIL — stale backlog requires owner disposition before live scheduler cutover.',
+    );
+    console.error(
+      'Use `pnpm skip -- <post-id> --reason "..."` only for posts you intentionally do not want published.',
+    );
+    process.exit(1);
+  }
+
+  console.log('\nXQUEUE RUNTIME HEALTH: PASS');
 }
 
 function validateForPublication() {
@@ -296,8 +382,7 @@ async function cmdPost() {
   }
 
   const dry = !requestedLive;
-  const queue = readJSON(QUEUE, null);
-  if (!queue) throw new Error('No queue.json — run `pnpm build` first.');
+  const queue = requireQueue();
 
   if (!dry) {
     validateForPublication();
@@ -334,7 +419,9 @@ async function cmdPost() {
     }
 
     const now = new Date();
-    const due = queue.filter((post) => !state.posted[post.id] && isDue(post, now));
+    const due = queue.filter(
+      (post) => !isResolved(state, post.id) && isDue(post, now),
+    );
 
     if (!due.length) {
       console.log('Nothing due.');
@@ -482,6 +569,77 @@ function cmdReconcile() {
   }
 }
 
+function cmdSkip() {
+  const [postId] = positional();
+  const reason = opt('reason');
+
+  if (!postId || !reason?.trim()) {
+    throw new Error(
+      'Skip requires `pnpm skip -- <post-id> --reason "why this post should never auto-publish"`.',
+    );
+  }
+
+  const queue = requireQueue();
+  const post = queue.find((item) => item.id === postId);
+  if (!post) throw new Error(`Unknown queue post ID: ${postId}`);
+
+  const lock = acquirePublishLock(PUBLISH_LOCK);
+  try {
+    const state = readState(STATE);
+
+    if (state.inflight) {
+      throw new Error(
+        `Cannot skip while ${state.inflight.postId} is ${state.inflight.status}; reconcile it first.`,
+      );
+    }
+    if (state.posted[postId]) {
+      throw new Error(`${postId} is already recorded as posted and cannot be skipped.`);
+    }
+    if (state.skipped[postId]) {
+      console.log(`${postId} is already skipped: ${state.skipped[postId].reason}`);
+      return;
+    }
+
+    state.skipped[postId] = {
+      at: new Date().toISOString(),
+      reason: reason.trim(),
+      scheduledDate: post.scheduledDate,
+      scheduledTime: post.scheduledTime,
+      timezone: post.timezone,
+    };
+
+    writeStateAtomic(STATE, state);
+    console.log(`Skipped ${postId}. It is no longer eligible for automatic publication.`);
+    console.log(`Reason: ${reason.trim()}`);
+  } finally {
+    lock.release();
+  }
+}
+
+function cmdUnskip() {
+  const [postId] = positional();
+  if (!postId) throw new Error('Unskip requires `pnpm unskip -- <post-id>`.');
+
+  const lock = acquirePublishLock(PUBLISH_LOCK);
+  try {
+    const state = readState(STATE);
+    if (state.inflight) {
+      throw new Error(
+        `Cannot unskip while ${state.inflight.postId} is ${state.inflight.status}; reconcile it first.`,
+      );
+    }
+    if (!state.skipped[postId]) {
+      throw new Error(`${postId} is not currently skipped.`);
+    }
+
+    delete state.skipped[postId];
+    writeStateAtomic(STATE, state);
+    console.log(`Unskipped ${postId}. It is eligible again according to its schedule.`);
+  } finally {
+    lock.release();
+  }
+}
+
 function cmdHelp() {
   console.log(`
 xqueue
@@ -497,17 +655,26 @@ Commands:
   pnpm validate:production
       Production gate. Every referenced figure must exist locally.
 
+  pnpm runtime:health
+      Fail if an ambiguous attempt exists or unresolved posts are stale.
+
   pnpm stats
-      Show queue, publishing state, runway, and cost projection.
+      Show queue, publishing state, skipped items, runway, and cost projection.
 
   pnpm next
-      Show upcoming unpublished posts.
+      Show upcoming unresolved posts.
 
   pnpm post
       SAFE DEFAULT. Dry-run anything currently due.
 
   pnpm post:live
       LIVE. Publish at most the oldest due post.
+
+  pnpm skip -- <post-id> --reason "..."
+      Owner action: permanently suppress a stale/unwanted queue item from auto-publication.
+
+  pnpm unskip -- <post-id>
+      Owner action: restore a skipped queue item to normal eligibility.
 
   pnpm reconcile -- --posted <tweet-id>
       Owner action after an ambiguous create-post outcome when X DID post it.
@@ -524,9 +691,11 @@ Safety invariants:
   Production media validation blocks missing figures.
   A filesystem lock blocks concurrent live publishers.
   state.json is written atomically.
+  Posted, skipped, and in-flight states are mutually exclusive.
   A publication intent is persisted before the X create call begins.
   Ambiguous create-post outcomes block automatic retries until reconciled.
-  Already-posted queue IDs are skipped.
+  Posted and owner-skipped queue IDs are never auto-published again.
+  Runtime health blocks stale backlog from silent scheduler cutover.
   Backlog protection publishes at most one live post per run.
 `.trim());
 }
@@ -534,11 +703,14 @@ Safety invariants:
 const commands = {
   build: cmdBuild,
   validate: cmdValidate,
+  'runtime-health': cmdRuntimeHealth,
   stats: cmdStats,
   next: cmdNext,
   post: cmdPost,
   whoami: cmdWhoami,
   reconcile: cmdReconcile,
+  skip: cmdSkip,
+  unskip: cmdUnskip,
   help: cmdHelp,
 };
 
