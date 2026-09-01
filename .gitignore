@@ -1,9 +1,11 @@
 # Credentials — never commit
 .env
 
-# Generated (queue.json is intentionally tracked — see xqueue-integrity workflow)
+# Generated/runtime state
+queue.json
 state.json
 post.log
+.xqueue-publish.lock
 
 # Figures are binary and large; keep them local
 media/*

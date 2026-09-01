@@ -13,13 +13,16 @@
     "preinstall": "node scripts/only-pnpm.mjs",
     "test": "node --test test/*.test.mjs",
     "validate": "node src/cli.mjs validate",
+    "validate:production": "node src/cli.mjs validate --production",
     "build": "node src/cli.mjs build",
     "stats": "node src/cli.mjs stats",
     "next": "node src/cli.mjs next",
+    "health": "node scripts/xqueue-health.mjs",
     "post": "node src/cli.mjs post --dry-run",
     "post:dry": "node src/cli.mjs post --dry-run",
-    "verify": "pnpm test && pnpm validate && pnpm build",
-    "post:live": "node src/cli.mjs post --live"
+    "post:live": "node src/cli.mjs post --live",
+    "reconcile": "node src/cli.mjs reconcile",
+    "verify": "pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",

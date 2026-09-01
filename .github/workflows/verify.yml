@@ -6,9 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,19 +26,24 @@ jobs:
           node-version: '22'
           cache: pnpm
 
-      # No dependencies by design — this exists so the lockfile stays honest
-      # and the pnpm guard is exercised in CI.
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Test
-        run: pnpm test
+      - name: Assert generated queue is not tracked
+        shell: bash
+        run: |
+          if git ls-files --error-unmatch queue.json >/dev/null 2>&1; then
+            echo 'queue.json is generated and must not be tracked'
+            exit 1
+          fi
 
-      - name: Validate the content library
-        run: pnpm validate
+      - name: Verify
+        run: pnpm verify
 
-      - name: Build the queue
-        run: pnpm build
-
-      - name: Report
-        run: pnpm stats
+      - name: Assert queue generation is portable
+        shell: bash
+        run: |
+          if grep -q '"sourceFile": "/' queue.json; then
+            echo 'queue.json contains an absolute sourceFile path'
+            exit 1
+          fi

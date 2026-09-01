@@ -2,7 +2,7 @@
 // The markdown IS the source of truth. Edit the markdown, rebuild the queue.
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 const HEADING = /^\*\*([ABCD])(\d+)\s+·\s+(.+?)\*\*(?:\s*\*\((.+?)\)\*)?\s*$/;
 
@@ -59,7 +59,6 @@ export function parseFile(path) {
 
     if (line.trim() === '```') {
       if (!inFence) {
-        // Only open a capture fence if we're waiting on a body for a post.
         if (current && current.body === null) { inFence = true; buf = []; }
         continue;
       }
@@ -79,12 +78,20 @@ export function parseFile(path) {
 }
 
 export function loadLibrary(dir) {
+  const sourceRoot = dirname(dir);
+
   const files = readdirSync(dir)
     .filter((f) => /pillar-[abcd]\.md$/i.test(f))
     .sort()
     .map((f) => join(dir, f));
 
-  const posts = files.flatMap(parseFile);
+  const posts = files.flatMap((file) =>
+    parseFile(file).map((post) => ({
+      ...post,
+      sourceFile: relative(sourceRoot, post.sourceFile).replaceAll('\\', '/'),
+    })),
+  );
+
   posts.sort((a, b) => (a.pillar === b.pillar ? a.seq - b.seq : a.pillar.localeCompare(b.pillar)));
   return posts;
 }

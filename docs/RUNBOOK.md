@@ -1,119 +1,207 @@
-# Runbook
+# XQueue Production Runbook
+
+## Operating model
+
+XQueue is deliberately fail-closed:
+
+- Markdown under `content/` is the content source of truth.
+- `config/schedule-policy.json` is the production scheduling policy.
+- `queue.json` is generated locally and is never committed.
+- `state.json` is the durable publication ledger and is never committed.
+- Live publication requires the explicit `--live` path.
+- A live run publishes at most one overdue post.
+- Concurrent live publishers are blocked by `.xqueue-publish.lock`.
+- An ambiguous create-post outcome blocks automatic retries until the owner reconciles it.
 
 ## First-time setup
 
-### 1. X Premium — $8/mo
+### 1. Install runtime and dependencies
 
-Do this before anything else. Without a subscription every post in the library
-truncates at 280 characters; they run 380–700.
-
-Settings → Premium → **Premium**, not Basic. Basic ($3) gets you the 25,000
-character limit but not reply prioritization, and replies are where the account
-actually gets built in month one.
-
-### 2. API credentials
-
-developer.x.com → free developer account → create a project and app.
-
-**Order matters:**
-
-1. User authentication settings → App permissions → **Read and Write**
-2. *Then* Keys and tokens → generate Access Token and Secret
-
-Generating the token before setting permissions gives you a read-only token and
-every post 403s. If you've already done it in the wrong order, regenerate the
-token.
-
-You need four values: API Key, API Secret, Access Token, Access Token Secret.
-
-### 3. Local
+The repository currently requires Node 22.13+ and pnpm. The package manager is pinned in `package.json`.
 
 ```bash
-git clone <your-repo> xqueue && cd xqueue
-node --version              # needs v20+
-cp .env.example .env        # paste the four values
-cp ~/figures/*.png media/   # figure-1.png, figure-9.png, figure-14.png, figure-23.png
+git clone <your-repo> xqueue
+cd xqueue
+corepack enable
+pnpm install --frozen-lockfile
 ```
 
-No `pnpm install` — there are no dependencies.
+Do not use npm or yarn; the preinstall guard rejects them.
 
-### 4. Verify before going live
+### 2. Configure X credentials
+
+Create an X developer app with Read and Write permissions, then generate the user-context credentials after those permissions are set.
+
+Copy the environment template and provide all four values:
 
 ```bash
-pnpm verify              # tests, validation, queue build
-node src/cli.mjs whoami     # confirms auth; should print your account
-pnpm build --start 2026-09-07
-pnpm post:dry            # read what it would send
+cp .env.example .env
+chmod 600 .env
 ```
 
-Do not skip the dry run.
+Required values:
 
-### 5. Cron
+- `X_API_KEY`
+- `X_API_SECRET`
+- `X_ACCESS_TOKEN`
+- `X_ACCESS_SECRET`
+
+Verify the identity before enabling live publication:
+
+```bash
+node src/cli.mjs whoami
+```
+
+The returned username must be the intended production account.
+
+### 3. Provision required media
+
+Figures remain local deployment assets. Copy them into `media/` using a supported name such as `figure-23.png`, `figure_23.png`, or `23.png`.
+
+Production validation is strict:
+
+```bash
+pnpm validate:production
+```
+
+If any post references a figure that is missing, production validation fails and live publication is blocked.
+
+### 4. Build and verify the production queue
+
+```bash
+pnpm verify
+pnpm validate:production
+node scripts/xqueue-health.mjs
+pnpm next 10
+pnpm post:dry
+```
+
+`pnpm verify` runs tests, content validation, deterministic queue generation from production policy, and schedule health.
+
+Do not commit `queue.json`. A fresh clone must regenerate the same schedule from Markdown plus `config/schedule-policy.json`.
+
+## Scheduler
+
+The scheduler must invoke the explicit live command. **Do not use `node src/cli.mjs post` by itself; that is intentionally a dry-run.**
+
+Example cron entry:
 
 ```cron
-*/15 * * * * cd ~/xqueue && /usr/bin/node src/cli.mjs post >> ~/xqueue/post.log 2>&1
+*/15 * * * * cd /home/patrick/xqueue && /usr/bin/env corepack pnpm post:live >> /home/patrick/xqueue/post.log 2>&1
 ```
 
-Runs every 15 minutes; the tool decides what's actually due and does nothing the
-rest of the time.
-
-## Weekly
+Before installing the cron line, verify the exact executable paths on the production host:
 
 ```bash
-pnpm stats     # remaining count — batch when it drops under 20
-pnpm next 10   # read ahead, edit anything that's gone stale
+command -v node
+command -v corepack
+command -v pnpm || true
+pwd
 ```
 
-Editing is the point. Rewrite posts four days ahead of publication, then
-`pnpm verify` and commit. The queue rebuilds in under a second.
+The tool itself decides whether anything is due. Live mode publishes only the oldest due post in a run, so a machine waking from sleep cannot flush an entire backlog at once.
 
-## Failure modes
+## Daily/weekly checks
 
-**Posts didn't go out overnight.**
-Most likely the Crostini container slept, so cron never fired. Check
-`post.log` — if there are no entries at all, that's the cause. The fix is
-moving the cron command to something always-on: a Cloudflare Worker on a cron
-trigger, a small VPS, or any machine that stays up. The tool is stateless
-apart from `state.json`.
+```bash
+cd /home/patrick/xqueue
+pnpm health
+pnpm stats
+pnpm next 10
+```
 
-**403 on post creation.**
-App permissions were read-only when the access token was generated. Set
-permissions to Read and Write, regenerate the token, update `.env`.
+Before editing or deploying content:
 
-**401 on every call.**
-Usually a stray space or quote in `.env`. `node src/cli.mjs whoami` isolates
-it — if `whoami` fails, it's credentials, not posting.
+```bash
+pnpm verify
+pnpm validate:production
+```
 
-**429 rate limited.**
-The client stops the run rather than retrying, and logs the reset time. At ten
-posts a week you should never see this; if you do, something is looping.
+## Publication state and crash recovery
 
-**Media upload errors.**
-The chunked upload response shape has moved around in the v2 API. Text-only
-posting is unaffected — comment out the figure attachment and keep publishing
-while you fix it. This is the least-proven part of the client.
+### Normal state
 
-**Validation fails after an edit.**
-`pnpm validate` names the post and the rule. Errors block publishing by
-design; fix the post rather than bypassing the check.
+`state.json` records remote post IDs only after X confirms a successful create operation. Writes are atomic.
 
-## Cost
+`pnpm stats` reports any in-flight publication state.
 
-| | |
-|---|---|
-| Post creation | $0.015 |
-| Post with a URL | $0.200 — never do this; links go in a reply |
-| Whole 180-post queue | $2.70 |
-| Monthly at 2/day × 5 days | ~$0.65 |
-| X Premium | $8.00 |
-| **Total** | **~$8.65/mo** |
+### Abandoned `prepared` attempt
 
-Media upload billing isn't separately documented. Check real spend in the
-developer console after week one.
+If the process dies before the create-post phase starts, the next live run can safely clear the `prepared` attempt and retry. No public post could have been created yet.
 
-## What stays manual, permanently
+### Ambiguous create-post outcome
 
-- **Replies.** Thirty minutes a day, typed by hand. Mass automated replies are bannable, and hand-written replies are why the account works.
-- **DMs.** Where the consulting work comes from.
-- **Follows and likes.** Bulk automation of either is explicitly prohibited.
-- **Any response to a specific legal situation.** "I can't advise on specifics — talk to an employment attorney." Every time.
+A network failure or server failure can occur after the request has left the machine but before the X post ID reaches XQueue. In that case XQueue cannot safely infer whether the post exists.
+
+XQueue records the attempt as `needs_reconciliation` and blocks all later live posts.
+
+1. Open the production X account and inspect the timeline.
+2. Compare the queued post text/title with what is visible remotely.
+3. If the post exists, copy its numeric X post ID and run:
+
+```bash
+pnpm reconcile -- --posted <tweet-id>
+```
+
+4. If you have positively verified that the post does not exist, run:
+
+```bash
+pnpm reconcile -- --not-posted
+```
+
+`--not-posted` is an owner-reserved decision. Do not use it merely because the API returned an error; verify the remote account first.
+
+## Common failure modes
+
+### `Publisher lock is already held`
+
+Another live execution is active, or a previous process died while holding the lock. XQueue automatically removes a stale lock only when it can prove the recorded process on the same host no longer exists. Otherwise, inspect the process before taking any manual action.
+
+### Production validation reports missing figures
+
+List the local media inventory:
+
+```bash
+find media -maxdepth 1 -type f -print | sort
+```
+
+Provision the missing figure and rerun:
+
+```bash
+pnpm validate:production
+```
+
+Do not bypass the production media gate.
+
+### `state.json` cannot be parsed
+
+Live publication must stop. Do not delete the file and retry; deletion would erase the local idempotency ledger and could duplicate historical posts. Preserve the file, restore from a known-good copy if available, and reconcile against the X account.
+
+### 401/403
+
+Run:
+
+```bash
+node src/cli.mjs whoami
+```
+
+If identity/authentication fails, fix credentials or app permissions before any live attempt.
+
+### 429
+
+A concrete 429 rejection is treated as not accepted by X and does not create an ambiguous publication record. Do not loop manually; wait for the platform limit to clear.
+
+### Machine slept through scheduled times
+
+When the machine resumes, overdue posts are eligible, but backlog protection publishes only one live post per invocation. Continue normal scheduler runs rather than manually flushing the queue.
+
+## What remains manual
+
+- Replies and conversations.
+- DMs.
+- Follows and likes.
+- Legal advice or responses to individual legal situations.
+- Reconciliation after an ambiguous create-post outcome.
+- Credential provisioning and production scheduler installation.
+
+These are intentionally outside the autonomous publisher boundary.

@@ -7,8 +7,6 @@
 
 import { renderPost } from './parse.mjs';
 
-// --- §7 rule 1: never name your employer. ---------------------------------
-// Extend this list. It is checked case-insensitively against post bodies.
 export const EMPLOYER_BLOCKLIST = [
   'uncle julio',
   'sun holdings',
@@ -17,29 +15,24 @@ export const EMPLOYER_BLOCKLIST = [
   'att stadium',
 ];
 
-// --- §7 rule 2: no claimed customers or pilots. ---------------------------
 export const CLAIM_PATTERNS = [
   /\b(?:our|my) (?:client|customer)s?\b/i,
   /\ba (?:pilot|rollout|deployment) (?:with|at)\b/i,
   /\bwe (?:deployed|rolled out|installed) (?:it )?at\b/i,
   /\b\d+\s+(?:restaurants?|locations?|units?)\s+(?:use|using|are using|have adopted)\b/i,
-  // "vendor case studies read the way they do" is commentary; "our case study" is a claim.
   /\b(?:our|my|a)\s+case study\b/i,
 ];
 
-// --- Platform constraints -------------------------------------------------
-export const LIMIT_FREE = 280;        // no subscription
-export const LIMIT_PREMIUM = 25000;   // X Basic ($3/mo) and up
+export const LIMIT_FREE = 280;
+export const LIMIT_PREMIUM = 25000;
 export const URL_RE = /https?:\/\/\S+|\bwww\.\S+|\b[a-z0-9-]+\.(?:com|net|org|io|co|app|dev)\b/i;
 export const EMOJI_RE = /\p{Extended_Pictographic}/u;
-// X hashtags can't be all-numeric, so "#3" as a list reference is not a hashtag.
 export const HASHTAG_RE = /(?:^|\s)#(?=\w*[a-z])\w+/i;
 
 function normalize(s) {
   return s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Jaccard similarity over word trigrams — catches "substantially similar" posts. */
 function similarity(a, b) {
   const grams = (s) => {
     const w = normalize(s).split(' ');
@@ -58,7 +51,8 @@ export function validate(posts, opts = {}) {
   const {
     premium = true,
     similarityThreshold = 0.35,
-    figuresAvailable = null, // e.g. Set([1,9,14,23]); null disables the check
+    figuresAvailable = null,
+    requireFigures = false,
   } = opts;
 
   const findings = [];
@@ -69,26 +63,21 @@ export function validate(posts, opts = {}) {
   for (const p of posts) {
     const text = renderPost(p);
 
-    // Duplicate IDs
     if (seen.has(p.id)) add('error', p.id, 'unique-id', `Duplicate id, also at ${seen.get(p.id).sourceFile}:${seen.get(p.id).sourceLine}`);
     else seen.set(p.id, p);
 
-    // Empty body
     if (!p.body || p.body.length < 40) add('error', p.id, 'body', 'Body missing or implausibly short');
 
-    // §7 rule 1 — employer names
     for (const name of EMPLOYER_BLOCKLIST) {
       if (text.toLowerCase().includes(name)) {
         add('error', p.id, 'employer-name', `Contains blocked employer reference: "${name}"`);
       }
     }
 
-    // §7 rule 2 — unauthorized customer/pilot claims
     for (const re of CLAIM_PATTERNS) {
       if (re.test(text)) add('error', p.id, 'unauthorized-claim', `Matches claim pattern ${re}`);
     }
 
-    // §7 rule 3 — law posts carry the disclaimer
     if (p.pillar === 'B' && !/not legal advice/i.test(text)) {
       add('error', p.id, 'missing-disclaimer', 'Pillar B post has no disclaimer');
     }
@@ -96,7 +85,6 @@ export function validate(posts, opts = {}) {
       add('warn', p.id, 'stray-disclaimer', 'Non-B post carries a legal disclaimer — check the pillar assignment');
     }
 
-    // Length
     const limit = premium ? LIMIT_PREMIUM : LIMIT_FREE;
     if (text.length > limit) {
       add('error', p.id, 'length', `${text.length} chars exceeds ${limit}`);
@@ -107,27 +95,33 @@ export function validate(posts, opts = {}) {
       add('info', p.id, 'length', `${text.length} chars — long post, requires an active X subscription`);
     }
 
-    // URLs: $0.200 per post vs $0.015, and links suppress reach.
     if (URL_RE.test(p.body)) {
       add('warn', p.id, 'url-in-body', 'Contains a URL — 13x the API cost and a reach penalty. Put links in a reply.');
     }
 
-    // Voice consistency
     if (EMOJI_RE.test(text)) add('warn', p.id, 'emoji', 'Contains emoji — off-voice for this account');
     if (HASHTAG_RE.test(text)) add('warn', p.id, 'hashtag', 'Contains a hashtag — off-voice for this account');
 
-    // Figures. An empty media directory means "not set up on this machine",
-    // not "the figure does not exist" — don't block a build on that.
-    if (p.figure != null && figuresAvailable) {
-      if (figuresAvailable.size === 0) {
-        add('info', p.id, 'figure-unchecked', `References figure ${p.figure}; media directory is empty, not checked`);
+    if (p.figure != null) {
+      if (figuresAvailable === null) {
+        if (requireFigures) {
+          add('error', p.id, 'figure-check-unavailable', `References figure ${p.figure}; media inventory is unavailable`);
+        }
+      } else if (figuresAvailable.size === 0) {
+        add(
+          requireFigures ? 'error' : 'info',
+          p.id,
+          requireFigures ? 'missing-figure' : 'figure-unchecked',
+          requireFigures
+            ? `References figure ${p.figure}, but the media directory is empty`
+            : `References figure ${p.figure}; media directory is empty, not checked`,
+        );
       } else if (!figuresAvailable.has(p.figure)) {
         add('error', p.id, 'missing-figure', `References figure ${p.figure}, which is not in the media directory`);
       }
     }
   }
 
-  // X automation policy: no "duplicative or substantially similar posts".
   for (let i = 0; i < posts.length; i++) {
     for (let j = i + 1; j < posts.length; j++) {
       const s = similarity(posts[i].body, posts[j].body);
