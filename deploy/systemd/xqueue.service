@@ -1,0 +1,15 @@
+[Unit]
+Description=XQueue live publisher
+Documentation=file:%h/xqueue/docs/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/xqueue
+ExecStart=/bin/bash -lc 'exec corepack pnpm post:live'
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
