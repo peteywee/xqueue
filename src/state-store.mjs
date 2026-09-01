@@ -14,6 +14,7 @@ export function emptyState() {
   return {
     version: 1,
     posted: {},
+    skipped: {},
     spend: 0,
     inflight: null,
   };
@@ -38,6 +39,26 @@ export function normalizeState(value) {
     }
   }
 
+  const skipped = value.skipped ?? {};
+  if (!skipped || typeof skipped !== 'object' || Array.isArray(skipped)) {
+    throw new Error('state.json skipped must be an object');
+  }
+
+  for (const [postId, record] of Object.entries(skipped)) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      throw new Error(`state.json skipped.${postId} must be an object`);
+    }
+    if (!record.at || typeof record.at !== 'string') {
+      throw new Error(`state.json skipped.${postId}.at must be a non-empty string`);
+    }
+    if (!record.reason || typeof record.reason !== 'string') {
+      throw new Error(`state.json skipped.${postId}.reason must be a non-empty string`);
+    }
+    if (posted[postId]) {
+      throw new Error(`state.json ${postId} cannot be both posted and skipped`);
+    }
+  }
+
   const spend = value.spend ?? 0;
   if (!Number.isFinite(spend) || spend < 0) {
     throw new Error('state.json spend must be a non-negative finite number');
@@ -54,12 +75,16 @@ export function normalizeState(value) {
     if (!['prepared', 'publishing', 'needs_reconciliation'].includes(inflight.status)) {
       throw new Error(`state.json inflight.status is invalid: ${inflight.status}`);
     }
+    if (posted[inflight.postId] || skipped[inflight.postId]) {
+      throw new Error(`state.json inflight ${inflight.postId} cannot also be posted or skipped`);
+    }
   }
 
   return {
     ...value,
     version: 1,
     posted,
+    skipped,
     spend,
     inflight,
   };
