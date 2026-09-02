@@ -6,6 +6,9 @@ import {
   renderWorkerManifest,
   sanitizeManifest,
 } from '../scripts/build-cloudflare-media-manifest.mjs';
+import {
+  MEDIA_MANIFEST_CONFIGURED,
+} from '../cloudflare/generated/media-manifest.mjs';
 import { decodeBundledQueue } from '../cloudflare/src/queue-integrity.mjs';
 import {
   evaluateAuthorityReadiness,
@@ -90,7 +93,7 @@ test('mirrored ledger read is exact JSON evidence and never mutates D1', async (
   assert.deepEqual(result.ledger, ledger);
 });
 
-test('authority readiness stays unauthorized and fails closed until real media evidence is generated', async () => {
+test('authority readiness stays unauthorized and fails closed across the media-evidence transition', async () => {
   const result = await evaluateAuthorityReadiness(
     {
       DB: readinessDb(),
@@ -107,7 +110,17 @@ test('authority readiness stays unauthorized and fails closed until real media e
   assert.equal(result.gates.eligibility, true);
   assert.equal(result.gates.leaseSchema, true);
   assert.equal(result.gates.media, false);
-  assert.equal(result.media.reason, 'media_manifest_not_configured');
+
+  // Before the real manifest is pinned, the media gate must refuse because there is no evidence.
+  // After it is pinned, this deliberately empty/non-R2 test binding must still fail closed rather
+  // than converting configuration into authority. The same regression test therefore protects
+  // both sides of the milestone transition.
+  assert.equal(
+    result.media.reason,
+    MEDIA_MANIFEST_CONFIGURED
+      ? 'r2_unreachable'
+      : 'media_manifest_not_configured',
+  );
 });
 
 test('Worker health exposes readiness without converting it into authority', async () => {
