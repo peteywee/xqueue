@@ -26,7 +26,7 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh deploy/install-systemd-user.sh && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
+    "verify": "bash -n scripts/production-preflight.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
