@@ -256,6 +256,7 @@ export async function runScheduledPublication(
 
   let client = null;
   let publishingSnapshot = null;
+  let activeLease = null;
 
   const result = await simulate(
     {
@@ -271,11 +272,13 @@ export async function runScheduledPublication(
 
       acquireLease: async () => {
         const identity = createPublicationLeaseIdentity();
-        return acquireLease(env.DB, {
+        const acquired = await acquireLease(env.DB, {
           ...identity,
           ttlMs: LEASE_TTL_MS,
           nowMs: Date.now(),
         });
+        activeLease = acquired?.acquired ? acquired.lease : null;
+        return acquired;
       },
 
       verifyLease: async (lease) =>
@@ -316,16 +319,15 @@ export async function runScheduledPublication(
             throw safeTransportError(error, 'pre_dispatch');
           }
 
-          const leaseStillCurrent = await verifyLease(
-            env.DB,
-            arguments[0]?.input?.lease ?? null,
-            { nowMs: Date.now() },
-          ).catch(() => false);
+          const leaseStillCurrent = activeLease
+            ? await verifyLease(env.DB, activeLease, { nowMs: Date.now() }).catch(() => false)
+            : false;
 
-          // The simulation harness performs the authoritative pre-dispatch lease check.
-          // This branch is intentionally not used as evidence because the harness does not
-          // expose the lease handle through dispatchPost input.
-          void leaseStillCurrent;
+          if (!leaseStillCurrent) {
+            const error = new Error('lease fenced after media upload');
+            error.code = 'LEASE_FENCED_AFTER_MEDIA';
+            throw safeTransportError(error, 'pre_dispatch');
+          }
         }
 
         try {
