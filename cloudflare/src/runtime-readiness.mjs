@@ -1,10 +1,11 @@
 // runtime-readiness.mjs — read-only composition of the Cloudflare runtime lanes.
 //
-// This module is evidence, not authority. It never writes D1/R2, never calls X, and never grants
-// publication permission. It answers a narrower question: are the queue, mirrored local ledger,
-// media evidence, eligibility port, and lease schema all presently coherent enough that a future
-// authority-transfer milestone could continue evaluating them?
+// This module is evidence, not publication machinery. It never writes D1/R2 and never calls X.
+// It answers whether queue, mirrored ledger, media, eligibility and lease evidence are coherent.
+// Publication authority is reported only when those technical gates pass AND the exact runtime
+// authority flag is present; missing or malformed authority always fails closed.
 
+import { publicationAuthorityEnabled } from './authority-config.mjs';
 import { evaluateEligibility } from './eligibility.mjs';
 import { verifyMediaObjects } from './media-verify.mjs';
 import { inspectPublicationLease } from './publication-lease.mjs';
@@ -159,14 +160,18 @@ export async function evaluateAuthorityReadiness(env, { now = new Date() } = {})
   };
 
   const ok = Object.values(gates).every(Boolean);
+  const authorityFlag = publicationAuthorityEnabled(env);
+  const authorized = ok && authorityFlag;
 
   return {
     ok,
-    // This milestone never authorizes Cloudflare publication, even when every technical gate passes.
-    authorized: false,
+    authorized,
     readOnly: true,
-    reason: ok ? null : 'authority_readiness_incomplete',
+    reason: ok
+      ? (authorized ? null : 'authority_not_enabled')
+      : 'authority_readiness_incomplete',
     gates,
+    authorityFlag,
     mirroredLedger: {
       ok: mirroredLedger.ok,
       reason: mirroredLedger.reason,
