@@ -13,10 +13,18 @@
 //   * idempotent — the same bytes go to the same keys, so a re-run is a no-op in effect
 //   * NEVER deletes, prunes, syncs or mirrors; there is no such mode and there never should be
 //   * DEFAULTS TO DRY RUN; a real upload requires an explicit --confirm
+//   * post-upload verification downloads the remote bytes read-only and re-hashes them locally
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -63,6 +71,20 @@ export function uploadCommand(object) {
   ];
 }
 
+/** The exact read-only argv used to fetch remote bytes for independent verification. */
+export function downloadCommand(object, destination) {
+  return [
+    'wrangler',
+    'r2',
+    'object',
+    'get',
+    `${BUCKET}/${object.r2Key}`,
+    '--file',
+    destination,
+    '--remote',
+  ];
+}
+
 /** Re-hashes each local source and compares it to the manifest. Any drift aborts everything. */
 export function checkLocalSources(manifest, { root = ROOT } = {}) {
   const problems = [];
@@ -94,23 +116,61 @@ export function checkLocalSources(manifest, { root = ROOT } = {}) {
   return { ok: problems.length === 0, problems };
 }
 
-/** Read-only post-upload check, via `wrangler r2 object get --info`. Never mutates. */
-function verifyUploaded(object) {
-  const argv = [
-    'r2',
-    'object',
-    'get',
-    `${BUCKET}/${object.r2Key}`,
-    '--info',
-    '--remote',
-  ];
-  const result = spawnSync('wrangler', argv, { encoding: 'utf8', stdio: 'pipe' });
+/** Pure verification of bytes fetched back from R2. */
+export function verifyRemoteBytes(object, bytes) {
+  const byteSize = bytes.byteLength;
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const sizeMatch = byteSize === object.byteSize;
+  const hashMatch = sha256 === object.sha256;
+
   return {
-    r2Key: object.r2Key,
-    ok: result.status === 0,
-    status: result.status,
-    output: (result.stdout ?? '') + (result.stderr ?? ''),
+    byteSize,
+    sha256,
+    sizeMatch,
+    hashMatch,
+    ok: sizeMatch && hashMatch,
+    reason: !sizeMatch ? 'size_mismatch' : !hashMatch ? 'hash_mismatch' : null,
   };
+}
+
+/**
+ * Read-only post-upload verification. Wrangler downloads the exact remote object to an isolated
+ * temporary file; this process then verifies byte size and SHA-256 against the manifest.
+ */
+function verifyUploaded(object) {
+  const verifyDir = mkdtempSync(join(tmpdir(), 'xqueue-r2-verify-'));
+  const destination = join(verifyDir, 'object.bin');
+
+  try {
+    const [, ...argvRest] = downloadCommand(object, destination);
+    const result = spawnSync('wrangler', argvRest, {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+
+    const output = (result.stdout ?? '') + (result.stderr ?? '');
+
+    if (result.status !== 0 || !existsSync(destination)) {
+      return {
+        r2Key: object.r2Key,
+        ok: false,
+        reason: 'download_failed',
+        status: result.status,
+        output,
+      };
+    }
+
+    const verification = verifyRemoteBytes(object, readFileSync(destination));
+
+    return {
+      r2Key: object.r2Key,
+      status: result.status,
+      output,
+      ...verification,
+    };
+  } finally {
+    rmSync(verifyDir, { recursive: true, force: true });
+  }
 }
 
 export function parseArgs(argv) {
@@ -196,21 +256,24 @@ function main() {
     return;
   }
 
-  console.log('\nVerifying uploaded objects (read-only)…');
+  console.log('\nVerifying uploaded objects by downloading and re-hashing remote bytes (read-only)…');
   const unverified = [];
   for (const object of manifest.objects) {
     const check = verifyUploaded(object);
-    console.log(`  ${check.ok ? 'ok     ' : 'FAILED '} ${check.r2Key}`);
-    if (!check.ok) unverified.push(check.r2Key);
+    console.log(
+      `  ${check.ok ? 'ok     ' : 'FAILED '} ${check.r2Key}` +
+        (check.reason ? ` (${check.reason})` : ''),
+    );
+    if (!check.ok) unverified.push(`${check.r2Key}: ${check.reason ?? 'unverified'}`);
   }
 
   if (unverified.length > 0) {
-    console.error(`r2-media-upload: post-upload verification failed for: ${unverified.join(', ')}`);
+    console.error(`r2-media-upload: post-upload verification failed for:\n  - ${unverified.join('\n  - ')}`);
     process.exitCode = 1;
     return;
   }
 
-  console.log(`\nAll ${manifest.objects.length} object(s) uploaded and verified. Nothing was deleted.`);
+  console.log(`\nAll ${manifest.objects.length} object(s) uploaded and byte-verified. Nothing was deleted.`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
