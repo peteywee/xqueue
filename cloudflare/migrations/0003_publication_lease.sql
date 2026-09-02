@@ -107,6 +107,7 @@ WHEN
     NEW.acquisition_id IS NOT NULL AND
     (
       OLD.owner_token IS NULL OR
+      OLD.acquired_at_ms <> NEW.acquired_at_ms OR
       OLD.acquisition_id <> NEW.acquisition_id
     )
 BEGIN
