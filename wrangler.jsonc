@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xqueue-production",
+  "main": "cloudflare/src/worker.mjs",
+  "compatibility_date": "2026-09-02",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xqueue-production",
+      "database_id": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
+      "migrations_dir": "cloudflare/migrations",
+      "preview_database_id": "f5f9bea9-e88c-41ab-9407-70356079a638"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "xqueue-media"
+    }
+  ],
+  "triggers": {
+    "crons": []
+  }
+}
