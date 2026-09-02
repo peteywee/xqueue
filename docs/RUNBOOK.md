@@ -9,6 +9,7 @@ XQueue is deliberately fail-closed:
 - `queue.json` is generated locally and is never committed.
 - `state.json` is the durable publication ledger and is never committed.
 - Posted, owner-skipped, and in-flight posts are distinct states.
+- Production policy may explicitly defer exact post IDs to the rotation tail without marking them posted or skipped.
 - Live publication requires the explicit `--live` path.
 - A live run publishes at most one overdue post.
 - Concurrent live publishers are blocked by `.xqueue-publish.lock`.
@@ -170,7 +171,27 @@ pnpm next 10
 pnpm post:dry
 ```
 
-For each stale post, make an explicit owner decision. If the post should still publish, leave it unresolved and do not enable the scheduler until you deliberately decide how to handle the timing. If it should **not** be published because its window was missed, record that decision rather than pretending it was posted:
+For each stale post, make an explicit owner decision.
+
+### Defer a missed post to the rotation tail
+
+If the post should still publish but should **not** be backfilled immediately, encode the exact post ID under `deferToEnd` in `config/schedule-policy.json`. Production queue generation then leaves every other post on its existing date/time and reschedules only the named post after the normal campaign tail.
+
+The production queue must be regenerated from policy rather than edited by hand:
+
+```bash
+pnpm build:production
+pnpm health
+pnpm runtime:health
+```
+
+A valid tail deferral remains unresolved in `state.json`; only its scheduled date changes. It is not recorded as posted or skipped. Schedule health verifies that the exact configured IDs are the final queue entries and that only policy-approved partial posting days exist.
+
+Do not use tail deferral to hide an ambiguous remote publication. If X may already have accepted the post, use reconciliation instead.
+
+### Permanently skip a missed post
+
+If a post should **not** be published because its window was missed, record that decision rather than pretending it was posted:
 
 ```bash
 pnpm skip -- A1 --reason "missed during production hardening; do not backfill"
@@ -241,7 +262,7 @@ Do not bypass the production media gate.
 
 ### Runtime health reports stale backlog
 
-Do not simply enable the scheduler and let it catch up. Review each stale item and either retain it for deliberate publication or record an owner skip with a reason. Re-run `pnpm runtime:health` until the stale backlog is zero.
+Do not simply enable the scheduler and let it catch up. Review each stale item and either defer it explicitly to the rotation tail, retain it for another deliberate publication plan, or record an owner skip with a reason. Re-run `pnpm runtime:health` until the stale backlog is zero.
 
 ### `state.json` cannot be parsed
 
@@ -270,7 +291,7 @@ A short delay inside the runtime grace window is allowed. Once unresolved posts 
 - Follows and likes.
 - Legal advice or responses to individual legal situations.
 - Reconciliation after an ambiguous create-post outcome.
-- Explicit disposition of stale backlog.
+- Explicit disposition of stale backlog, including approval of tail deferrals.
 - Credential provisioning.
 - Choosing and installing exactly one production scheduler authority.
 

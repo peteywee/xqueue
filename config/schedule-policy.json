@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "campaignStart": "2026-08-31",
   "timezone": "America/Chicago",
   "slots": [
@@ -15,5 +15,14 @@
   ],
   "postsPerDay": 2,
   "expectedPosts": 180,
-  "expectedPostingDays": 90
+  "expectedPostingDays": 91,
+  "deferToEnd": [
+    "B1",
+    "A30",
+    "C1"
+  ],
+  "allowedPartialPostingDays": {
+    "2026-08-31": 1,
+    "2027-01-05": 1
+  }
 }
