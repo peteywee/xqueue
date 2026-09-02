@@ -21,6 +21,7 @@
     "health": "node scripts/xqueue-health.mjs",
     "runtime:health": "node src/cli.mjs runtime-health",
     "preflight:production": "bash scripts/production-preflight.sh",
+    "parity:eligibility": "node scripts/build-eligibility-parity-matrix.mjs",
     "post": "node src/cli.mjs post --dry-run",
     "post:dry": "node src/cli.mjs post --dry-run",
     "post:live": "node src/cli.mjs post --live",
