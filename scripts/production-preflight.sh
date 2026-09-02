@@ -181,6 +181,34 @@ if command -v systemctl >/dev/null 2>&1; then
       scheduler_bad=1
     fi
 
+    if grep -Fq 'EnvironmentFile=%h/.config/xqueue/runtime.env' <<< "$unit_text" && \
+       grep -Fq 'check-runtime.sh' <<< "$unit_text"; then
+      pass 'systemd xqueue.service pins and prechecks its runtime'
+    else
+      fail 'systemd xqueue.service does not pin and precheck its Node runtime'
+      scheduler_bad=1
+    fi
+
+    runtime_env="$HOME/.config/xqueue/runtime.env"
+    runtime_check="$ROOT/deploy/systemd/check-runtime.sh"
+    if [[ -r "$runtime_env" && -f "$runtime_check" ]]; then
+      if (
+        set -a
+        # shellcheck disable=SC1090
+        source "$runtime_env"
+        set +a
+        /bin/bash "$runtime_check"
+      ); then
+        pass 'installed systemd runtime satisfies production requirements'
+      else
+        fail 'installed systemd runtime is invalid or incompatible'
+        scheduler_bad=1
+      fi
+    else
+      fail 'systemd runtime.env or runtime checker is missing'
+      scheduler_bad=1
+    fi
+
     printf '\nxqueue.timer status:\n'
     systemctl --user status xqueue.timer --no-pager 2>/dev/null || true
   fi
@@ -189,7 +217,7 @@ fi
 if (( scheduler_found == 0 )); then
   warn 'no active xqueue cron entry or xqueue.service was detected'
 elif (( scheduler_bad == 0 )); then
-  pass 'detected scheduler configuration is live-enabled explicitly'
+  pass 'detected scheduler configuration is live-enabled explicitly with a verified runtime'
 fi
 
 section 'RESULT'
