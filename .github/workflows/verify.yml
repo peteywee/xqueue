@@ -40,6 +40,9 @@ jobs:
       - name: Verify
         run: pnpm verify
 
+      - name: Assert the Cloudflare authority boundary is intact
+        run: node scripts/authority-boundary-audit.mjs
+
       - name: Assert queue generation is portable
         shell: bash
         run: |

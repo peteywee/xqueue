@@ -20,6 +20,7 @@
     "stats": "node src/cli.mjs stats",
     "next": "node src/cli.mjs next",
     "health": "node scripts/xqueue-health.mjs",
+    "audit:authority": "node scripts/authority-boundary-audit.mjs",
     "media:requirements": "node scripts/build-media-requirements.mjs",
     "media:manifest": "node scripts/build-media-manifest.mjs",
     "media:upload": "node scripts/r2-media-upload.mjs",
@@ -32,7 +33,7 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs"
+    "verify": "bash -n scripts/production-preflight.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",

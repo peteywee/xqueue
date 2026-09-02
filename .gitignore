@@ -13,6 +13,7 @@ post.log
 media/*
 !media/.gitkeep
 
+.wrangler/
 node_modules/
 
 # npm is not used here — the preinstall guard rejects it,
