@@ -9,7 +9,7 @@ Type=oneshot
 WorkingDirectory=%h/xqueue
 EnvironmentFile=%h/.config/xqueue/runtime.env
 ExecStartPre=/bin/bash %h/xqueue/deploy/systemd/check-runtime.sh
-ExecStart=/bin/bash -c 'exec "$XQUEUE_COREPACK" pnpm post:live'
+ExecStart=/bin/bash -c 'exec "$$XQUEUE_COREPACK" pnpm post:live'
 NoNewPrivileges=true
 PrivateTmp=true
 
