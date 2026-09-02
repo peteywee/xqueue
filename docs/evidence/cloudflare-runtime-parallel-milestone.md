@@ -23,7 +23,7 @@
 Baseline: `707d71edf037e3a90525d29b44f2bbfd8b8992dc`
 Lanes executed by this session: A (issue #8), C (issue #10), D (issue #11)
 Lane B (issue #9) was delivered outside this session, then verified and integrated here.
-Integration candidate: `150f8bb260bf6247fd57a4aa59628217a7c8b037`.
+Integration candidate: `2ddfa1f96aa5d657e664120f77a3c7df0ce9d06d`.
 
 Every row below carries a truth state. `verified` means a command was run at the stated SHA in this
 session and its output observed. `unknown` means it was not established — it is never inferred.
@@ -34,9 +34,9 @@ session and its output observed. `unknown` means it was not established — it i
 |---|---|---|---|
 | B — D1 publication lease + concurrency | `cf-runtime-lease` | `d55cb37a78b3814af6975f4995c691d0cc5be903` | verified |
 | A — queue bundle + hash parity | `cf-runtime-bundle-hash` | `43464e119dfe03ce44a5155219367d31de5e4fd9` | verified |
-| C — read-only eligibility parity | `cf-runtime-eligibility` | `f298d1ffa8f2c514cb74ea0dc4113610c1205925` | verified |
+| C — read-only eligibility parity | `cf-runtime-eligibility` | `3ddea5308b43dc664451ffb8c692282f69d4c83b` | verified |
 | D — R2 media inventory + parity | `cf-runtime-media` | `9a73b2a403c21cfbcf2415e88ba47504a2091295` | verified |
-| Integration | `cf-runtime-integration` | `150f8bb260bf6247fd57a4aa59628217a7c8b037` | verified |
+| Integration | `cf-runtime-integration` | `2ddfa1f96aa5d657e664120f77a3c7df0ce9d06d` | verified |
 
 ## Canonical queue facts
 
@@ -206,20 +206,87 @@ resolution was required, because the lanes own disjoint files.
 
 | Evidence | Result | Truth state |
 |---|---|---|
-| Repository tests | 242 pass, 0 fail | verified |
-| Test arithmetic | 94 baseline + 55 A + 38 C + 44 D + 11 B = 242 — nothing lost or duplicated | verified |
+| Repository tests | 264 pass, 0 fail | verified |
+| Test arithmetic | 242 at `150f8bb`, independently re-derived per file; +22 adversarial = 264 | verified |
 | Authority gates | 11/11 intact | verified |
 | Wrangler dry-run | exit 0; 169.06 KiB, gzip 45.17 KiB; bindings D1 + R2 only; zero cron mentions | verified |
 | `wrangler.jsonc` `triggers.crons` | `[]`, count 0 | verified |
 | Queue bundle regeneration | byte-identical | verified |
 | Media requirements regeneration | byte-identical | verified |
-| Eligibility parity matrix | 32/32 PASS, exit 0, committed artifact byte-fresh | verified |
+| Eligibility parity matrix | 40/40 PASS, exit 0, committed artifact byte-fresh | verified |
 | Queue integrity vs real D1 sha | `ok: true`, 180/180, exact deferred tail | verified |
 | Media manifest with empty `media/` | exit 1, nothing written | verified |
 | `package.json` after merge | all five lane scripts present; `post:live` intact | verified |
 
 A clean merge was not treated as a correct merge: `package.json` was checked semantically to confirm
 every lane's added script survived and that `post:live` was unchanged.
+
+
+## Adversarial and independent verification (the gaps from the first pass, now closed)
+
+Both passes that a session rate limit killed were re-run against the integrated candidate. Each found a
+real defect that the builders' own passing tests did not.
+
+### CRITICAL — the dangerous parity direction existed, and is fixed
+
+Lane C's whole safety argument was that Cloudflare can only ever *withhold* relative to local, never
+publish something local would refuse. That was false. Reproduced independently by the lane lead against
+both the pre-fix and post-fix modules:
+
+    queue  = [{ id:'P1', scheduledDate:'2026-09-01', scheduledTime:'14:30', timezone:'America/Chicago' }]
+    ledger = { version:1, posted:{}, spend:0, inflight:null,
+               skipped: { constructor: { at:'…', reason:'operator skip' } } }
+    now    = 2026-09-01T19:40:00.000Z
+
+    LOCAL      : REFUSES -> "state.json constructor cannot be both posted and skipped"
+    CLOUDFLARE : safeToPublish=true  selected=["P1"]  failures=[]   (before the fix)
+    CLOUDFLARE : safeToPublish=false selected=[]      failures=["malformed_ledger"]  (after)
+
+Root cause, and the reason it survived review: `src/state-store.mjs` decides membership by
+**truthiness** — `if (posted[postId])` — which is true for every inherited `Object.prototype` member,
+so local caught `constructor` as "both posted and skipped" and threw. The port used the more
+correct-looking `Object.prototype.hasOwnProperty.call(...)`, which is false, and sailed past. The
+sloppier check was the safer one. Reproduced for `constructor`, `toString`, `valueOf`,
+`hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString`, `__defineGetter__`.
+Both membership tests now mirror `normalizeState` exactly. Two further defects in the same direction
+were fixed: a sparse queue threw out of a "never throws" entry point (`Array.prototype.every` skips
+holes), and `now` was accepted as a number, string or duck-typed object where `analyzeRuntime` throws.
+
+Truth state of "Cloudflare can only withhold relative to local": `verified` at `2ddfa1f`, having been
+`unknown` and in fact false before it.
+
+### The authority gate was enforced by nothing
+
+Independent verification found `scripts/authority-boundary-audit.mjs` — the script this record cites as
+proof of the authority boundary — was referenced by no npm script and no workflow. It passed 11/11 by
+hand and rejected every injected attack, while a later commit enabling cron or writing the publication
+ledger would have passed CI unchallenged. A gate nobody runs is not a gate.
+
+It now runs as `pnpm audit:authority`, at the end of `pnpm verify`, and as an explicit step in both
+`verify.yml` and `xqueue-integrity.yml`.
+
+Two evasions of its SQL gates were also found and closed: the upsert exemption skipped the whole line
+on seeing `DO UPDATE SET`, so the marker could cloak a real write; and the per-line scan missed a table
+name on the following line. Both now break the audit with exit 1, all seven original injections still
+do, and lane B's legitimate `publication_leases` upsert still passes. Two limits are documented in the
+script rather than implied: it scans Worker source only, and static analysis cannot follow an
+interpolated table name.
+
+### Independent verification result at `150f8bb`
+
+All 13 claims put to the verifier were VERIFIED, including: three independent SHA-256 derivations
+agreeing (own regeneration, bundle declaration, live D1 read with `rows_written: 0`); a self-built
+forgery with a colluding D1 mirror rejected as `bundle_canonical_sha_mismatch`; 220 hostile envs
+against the queue gate and 285 against media with zero incorrect `ok: true`; and zero Worker invariant
+violations across 12 fake envs. One correction to an earlier claim in this record: `verifyQueueIntegrity`
+is not literally throw-proof — a hostile Proxy passed as the *test-only* `overrides` second argument
+throws. `cloudflare/src/worker.mjs` calls it with one argument, so it is unreachable in production; the
+operative property (never throws on adversarial `env`) holds.
+
+Mutation coverage of the parity matrix was measured rather than assumed: 43 mutants, 35 killed by the
+matrix (up from 25 of 37), the survivors either structurally unmatchable, covered by unit tests, or
+proven equivalent — including a sweep of 16,257,024 wall clocks across 36 zones showing 2 and 4
+correction passes always agree.
 
 ## Authority boundary
 
@@ -268,15 +335,13 @@ Live D1 access was exercised read-only. The Worker's exact parameterised stateme
 
 These are stated rather than omitted. None were worked around.
 
-1. **Independent verification did not complete for Lane A.** The verifier subagent terminated on a
-   session rate limit before producing a report. The Lane A findings above were reproduced by the
-   lane lead, who did not author the code but is not an independent verifier. Truth state of
-   "Lane A independently verified": `unknown`.
-2. **The Lane C adversarial pass did not run.** Its subagent terminated on the same rate limit having
-   committed nothing. Lane C has had no adversarial review. In particular, the dangerous parity
-   direction — local refuses but Cloudflare accepts — has not been searched. Truth state: `unknown`.
+1. **CLOSED.** Independent verification ran against `150f8bb`; all 13 claims VERIFIED. The delta since
+   then is two commits (the CI/gate fix and the Lane C merge), verified mechanically by the lane lead
+   but not re-covered by that independent pass.
+2. **CLOSED, and it found a critical defect.** See the adversarial section above.
 3. **The Lane D adversarial pass was interrupted.** Its uncommitted work was reviewed, validated and
-   committed by the lane lead. That is weaker than independent adversarial review.
+   committed by the lane lead. That is weaker than independent adversarial review, and remains the
+   weakest-reviewed lane. Truth state: `unknown`.
 4. **Lanes C and D are not wired into the Worker.** `worker.mjs` is owned by Lane A, so
    `eligibility.mjs` and `media-verify.mjs` are not imported and therefore do not appear in the
    dry-run bundle (Lane C and D bundles are 2.07 KiB, unchanged from baseline; Lane A is 169.06 KiB).
@@ -288,9 +353,11 @@ These are stated rather than omitted. None were worked around.
    the concurrency gates by name, and this session confirmed its write targets, test result and
    authority compliance — but no adversarial pass was run against it in this session. Truth state:
    `unknown`.
-7. **Migration `0003_publication_lease.sql` has not been applied to any D1 database** by this session.
-   The lease is verified in tests against in-memory stubs only. Truth state of "lease works against
-   real D1": `unknown`.
+7. **Migration `0003_publication_lease.sql` is NOT applied to production D1.** Confirmed by live
+   read-only query: `sqlite_master` on `fc85026e-…` lists only `_cf_KV`, `d1_migrations`,
+   `publication_events`, `publication_state`, `runtime_metadata`, `sqlite_sequence`. Neither
+   `publication_leases` nor `publication_lease_events` exists. Lane B is code-complete but
+   non-functional against the real mirror. Truth state: `verified` that it is not applied.
 8. **Only Lane A's module is reachable from the deployed Worker.** `/health` calls
    `verifyQueueIntegrity`; `eligibility.mjs`, `media-verify.mjs` and `publication-lease.mjs` are not
    imported by `worker.mjs` and therefore are not in the deployed bundle. Wiring them is a later
@@ -304,11 +371,10 @@ no X credentials, no live publication path, D1 and R2 access read-only. No lane 
 
 ## Next action
 
-One named, dependency-ready next action: **run the outstanding adversarial and independent
-verification passes against the integrated candidate `150f8bb`** — specifically the Lane C adversarial
-pass that never ran (hunting the direction where local refuses but Cloudflare accepts), and an
-independent verifier for Lane A that did not complete. Both terminated on a session rate limit, not on
-a technical blocker, so both are re-runnable as-is.
+One named, dependency-ready next action: **run an independent adversarial pass against Lane D**, now
+the weakest-reviewed lane — its own adversarial pass was interrupted and finished by the lane lead, so
+no independent party has tried to break the R2 verifier. The two lanes that did get an independent
+adversarial pass each yielded a real defect, so the prior is not that Lane D is clean.
 
 Decision required from the owner: none for this milestone. Nothing here transfers publication
 authority. `cf-runtime-integration` must not be merged, must not become an authority-transfer
