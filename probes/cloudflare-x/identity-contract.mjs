@@ -11,18 +11,30 @@ function fail(message) {
   throw error;
 }
 
+function readBindingValue(env, name) {
+  try {
+    return env?.[name];
+  } catch {
+    fail(`Unable to read X binding: ${name}`);
+  }
+}
+
 export function readXBindings(env = {}) {
-  const missing = X_BINDING_NAMES.filter((name) => {
-    const value = env[name];
-    return typeof value !== 'string' || value.length === 0;
-  });
+  const values = new Map();
+  const missing = [];
+
+  for (const name of X_BINDING_NAMES) {
+    const value = readBindingValue(env, name);
+    if (typeof value !== 'string' || value.length === 0) missing.push(name);
+    else values.set(name, value);
+  }
 
   if (missing.length) {
     fail(`Missing required X binding(s): ${missing.join(', ')}`);
   }
 
   return Object.freeze(Object.fromEntries(
-    X_BINDING_NAMES.map((name) => [name, env[name]]),
+    X_BINDING_NAMES.map((name) => [name, values.get(name)]),
   ));
 }
 
@@ -62,7 +74,14 @@ export function assertExpectedIdentity(identity, expected = {}) {
 
 export async function probeReadOnlyIdentity({ getMe, expected }) {
   if (typeof getMe !== 'function') fail('Read-only identity probe requires getMe');
-  const response = await getMe();
+
+  let response;
+  try {
+    response = await getMe();
+  } catch {
+    fail('X identity probe failed');
+  }
+
   const identity = sanitizeIdentityEvidence(response);
   return assertExpectedIdentity(identity, expected);
 }
