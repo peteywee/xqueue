@@ -18,6 +18,20 @@ import {
 export const EXPECTED_QUEUE_COUNT = 180;
 
 /**
+ * SHA-256 of the canonical production queue bytes
+ *     JSON.stringify(queue, null, 2) + "\n"   , UTF-8
+ * pinned here so the gate compares the bundle against a fixed known-good value
+ * rather than only against the bundle's own self-declared hash. Without this a
+ * regenerated-but-wrong bundle whose declared sha and D1 mirror both agree with
+ * the tampered content would satisfy every other check.
+ *
+ * Regenerating the queue from changed content REQUIRES updating this constant,
+ * exactly as it requires updating EXPECTED_QUEUE_COUNT.
+ */
+export const EXPECTED_QUEUE_SHA256 =
+  '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1';
+
+/**
  * The exact deferred rotation tail, asserted independently of the bundle so a
  * regenerated-but-wrong bundle cannot redefine what "correct" means.
  */
@@ -100,10 +114,14 @@ function tailRow(post) {
 }
 
 function sameTail(actual, expected) {
+  // `actual` may come straight from a bundle declaration, so it can be
+  // anything at all. Never let a non-array shape throw out of the gate.
+  if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
   if (actual.length !== expected.length) return false;
 
   return actual.every((row, index) => {
     const want = expected[index];
+    if (!row || typeof row !== 'object') return false;
     return (
       row.id === want.id &&
       row.scheduledDate === want.scheduledDate &&
@@ -178,7 +196,13 @@ export async function readD1QueueMetadata(env) {
 
   const result = await bound.all();
   const rows = Array.isArray(result) ? result : (result?.results ?? []);
-  const metadata = {};
+
+  // Null prototype on purpose. A plain {} would let a row keyed '__proto__'
+  // rewrite the prototype chain, so that a lookup of 'queue.sha256' could
+  // resolve to an INHERITED value while no such row exists. It would equally
+  // let Object.prototype pollution originating anywhere else in the isolate
+  // masquerade as D1 evidence. Only own properties may count as evidence.
+  const metadata = Object.create(null);
 
   for (const row of rows) {
     if (row && typeof row.key === 'string') {
@@ -190,18 +214,47 @@ export async function readD1QueueMetadata(env) {
 }
 
 /**
+ * Strict reading of the D1 `queue.count` value. Returns a number only for a
+ * canonical non-negative integer; anything else (padded, hex, exponent form,
+ * boolean, array, object with a valueOf) returns null so the caller fails
+ * closed instead of accepting a coerced value from a malformed mirror.
+ */
+function parseD1Count(raw) {
+  if (typeof raw === 'number') {
+    return Number.isSafeInteger(raw) ? raw : null;
+  }
+
+  if (typeof raw === 'bigint') {
+    return raw >= 0n && raw <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(raw)
+      : null;
+  }
+
+  if (typeof raw === 'string' && /^(?:0|[1-9][0-9]*)$/.test(raw)) {
+    return Number(raw);
+  }
+
+  return null;
+}
+
+/**
  * The fail-closed gate. NEVER throws; always returns a verdict object whose
  * `ok` defaults to false. Absence of evidence is never ok.
  */
 export async function verifyQueueIntegrity(env, overrides = {}) {
   const declaredSha256 = overrides.declaredSha256 ?? DECLARED_QUEUE_SHA256;
   const declaredCount = overrides.declaredCount ?? DECLARED_QUEUE_COUNT;
+  const declaredDeferredTail =
+    'declaredDeferredTail' in overrides
+      ? overrides.declaredDeferredTail
+      : DECLARED_DEFERRED_TAIL;
 
   const verdict = {
     ok: false,
     reason: null,
     computedSha256: null,
     declaredSha256,
+    expectedSha256: EXPECTED_QUEUE_SHA256,
     d1Sha256: null,
     count: null,
     uniqueIdCount: null,
@@ -243,6 +296,22 @@ export async function verifyQueueIntegrity(env, overrides = {}) {
     return verdict;
   }
 
+  // The bundle's own DECLARED_DEFERRED_TAIL must state the truth too. Without
+  // this the constant is decorative: a bundle could ship a tail declaration
+  // that contradicts the queue it carries and nothing would notice.
+  if (!sameTail(declaredDeferredTail, EXPECTED_DEFERRED_TAIL)) {
+    verdict.reason = 'bundle_declared_tail_mismatch';
+    return verdict;
+  }
+
+  // Last bundle check, and the strongest: the queue must be THE canonical
+  // queue, not merely a self-consistent one. Kept after the structural checks
+  // so their more specific reason codes still win when they apply.
+  if (integrity.sha256 !== EXPECTED_QUEUE_SHA256) {
+    verdict.reason = 'bundle_canonical_sha_mismatch';
+    return verdict;
+  }
+
   let metadata;
 
   try {
@@ -268,8 +337,12 @@ export async function verifyQueueIntegrity(env, overrides = {}) {
 
   const rawD1Count = metadata?.[D1_COUNT_KEY];
 
-  if (rawD1Count !== undefined && rawD1Count !== null && `${rawD1Count}` !== '') {
-    if (Number(rawD1Count) !== integrity.count) {
+  // An absent or empty count row stays tolerated: the sha already pins the
+  // queue and older mirrors may predate the row. Anything actually present is
+  // parsed strictly rather than coerced, so '0xB4', ' 180', [180] and
+  // { valueOf: () => 180 } are treated as a malformed mirror, not as 180.
+  if (rawD1Count !== undefined && rawD1Count !== null && rawD1Count !== '') {
+    if (parseD1Count(rawD1Count) !== integrity.count) {
       verdict.reason = 'd1_queue_count_mismatch';
       return verdict;
     }
