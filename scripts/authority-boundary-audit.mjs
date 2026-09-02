@@ -92,12 +92,47 @@ const publishHits = findMatches(workerFiles, PUBLISH_RE);
 
 gate('no X publication call in cloudflare/src/', publishHits.length === 0, publishHits.join(' ') || 'none');
 
-// --------------------------------------------------------- 4. D1 is read-only
+// ------------------------------------------------ 4. D1 writes stay off the ledger
 
-const D1_WRITE_RE = /\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE|REPLACE\s+INTO)\b/i;
-const d1WriteHits = findMatches(workerFiles, D1_WRITE_RE);
+// The invariant is NOT "the Worker never writes to D1" — lane B's publication lease needs atomic
+// writes, and a lease row records who may ATTEMPT, never what was published. The invariant is that
+// the Worker never writes the publication ledger, and that any write it does make lands in a lease
+// table. Naming the tables states that precisely instead of banning writes wholesale.
 
-gate('no D1 write statement in cloudflare/src/', d1WriteHits.length === 0, d1WriteHits.join(' ') || 'none');
+const LEDGER_TABLES = ['publication_state', 'publication_events', 'runtime_metadata'];
+const LEASE_TABLES = ['publication_leases', 'publication_lease_events'];
+
+const WRITE_STATEMENT_RE =
+  /\b(?:INSERT\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+
+const writeTargets = [];
+
+for (const { path, text } of workerFiles) {
+  text.split('\n').forEach((line, i) => {
+    // `ON CONFLICT ... DO UPDATE SET` is an upsert clause; the table is named by its INSERT.
+    if (/\bDO\s+UPDATE\s+SET\b/i.test(line)) return;
+    for (const match of line.matchAll(WRITE_STATEMENT_RE)) {
+      writeTargets.push({ where: `${path}:${i + 1}`, table: match[1].toLowerCase() });
+    }
+  });
+}
+
+const ledgerWrites = writeTargets.filter((w) => LEDGER_TABLES.includes(w.table));
+
+gate(
+  'no D1 write to the publication ledger',
+  ledgerWrites.length === 0,
+  ledgerWrites.map((w) => `${w.where}(${w.table})`).join(' ') || 'none',
+);
+
+const strayWrites = writeTargets.filter((w) => !LEASE_TABLES.includes(w.table));
+
+gate(
+  'D1 writes confined to lease tables',
+  strayWrites.length === 0,
+  strayWrites.map((w) => `${w.where}(${w.table})`).join(' ') ||
+    (writeTargets.length ? `${writeTargets.length} lease write(s)` : 'no writes'),
+);
 
 // --------------------------------------------------------- 5. R2 is read-only
 

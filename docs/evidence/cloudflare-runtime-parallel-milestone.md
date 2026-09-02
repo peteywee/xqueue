@@ -21,8 +21,9 @@
 # Cloudflare Runtime Parallel Milestone — Evidence Record
 
 Baseline: `707d71edf037e3a90525d29b44f2bbfd8b8992dc`
-Lanes executed: A (issue #8), C (issue #10), D (issue #11)
-Lane B (issue #9) was not in scope for this session. Integration was not performed.
+Lanes executed by this session: A (issue #8), C (issue #10), D (issue #11)
+Lane B (issue #9) was delivered outside this session, then verified and integrated here.
+Integration candidate: `150f8bb260bf6247fd57a4aa59628217a7c8b037`.
 
 Every row below carries a truth state. `verified` means a command was run at the stated SHA in this
 session and its output observed. `unknown` means it was not established — it is never inferred.
@@ -31,9 +32,11 @@ session and its output observed. `unknown` means it was not established — it i
 
 | Lane | Branch | Candidate SHA | Truth state |
 |---|---|---|---|
+| B — D1 publication lease + concurrency | `cf-runtime-lease` | `d55cb37a78b3814af6975f4995c691d0cc5be903` | verified |
 | A — queue bundle + hash parity | `cf-runtime-bundle-hash` | `43464e119dfe03ce44a5155219367d31de5e4fd9` | verified |
 | C — read-only eligibility parity | `cf-runtime-eligibility` | `f298d1ffa8f2c514cb74ea0dc4113610c1205925` | verified |
 | D — R2 media inventory + parity | `cf-runtime-media` | `9a73b2a403c21cfbcf2415e88ba47504a2091295` | verified |
+| Integration | `cf-runtime-integration` | `150f8bb260bf6247fd57a4aa59628217a7c8b037` | verified |
 
 ## Canonical queue facts
 
@@ -174,10 +177,55 @@ files are absent, so refusing to emit sizes and hashes is the fail-closed behavi
   makes figures 1 and 9 ambiguous, and a builder that correctly refuses ambiguity could then never
   emit a manifest at all. The accepted set remains a strict subset of the CLI's.
 
+
+## Lane B — D1 publication lease + concurrency (`d55cb37`)
+
+Delivered outside this session and verified here before integration. Adds three files and touches no
+other lane's files: `cloudflare/migrations/0003_publication_lease.sql`,
+`cloudflare/src/publication-lease.mjs`, `test/cloudflare-publication-lease.test.mjs`.
+
+| Evidence | Result | Truth state |
+|---|---|---|
+| Repository tests | 105 pass, 0 fail | verified |
+| `node:` imports in lease module | 0 | verified |
+| Write targets | `publication_leases` only; ledger tables never referenced | verified |
+| X / publication surface in lease module | none | verified |
+| Authority gates | 11/11 intact | verified |
+| Migration applied to any D1 database | **unknown** — not applied by this session | unknown |
+| Independent adversarial re-test by this session | **unknown** — not performed | unknown |
+
+Concurrency gates covered by name in its suite: one winner; same-timestamp contenders still produce one
+winner; an active lease cannot be stolen before expiry; stale takeover allowed exactly at expiry and
+fences the old handle; wrong owner and wrong acquisition handle cannot release; an acquisition ID can
+never be granted again across generations; a replayed acquisition ID on expired takeover is rejected.
+
+## Integration (`150f8bb`)
+
+Merged in the charter's required order — B, A, C, D. All four merges were clean; no conflict
+resolution was required, because the lanes own disjoint files.
+
+| Evidence | Result | Truth state |
+|---|---|---|
+| Repository tests | 242 pass, 0 fail | verified |
+| Test arithmetic | 94 baseline + 55 A + 38 C + 44 D + 11 B = 242 — nothing lost or duplicated | verified |
+| Authority gates | 11/11 intact | verified |
+| Wrangler dry-run | exit 0; 169.06 KiB, gzip 45.17 KiB; bindings D1 + R2 only; zero cron mentions | verified |
+| `wrangler.jsonc` `triggers.crons` | `[]`, count 0 | verified |
+| Queue bundle regeneration | byte-identical | verified |
+| Media requirements regeneration | byte-identical | verified |
+| Eligibility parity matrix | 32/32 PASS, exit 0, committed artifact byte-fresh | verified |
+| Queue integrity vs real D1 sha | `ok: true`, 180/180, exact deferred tail | verified |
+| Media manifest with empty `media/` | exit 1, nothing written | verified |
+| `package.json` after merge | all five lane scripts present; `post:live` intact | verified |
+
+A clean merge was not treated as a correct merge: `package.json` was checked semantically to confirm
+every lane's added script survived and that `post:live` was unchanged.
+
 ## Authority boundary
 
-`scripts/authority-boundary-audit.mjs` asserts ten properties mechanically. Result at baseline and at
-each of the three lane candidates: **10/10 passed**, truth state `verified`.
+`scripts/authority-boundary-audit.mjs` asserts eleven properties mechanically. Result at baseline, at
+each lane candidate, and at the integrated candidate: **all gates passed**, truth state `verified`.
+(The audit was ten gates until the D1 rule was split in two; see below.)
 
 | Gate | Result |
 |---|---|
@@ -185,7 +233,8 @@ each of the three lane candidates: **10/10 passed**, truth state `verified`.
 | No X credential surface in `cloudflare/` | PASS |
 | No `vars` or secret bindings in `wrangler.jsonc` | PASS |
 | No X publication call in `cloudflare/src/` | PASS |
-| No D1 write statement in `cloudflare/src/` | PASS |
+| No D1 write to the publication ledger | PASS |
+| D1 writes confined to lease tables | PASS |
 | No R2 mutation in `cloudflare/src/` | PASS |
 | systemd unit still runs `post:live` | PASS |
 | `package.json` still defines `post:live` | PASS |
@@ -194,6 +243,22 @@ each of the three lane candidates: **10/10 passed**, truth state `verified`.
 
 The `tweet_id` occurrences in `cloudflare/migrations/` are D1 mirror column names, not a publication
 path; the call-surface gate is scoped to Worker source deliberately.
+
+### One deliberate change to the D1 gate, made during integration
+
+The audit originally asserted a blanket *no D1 write statement in `cloudflare/src/`*. That was
+calibrated for the three read-only lanes and would have failed lane B's publication lease, which
+legitimately writes.
+
+The real invariant is not that the Worker never writes D1 — a lease row records who may **attempt**,
+never what was published. It is that the Worker never writes the publication ledger. The gate now
+names the tables: `publication_state`, `publication_events` and `runtime_metadata` are forbidden write
+targets, and any write must land in a lease table.
+
+This is more precise rather than weaker, and that was proven rather than asserted: an injected
+`UPDATE publication_state` and an injected write to an unrelated table each still break the audit with
+exit 1. Lane B writes only `publication_leases` (plus trigger-written audit rows into
+`publication_lease_events`) and never references the ledger tables or any X surface.
 
 Live D1 access was exercised read-only. The Worker's exact parameterised statement
 `SELECT key, value FROM runtime_metadata WHERE key IN (?, ?)` returned both rows with
@@ -219,10 +284,17 @@ These are stated rather than omitted. None were worked around.
    is integration work.
 5. **No live R2 or live Worker verification.** No Cloudflare credentials are present in this
    environment. All R2 evidence is from in-memory stubs.
-6. **Integration was not performed and `cf-runtime-integration` was not advanced.** Lane B
-   (issue #9, D1 publication lease and concurrency safety) is first in the required integration order
-   and was not in this session's charter. Integrating without it would violate the milestone rule
-   against integrating unfinished candidates.
+6. **Lane B was verified but not independently adversarially re-tested here.** Its own suite covers
+   the concurrency gates by name, and this session confirmed its write targets, test result and
+   authority compliance — but no adversarial pass was run against it in this session. Truth state:
+   `unknown`.
+7. **Migration `0003_publication_lease.sql` has not been applied to any D1 database** by this session.
+   The lease is verified in tests against in-memory stubs only. Truth state of "lease works against
+   real D1": `unknown`.
+8. **Only Lane A's module is reachable from the deployed Worker.** `/health` calls
+   `verifyQueueIntegrity`; `eligibility.mjs`, `media-verify.mjs` and `publication-lease.mjs` are not
+   imported by `worker.mjs` and therefore are not in the deployed bundle. Wiring them is a later
+   milestone, not this one.
 
 ## Authority boundary after this milestone — unchanged
 
@@ -232,9 +304,13 @@ no X credentials, no live publication path, D1 and R2 access read-only. No lane 
 
 ## Next action
 
-One named, dependency-ready next action: **complete Lane B (issue #9)**, then re-run the adversarial
-and independent-verification passes for lanes A and C against their exact candidate SHAs before any
-integration is attempted.
+One named, dependency-ready next action: **run the outstanding adversarial and independent
+verification passes against the integrated candidate `150f8bb`** — specifically the Lane C adversarial
+pass that never ran (hunting the direction where local refuses but Cloudflare accepts), and an
+independent verifier for Lane A that did not complete. Both terminated on a session rate limit, not on
+a technical blocker, so both are re-runnable as-is.
 
-Decision required from the owner: none for this milestone. Nothing here transfers authority, and
-none of the three lane branches should be merged until the gaps above are closed.
+Decision required from the owner: none for this milestone. Nothing here transfers publication
+authority. `cf-runtime-integration` must not be merged, must not become an authority-transfer
+configuration, and no cron or X credential should be provisioned until the gaps above are closed and
+the owner explicitly approves the next milestone.
