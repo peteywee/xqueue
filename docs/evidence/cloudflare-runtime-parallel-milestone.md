@@ -23,7 +23,7 @@
 Baseline: `707d71edf037e3a90525d29b44f2bbfd8b8992dc`
 Lanes executed by this session: A (issue #8), C (issue #10), D (issue #11)
 Lane B (issue #9) was delivered outside this session, then verified and integrated here.
-Integration candidate: `2ddfa1f96aa5d657e664120f77a3c7df0ce9d06d`.
+Integration candidate: `7ad4eb6551901e7c053c766455321a1f3328dd03`.
 
 Every row below carries a truth state. `verified` means a command was run at the stated SHA in this
 session and its output observed. `unknown` means it was not established — it is never inferred.
@@ -36,7 +36,7 @@ session and its output observed. `unknown` means it was not established — it i
 | A — queue bundle + hash parity | `cf-runtime-bundle-hash` | `43464e119dfe03ce44a5155219367d31de5e4fd9` | verified |
 | C — read-only eligibility parity | `cf-runtime-eligibility` | `3ddea5308b43dc664451ffb8c692282f69d4c83b` | verified |
 | D — R2 media inventory + parity | `cf-runtime-media` | `9a73b2a403c21cfbcf2415e88ba47504a2091295` | verified |
-| Integration | `cf-runtime-integration` | `2ddfa1f96aa5d657e664120f77a3c7df0ce9d06d` | verified |
+| Integration | `cf-runtime-integration` | `7ad4eb6551901e7c053c766455321a1f3328dd03` | verified |
 
 ## Canonical queue facts
 
@@ -206,7 +206,7 @@ resolution was required, because the lanes own disjoint files.
 
 | Evidence | Result | Truth state |
 |---|---|---|
-| Repository tests | 264 pass, 0 fail | verified |
+| Repository tests | 267 pass, 0 fail | verified |
 | Test arithmetic | 242 at `150f8bb`, independently re-derived per file; +22 adversarial = 264 | verified |
 | Authority gates | 11/11 intact | verified |
 | Wrangler dry-run | exit 0; 169.06 KiB, gzip 45.17 KiB; bindings D1 + R2 only; zero cron mentions | verified |
@@ -287,6 +287,36 @@ Mutation coverage of the parity matrix was measured rather than assumed: 43 muta
 matrix (up from 25 of 37), the survivors either structurally unmatchable, covered by unit tests, or
 proven equivalent — including a sweep of 16,257,024 wall clocks across 36 zones showing 2 and 4
 correction passes always agree.
+
+
+### Owner commits after the integration candidate, and the CI failure they surfaced
+
+Four commits by the repository owner landed on `cf-runtime-integration` after `2ddfa1f`, two of which
+turned CI red. Both failing checks were the same single assertion — each workflow runs `pnpm test`.
+
+The implementation change was right and the assertion was stale. Post-upload verification moved from
+`wrangler r2 object get --info` to `object get --file` plus a local re-hash, and a Lane D adversarial
+test had pinned the literal `'--info'` as its evidence of read-only-ness. `--info` reports what R2
+*asserts* about an object; digesting the downloaded bytes is the only way to observe what the bucket
+actually holds — the same `bucket_asserted` vs `body_observed` distinction that lane's own verifier
+already records per object. The owner's change strengthened verification; the test had frozen the
+weaker mechanism as its contract.
+
+The assertion was replaced rather than removed, and now pins more than before: the download path uses
+the read-only `get` subcommand and writes to a file, never carries `put` or `delete`, re-hashes through
+`verifyRemoteBytes`, and digests the downloaded bytes. It was proven to have teeth rather than assumed:
+it fails when the subcommand is switched to `delete`, when the re-hash is removed, when the digest is
+taken over the wrong input, and when the check reverts to `--info` alone.
+
+A compatibility sentinel — a dead `LEGACY_UNSUPPORTED_INFO_FLAG = '--info'` constant added to keep the
+old assertion passing — was removed once the assertion it served no longer existed. A constant that
+exists only to satisfy a test, while the property it once evidenced is no longer true, is how a safety
+test gets hollowed out; leaving the literal in a file that never uses it would also mislead a future
+audit into thinking verification still trusts metadata. The owner's own readback test pins the real
+contract by argv inspection, asserting `--info` never appears in any command.
+
+Final integrated candidate `7ad4eb6`: 267 tests pass, 11/11 authority gates, 40/40 parity matrix,
+`wrangler deploy --dry-run` exit 0 with zero cron triggers, both CI checks green.
 
 ## Authority boundary
 
