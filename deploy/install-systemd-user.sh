@@ -74,6 +74,14 @@ fi
 # never starts xqueue.service and therefore cannot publish a post.
 systemctl --user disable --now xqueue.timer >/dev/null 2>&1 || true
 
+# Do not replace files underneath an already-running publisher. If a prior
+# service is active, leave the timer disabled and require the operator to
+# inspect that execution before retrying installation.
+if systemctl --user is-active --quiet xqueue.service; then
+  echo 'ERROR: xqueue.service is currently active; timer is disabled and installation stopped.' >&2
+  exit 1
+fi
+
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$HOME/.local/state/xqueue/systemd-backups/$STAMP"
 mkdir -p "$BACKUP_DIR"
@@ -103,6 +111,7 @@ install -m 0644 "$SERVICE_SRC" "$UNIT_DIR/xqueue.service"
 install -m 0644 "$TIMER_SRC" "$UNIT_DIR/xqueue.timer"
 
 systemctl --user daemon-reload
+systemctl --user reset-failed xqueue.service >/dev/null 2>&1 || true
 
 # Validate the exact staged scheduler while it is still disabled. A failed
 # preflight leaves the new unit installed for inspection but cannot schedule
