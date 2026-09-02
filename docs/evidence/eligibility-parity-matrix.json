@@ -1,0 +1,1905 @@
+{
+  "subject": "Parity between the local xqueue eligibility decision and cloudflare/src/eligibility.mjs",
+  "localComposition": [
+    "src/state-store.mjs normalizeState",
+    "src/runtime-health.mjs analyzeRuntime + isResolved",
+    "src/post-time.mjs isDue + scheduledAt",
+    "src/cli.mjs cmdPost framing: validateForPublication unique-id gate, then due.slice(0, 1)"
+  ],
+  "cloudflareModule": "cloudflare/src/eligibility.mjs",
+  "comparedFields": [
+    "refused",
+    "refusalCode",
+    "health",
+    "blocked",
+    "blockReason",
+    "selected"
+  ],
+  "maxPublications": 1,
+  "productionQueue": {
+    "count": 180,
+    "sha256": "09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1"
+  },
+  "documentedDivergences": [
+    "Read-only fail-closed on a 'prepared' inflight: local live mode clears it by writing state.json and proceeds; the Cloudflare evaluator cannot write, so it blocks with reason inflight_prepared.",
+    "safeToPublish is a Cloudflare-only extra gate (it ANDs health.ok on top of the local decision). It can only withhold, never permit; selection.selected still mirrors the local decision exactly.",
+    "A missing ledger (null/undefined) is malformed_ledger rather than an implied empty ledger: not knowing what was already published is exactly when we must fail closed.",
+    "invalid_now and invalid_max_publications are Cloudflare-only guards on inputs the local runtime hard-codes; both can only withhold. They are unit-tested rather than matrixed, because the local runtime has no corresponding refusal to compare against.",
+    "A queue entry with no usable id is PUBLISHED by the local runtime (isResolved falls through and isDue succeeds) but is malformed_queue for Cloudflare. Withholding only; asserted in test/cloudflare-eligibility-adversarial.test.mjs rather than matrixed, because the two sides legitimately disagree there.",
+    "A sparse (hole-containing) queue is likewise malformed_queue for Cloudflare while the local runtime silently skips the holes and publishes. Withholding only; unit-tested."
+  ],
+  "summary": {
+    "total": 40,
+    "pass": 40,
+    "fail": 0
+  },
+  "cases": [
+    {
+      "id": "already-posted",
+      "description": "Ledger records the post as published: resolved, nothing due.",
+      "nowIso": "2026-09-01T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: P1",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 1,
+          "skippedCount": 0,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 1,
+          "skippedCount": 0,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "before-due",
+      "description": "One unresolved post, one millisecond before its instant: not due.",
+      "nowIso": "2026-09-01T19:29:59.999Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "P1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "P1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-A30",
+      "description": "Real production queue with B1 published. A30 2027-01-04 22:15 America/Chicago is exactly due.",
+      "nowIso": "2027-01-05T04:15:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: all 178 posts through B1",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 178,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "A30"
+          ],
+          "overdue": [],
+          "next": "C1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "A30"
+        ],
+        "liveWouldPublish": [
+          "A30"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 178,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "A30"
+          ],
+          "overdue": [],
+          "next": "C1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "A30"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-B1",
+      "description": "Real 180-post production queue, everything but the deferred tail published. B1 2027-01-04 14:30 America/Chicago is exactly due.",
+      "nowIso": "2027-01-04T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: all 177 posts before the deferred tail",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 177,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "B1"
+          ],
+          "overdue": [],
+          "next": "A30",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B1"
+        ],
+        "liveWouldPublish": [
+          "B1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 177,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "B1"
+          ],
+          "overdue": [],
+          "next": "A30",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-C1",
+      "description": "Real production queue with only C1 outstanding. C1 2027-01-05 14:30 America/Chicago is exactly due and is the final post.",
+      "nowIso": "2027-01-05T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: all 179 posts through A30",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 179,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "C1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "C1"
+        ],
+        "liveWouldPublish": [
+          "C1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 179,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "C1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "C1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-fall-back",
+      "description": "America/Chicago 2027-11-07 fall back: 01:30 resolves to 06:30Z (CDT) and 02:30 resolves to 08:30Z (CST) — two hours of UTC across one hour of wall clock.",
+      "nowIso": "2027-11-07T06:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 120,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "F1"
+          ],
+          "overdue": [],
+          "next": "F2",
+          "inflight": null,
+          "graceMinutes": 120
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "F1"
+        ],
+        "liveWouldPublish": [
+          "F1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "F1"
+          ],
+          "overdue": [],
+          "next": "F2",
+          "inflight": null,
+          "graceMinutes": 120
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "F1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-fall-back-ambiguous-before",
+      "description": "Ambiguous wall clock 2027-11-07 01:30 occurs twice. Both implementations pick the FIRST (CDT, 06:30Z) occurrence, so at 06:29:59.999Z it is not due.",
+      "nowIso": "2027-11-07T06:29:59.999Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "F1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "F1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-fall-back-ambiguous-first-occurrence",
+      "description": "The ambiguous wall clock is due at 06:30:00.000Z (first occurrence). Had either side resolved it to the repeated CST hour it would not be due here.",
+      "nowIso": "2027-11-07T06:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "F1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "F1"
+        ],
+        "liveWouldPublish": [
+          "F1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "F1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "F1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-spring-forward",
+      "description": "America/Chicago 2027-03-14 spring forward: 01:30 CST resolves to 07:30Z, 03:30 CDT resolves to 08:30Z (one hour apart in wall clock, one hour apart in UTC across the transition).",
+      "nowIso": "2027-03-14T08:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 120,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "S1",
+            "S2"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 120
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "S1"
+        ],
+        "liveWouldPublish": [
+          "S1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "S1",
+            "S2"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 120
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "S1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-spring-forward-gap-before",
+      "description": "Nonexistent wall clock 2027-03-14 02:30 (the spring-forward gap). Both implementations resolve it to 2027-03-14T07:30:00.000Z; one millisecond earlier it is not yet due.",
+      "nowIso": "2027-03-14T07:29:59.999Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "G1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "G1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "dst-spring-forward-gap-due",
+      "description": "The same nonexistent wall clock is due at exactly 2027-03-14T07:30:00.000Z.",
+      "nowIso": "2027-03-14T07:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "G1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "G1"
+        ],
+        "liveWouldPublish": [
+          "G1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "G1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "G1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "duplicate-post-ids",
+      "description": "The same id appears twice. Ledger resolution by id is ambiguous; cmdPost --live aborts on the unique-id validation error before reading state.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "duplicate_post_ids",
+        "health": null,
+        "blocked": true,
+        "blockReason": "duplicate_post_ids",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "duplicate_post_ids",
+        "health": null,
+        "blocked": true,
+        "blockReason": "duplicate_post_ids",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "duplicate_post_ids"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "empty-queue",
+      "description": "Empty queue with an empty ledger: healthy, nothing due, no next.",
+      "nowIso": "2026-09-01T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "exactly-at-grace-boundary",
+      "description": "now - grace === the post instant. Proves `overdue` uses < (STRICT): still healthy.",
+      "nowIso": "2026-09-01T19:50:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "exactly-due",
+      "description": "now === the post instant. Proves `due` uses <= (INCLUSIVE).",
+      "nowIso": "2026-09-01T19:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "failure-precedence-grace-before-timezone",
+      "description": "A negative graceMinutes AND an unresolvable time zone. analyzeRuntime validates graceMinutes before it resolves any instant, so the reported refusal must be invalid_grace, not unknown_timezone.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": -1,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "invalid_grace",
+        "health": null,
+        "blocked": true,
+        "blockReason": "invalid_grace",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "invalid_grace",
+        "health": null,
+        "blocked": true,
+        "blockReason": "invalid_grace",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "invalid_grace",
+          "unknown_timezone"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "failure-precedence-ledger-before-grace",
+      "description": "Two refusable inputs at once: a malformed ledger AND a negative graceMinutes. cmdPost reads state.json before it calls analyzeRuntime, so the reported refusal must be malformed_ledger, not invalid_grace. Pins the failure PRECEDENCE, not just the failure set.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": -1,
+      "ledgerSetup": "posted: P1 with no tweetId",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger",
+          "invalid_grace"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "inflight-needs-reconciliation",
+      "description": "inflight needs_reconciliation while nothing is due: blocked and unhealthy.",
+      "nowIso": "2026-09-01T19:00:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: P1 needs_reconciliation",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "P1",
+          "inflight": {
+            "postId": "P1",
+            "status": "needs_reconciliation"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_needs_reconciliation",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [],
+          "overdue": [],
+          "next": "P1",
+          "inflight": {
+            "postId": "P1",
+            "status": "needs_reconciliation"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_needs_reconciliation",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "inflight_needs_reconciliation"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "inflight-prepared",
+      "description": "inflight prepared with a due post. Local live mode recovers by MUTATING state.json; the read-only projection cannot, and blocks.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: P1 prepared",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": {
+            "postId": "P1",
+            "status": "prepared"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_prepared",
+        "selected": [],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": {
+            "postId": "P1",
+            "status": "prepared"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_prepared",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "inflight_prepared"
+        ]
+      },
+      "divergences": [
+        "Documented: read-only projection selects [] while a local LIVE run would publish [\"P1\"] (cmdPost recovers a 'prepared' inflight by mutating state.json; a read-only evaluator must not assume that happened).",
+        "Documented: Cloudflare withholds (safeToPublish false, failures [\"inflight_prepared\"]) where a local live run would publish [\"P1\"]. Withholding only; never permitting."
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "inflight-publishing",
+      "description": "inflight publishing: local live mode throws, nothing may be selected.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: P1 publishing",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": {
+            "postId": "P1",
+            "status": "publishing"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_publishing",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": {
+            "postId": "P1",
+            "status": "publishing"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_publishing",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "inflight_publishing"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "inside-grace",
+      "description": "Ten minutes late with a twenty minute grace: due, not overdue, healthy.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-inflight-also-posted",
+      "description": "inflight.postId is also recorded as posted.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: P1 AND inflight: P1 publishing",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-inflight-postid-shadows-object-prototype",
+      "description": "Same truthiness rule on the inflight guard: normalizeState rejects inflight.postId 'toString' via `posted[inflight.postId] || skipped[inflight.postId]`. The refusal must be the LEDGER refusal both sides, not the softer inflight block.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: { postId: 'toString', status: 'publishing' }",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-invalid-inflight-status",
+      "description": "inflight.status is not one of prepared/publishing/needs_reconciliation.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: P1 with status \"wedged\"",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-missing",
+      "description": "No ledger at all. Not knowing what has already been published is exactly when both sides must fail closed; a missing ledger is NOT an implied empty ledger.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "ledger is null",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-negative-spend",
+      "description": "spend is negative, so the ledger is not a trustworthy record of the campaign.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "spend: -0.01",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-posted-and-skipped",
+      "description": "One post id recorded as both posted and skipped.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: P1 AND skipped: P1",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-posted-record-without-tweet-id",
+      "description": "A posted record carries no tweetId, so the ledger cannot prove the post was actually published.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: P1 with no tweetId",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-skipped-key-shadows-object-prototype",
+      "description": "ADVERSARIAL REGRESSION: skipped is keyed 'constructor'. normalizeState decides 'already posted?' with the truthiness test `if (posted[postId])`, which is true for every inherited Object.prototype member, so the LOCAL runtime throws and refuses to publish at all. A hasOwnProperty-based membership test would accept this ledger and select P1 — local refuses, Cloudflare accepts, the one dangerous divergence direction.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "skipped: { constructor: ... } with an empty posted map",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-ledger-skipped-record-without-reason",
+      "description": "A skipped record carries no reason, so the owner skip is unattributable.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "skipped: P1 with no reason",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_ledger",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_ledger",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_ledger"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-queue-missing-scheduled-time",
+      "description": "A queue entry has no scheduledTime, so no instant can be resolved.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_queue",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_queue",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_queue",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_queue",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_queue"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "malformed-queue-not-an-array",
+      "description": "Queue is an object, not an array.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "malformed_queue",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_queue",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "malformed_queue",
+        "health": null,
+        "blocked": true,
+        "blockReason": "malformed_queue",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "malformed_queue"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "multiple-due-posts",
+      "description": "Three due posts, maxPublications 1: at most one is selected, the first in array order.",
+      "nowIso": "2026-09-02T20:00:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 4320,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "P1",
+            "M2",
+            "P2"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 4320
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "P1",
+            "M2",
+            "P2"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 4320
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "needs-reconciliation-with-due-post",
+      "description": "P1 is due but a different post is stuck needing reconciliation: due is non-empty, selection is empty.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "inflight: P2 needs_reconciliation",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": "P2",
+          "inflight": {
+            "postId": "P2",
+            "status": "needs_reconciliation"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_needs_reconciliation",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "P1"
+          ],
+          "overdue": [],
+          "next": "P2",
+          "inflight": {
+            "postId": "P2",
+            "status": "needs_reconciliation"
+          },
+          "graceMinutes": 20
+        },
+        "blocked": true,
+        "blockReason": "inflight_needs_reconciliation",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "inflight_needs_reconciliation"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "negative-grace-minutes",
+      "description": "graceMinutes is negative.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": -1,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "invalid_grace",
+        "health": null,
+        "blocked": true,
+        "blockReason": "invalid_grace",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "invalid_grace",
+        "health": null,
+        "blocked": true,
+        "blockReason": "invalid_grace",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "invalid_grace"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "next-tie-keeps-array-order",
+      "description": "Two unresolved future posts share an instant: `next` keeps queue array order (stable sort).",
+      "nowIso": "2026-09-01T19:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [],
+          "overdue": [],
+          "next": "T2",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [],
+          "overdue": [],
+          "next": "T2",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "owner-skipped",
+      "description": "Owner-skipped post is resolved and never becomes a backlog.",
+      "nowIso": "2026-09-01T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "skipped: P1",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 1,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 1,
+          "unresolvedCount": 0,
+          "due": [],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "queue-order-differs-from-chronological-order",
+      "description": "Queue array order [later, earlier]. due preserves ARRAY order, so selection takes the later post first — it is not sorted by instant.",
+      "nowIso": "2026-09-02T03:15:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 720,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "Z1",
+            "Y1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 720
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "Z1"
+        ],
+        "liveWouldPublish": [
+          "Z1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "Z1",
+            "Y1"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 720
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "Z1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "stale-beyond-grace",
+      "description": "One millisecond past the grace cutoff: overdue, health.ok false. Selection is NOT blocked — cmdPost publishes through a stale backlog.",
+      "nowIso": "2026-09-01T19:50:00.001Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [
+            "P1"
+          ],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "liveWouldPublish": [
+          "P1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": false,
+          "postedCount": 0,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "P1"
+          ],
+          "overdue": [
+            "P1"
+          ],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "P1"
+        ],
+        "safeToPublish": false,
+        "failures": []
+      },
+      "divergences": [
+        "Documented: Cloudflare withholds (safeToPublish false, failures []) where a local live run would publish [\"P1\"]. Withholding only; never permitting."
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "unknown-timezone",
+      "description": "A queue entry names a time zone this runtime cannot resolve.",
+      "nowIso": "2026-09-01T19:40:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "empty ledger",
+      "local": {
+        "refused": true,
+        "refusalCode": "unknown_timezone",
+        "health": null,
+        "blocked": true,
+        "blockReason": "unknown_timezone",
+        "selected": [],
+        "liveWouldPublish": []
+      },
+      "cloudflare": {
+        "refused": true,
+        "refusalCode": "unknown_timezone",
+        "health": null,
+        "blocked": true,
+        "blockReason": "unknown_timezone",
+        "selected": [],
+        "safeToPublish": false,
+        "failures": [
+          "unknown_timezone"
+        ]
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    }
+  ]
+}

@@ -107,15 +107,26 @@ const WRITE_STATEMENT_RE =
 
 const writeTargets = [];
 
+// Scanned over the whole file rather than line by line: `\s+` crosses newlines, so a write whose
+// table name sits on the next line cannot slip through a per-line regex.
 for (const { path, text } of workerFiles) {
-  text.split('\n').forEach((line, i) => {
-    // `ON CONFLICT ... DO UPDATE SET` is an upsert clause; the table is named by its INSERT.
-    if (/\bDO\s+UPDATE\s+SET\b/i.test(line)) return;
-    for (const match of line.matchAll(WRITE_STATEMENT_RE)) {
-      writeTargets.push({ where: `${path}:${i + 1}`, table: match[1].toLowerCase() });
-    }
-  });
+  for (const match of text.matchAll(WRITE_STATEMENT_RE)) {
+    const table = match[1].toLowerCase();
+
+    // `ON CONFLICT ... DO UPDATE SET` is an upsert clause, not a table reference — its table is
+    // named by the INSERT. Skipping just the captured `SET` keyword, rather than the whole line,
+    // means the marker cannot be pasted onto a real write to cloak it.
+    if (table === 'set') continue;
+
+    const line = text.slice(0, match.index).split('\n').length;
+    writeTargets.push({ where: `${path}:${line}`, table });
+  }
 }
+
+// Scope note: this scans Worker source only. Local tooling under scripts/ runs on the authoritative
+// host and is not the Worker, so its D1 access is out of scope here. Static analysis also cannot
+// follow an interpolated table name (`UPDATE ${t}`); this gate catches honest drift and the obvious
+// attacks, not a determined author.
 
 const ledgerWrites = writeTargets.filter((w) => LEDGER_TABLES.includes(w.table));
 

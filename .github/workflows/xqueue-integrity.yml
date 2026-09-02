@@ -57,6 +57,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Assert the Cloudflare authority boundary is intact
+        run: node scripts/authority-boundary-audit.mjs
+
       - name: Validate content
         run: pnpm validate
 
