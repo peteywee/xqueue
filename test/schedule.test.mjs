@@ -129,6 +129,50 @@ test('an unbalanced library still schedules every post', () => {
   assert.equal(new Set(q.map((p) => p.id)).size, 14);
 });
 
+test('tail deferrals preserve every other schedule and append exact IDs', () => {
+  const lib = library();
+  const base = schedule(lib, { start: '2026-08-31' });
+  const deferredIds = ['B1', 'A30', 'C1'];
+  const q = schedule(lib, {
+    start: '2026-08-31',
+    deferToEnd: deferredIds,
+  });
+
+  const baseById = new Map(base.map((post) => [post.id, post]));
+  for (const post of q) {
+    if (deferredIds.includes(post.id)) continue;
+    const before = baseById.get(post.id);
+    assert.equal(post.scheduledDate, before.scheduledDate, `${post.id}: date moved`);
+    assert.equal(post.scheduledTime, before.scheduledTime, `${post.id}: time moved`);
+  }
+
+  assert.deepEqual(q.slice(-3).map((post) => post.id), deferredIds);
+  assert.equal(q.at(-3).scheduledDate, '2027-01-04');
+  assert.equal(q.at(-3).scheduledTime, '14:30');
+  assert.equal(q.at(-2).scheduledDate, '2027-01-04');
+  assert.equal(q.at(-2).scheduledTime, '22:15');
+  assert.equal(q.at(-1).scheduledDate, '2027-01-05');
+  assert.equal(q.at(-1).scheduledTime, '14:30');
+  assert.ok(q.slice(-3).every((post) => post.deferredToEnd === true));
+  assert.equal(Object.keys(byDay(q)).length, 91);
+});
+
+test('tail deferrals reject duplicate, unknown, and pinned IDs', () => {
+  const lib = library();
+  assert.throws(
+    () => schedule(lib, { start: '2026-08-31', deferToEnd: ['B1', 'B1'] }),
+    /duplicate post IDs/,
+  );
+  assert.throws(
+    () => schedule(lib, { start: '2026-08-31', deferToEnd: ['Z99'] }),
+    /unknown post/,
+  );
+  assert.throws(
+    () => schedule(lib, { start: '2026-08-31', deferToEnd: ['A1'] }),
+    /pinned post/,
+  );
+});
+
 test('stats reports the split and the runway', () => {
   const s = stats(schedule(library(), { start: '2026-09-07' }));
   assert.equal(s.posts, 180);
