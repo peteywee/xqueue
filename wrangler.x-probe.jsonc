@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xqueue-xdk-bundle-probe",
+  "main": "probes/cloudflare-x/xdk-bundle-probe.mjs",
+  "compatibility_date": "2026-09-02",
+  "triggers": {
+    "crons": []
+  }
+}
