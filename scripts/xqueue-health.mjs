@@ -149,13 +149,29 @@ function audit() {
     }
   }
 
-  const badDailyCounts =
-    [...days.values()]
-      .filter(
-        (posts) =>
-          posts.length !==
-          policy.postsPerDay,
+  const allowedPartial =
+    policy.allowedPartialPostingDays ?? {};
+
+  const badDailyCounts = [];
+
+  for (const [date, posts] of days.entries()) {
+    const expected = Object.hasOwn(allowedPartial, date)
+      ? allowedPartial[date]
+      : policy.postsPerDay;
+
+    if (posts.length !== expected) {
+      badDailyCounts.push(
+        `${date}:${posts.length}/${expected}`,
       );
+    }
+  }
+
+  for (const [date, expected] of Object.entries(allowedPartial)) {
+    const actual = days.get(date)?.length ?? 0;
+    if (actual !== expected && !badDailyCounts.some((item) => item.startsWith(`${date}:`))) {
+      badDailyCounts.push(`${date}:${actual}/${expected}`);
+    }
+  }
 
   let chronologyErrors = 0;
 
@@ -171,6 +187,22 @@ function audit() {
       chronologyErrors++;
     }
   }
+
+  const expectedDeferred =
+    policy.deferToEnd ?? [];
+
+  const actualDeferred =
+    sorted
+      .filter((post) => post.deferredToEnd === true)
+      .map((post) => post.id);
+
+  const tailIds = expectedDeferred.length
+    ? sorted.slice(-expectedDeferred.length).map((post) => post.id)
+    : [];
+
+  const deferralsMatch =
+    JSON.stringify(actualDeferred) === JSON.stringify(expectedDeferred) &&
+    JSON.stringify(tailIds) === JSON.stringify(expectedDeferred);
 
   console.log();
   console.log(
@@ -222,7 +254,13 @@ function audit() {
   gate(
     'posts per day',
     badDailyCounts.length === 0,
-    String(badDailyCounts.length),
+    badDailyCounts.length ? badDailyCounts.join(',') : '0',
+  );
+
+  gate(
+    'tail deferrals',
+    deferralsMatch,
+    expectedDeferred.length ? expectedDeferred.join(',') : 'none',
   );
 
   gate(
@@ -291,20 +329,7 @@ function rebuild() {
     spawnSync(
       process.execPath,
       [
-        'src/cli.mjs',
-        'build',
-
-        '--start',
-        policy.campaignStart,
-
-        '--slots',
-        policy.slots.join(','),
-
-        '--days',
-        policy.daysOfWeek.join(','),
-
-        '--tz',
-        policy.timezone,
+        'scripts/build-production-queue.mjs',
       ],
       {
         cwd:
