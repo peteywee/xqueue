@@ -66,6 +66,10 @@ ON publication_lease_events(lease_name, generation);
 CREATE INDEX publication_lease_events_time_idx
 ON publication_lease_events(event_at_ms);
 
+CREATE UNIQUE INDEX publication_lease_events_acquisition_grant_uq
+ON publication_lease_events(acquisition_id)
+WHERE event_type = 'acquired';
+
 CREATE TRIGGER publication_lease_initial_acquire_audit
 AFTER INSERT ON publication_leases
 WHEN NEW.owner_token IS NOT NULL
