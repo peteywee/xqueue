@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Remote PREVIEW-only rehearsal for migration 0003 and the publication lease semantics.
-# This script never targets the production D1 database, never deploys a Worker, never touches R2,
-# never reads X credentials, and never grants Cloudflare publication authority.
+# Remote PREVIEW-only rehearsal for migration 0003 and publication-lease semantics.
+# This script never targets production D1, deploys a Worker, touches R2, reads X credentials,
+# or grants Cloudflare publication authority.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -40,8 +40,6 @@ REMOTE_SHA="$(git rev-parse "origin/$EXPECTED_BRANCH")"
 [[ "$LOCAL_SHA" == "$REMOTE_SHA" ]] || \
   fail "Local HEAD $LOCAL_SHA does not equal origin/$EXPECTED_BRANCH $REMOTE_SHA."
 
-# Tracked changes can change the migration or verifier being rehearsed. Untracked local media is
-# allowed because media bytes are intentionally outside Git and are unrelated to this lease test.
 git diff --quiet || fail 'Tracked working-tree changes are present.'
 git diff --cached --quiet || fail 'Staged changes are present.'
 
@@ -51,7 +49,7 @@ pnpm wrangler deploy --dry-run --outdir /tmp/xqueue-preview-lease-worker >/tmp/x
 grep -q 'env.DB' /tmp/xqueue-preview-lease-dryrun.log || fail 'Wrangler dry-run did not expose DB binding.'
 grep -q 'env.MEDIA' /tmp/xqueue-preview-lease-dryrun.log || fail 'Wrangler dry-run did not expose MEDIA binding.'
 
-# Use a single helper so every remote SQL call is visibly and mechanically pinned to --preview.
+# Every SQL call is mechanically pinned to the configured preview database.
 d1_json() {
   local sql="$1"
   pnpm wrangler d1 execute "$DB_NAME" "${PREVIEW_FLAGS[@]}" --yes --json --command "$sql"
@@ -81,8 +79,6 @@ printf '%s\n' "$PRE_MIGRATIONS" | json_assert \
 
 if ! printf '%s\n' "$PRE_MIGRATIONS" | grep -q '0003_publication_lease.sql'; then
   printf '\n=== APPLYING 0003 TO PREVIEW ONLY ===\n'
-  # Wrangler migrations apply prompts interactively. Supplying one explicit yes is safe because the
-  # migration ledger above proves 0003 is the only possible unapplied migration in this branch.
   printf 'y\n' | pnpm wrangler d1 migrations apply "$DB_NAME" "${PREVIEW_FLAGS[@]}"
 else
   printf '\n0003 is already applied to preview; continuing with the semantic rehearsal.\n'
@@ -109,14 +105,8 @@ printf '%s\n' "$QUICK_CHECK" | json_assert \
   'rows.length === 1 && String(Object.values(rows[0])[0]).toLowerCase() === "ok"' || \
   fail 'Preview D1 PRAGMA quick_check did not return ok.'
 
-LEASE_COUNT="$(d1_json 'SELECT COUNT(*) AS count FROM publication_leases;')"
-printf '%s\n' "$LEASE_COUNT" | json_assert 'Number(rows[0]?.count) === 0' || \
-  fail 'Preview publication_leases is not empty before the probe.'
-
-EVENT_COUNT="$(d1_json 'SELECT COUNT(*) AS count FROM publication_lease_events;')"
-printf '%s\n' "$EVENT_COUNT" | json_assert 'Number(rows[0]?.count) === 0' || \
-  fail 'Preview publication_lease_events is not empty before the probe.'
-
+# Clean only this script's fixed probe identities. This makes a retry safe after an interrupted run
+# without deleting any unrelated lease evidence.
 cleanup_probe() {
   set +e
   d1_json "DELETE FROM publication_lease_events WHERE acquisition_id IN ('$PROBE_ACQ_1','$PROBE_ACQ_2');" >/dev/null 2>&1
@@ -124,49 +114,88 @@ cleanup_probe() {
 }
 trap cleanup_probe EXIT
 
+cleanup_probe
+
+LEASE_COUNT="$(d1_json 'SELECT COUNT(*) AS count FROM publication_leases;')"
+printf '%s\n' "$LEASE_COUNT" | json_assert 'Number(rows[0]?.count) === 0' || \
+  fail 'Preview publication_leases contains non-probe state; refusing rehearsal.'
+
+EVENT_COUNT="$(d1_json 'SELECT COUNT(*) AS count FROM publication_lease_events;')"
+printf '%s\n' "$EVENT_COUNT" | json_assert 'Number(rows[0]?.count) === 0' || \
+  fail 'Preview publication_lease_events contains non-probe state; refusing rehearsal.'
+
 ACQUIRE_SQL_1="INSERT INTO publication_leases (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms) VALUES ('publisher','$PROBE_OWNER_1','$PROBE_ACQ_1',1,$T0,$T_EXPIRY,$T0) ON CONFLICT(lease_name) DO UPDATE SET owner_token=excluded.owner_token, acquisition_id=excluded.acquisition_id, generation=publication_leases.generation+1, acquired_at_ms=excluded.acquired_at_ms, expires_at_ms=excluded.expires_at_ms, updated_at_ms=excluded.updated_at_ms WHERE publication_leases.owner_token IS NULL OR publication_leases.expires_at_ms <= excluded.acquired_at_ms;"
 ACQUIRE_SQL_2_BEFORE="INSERT INTO publication_leases (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms) VALUES ('publisher','$PROBE_OWNER_2','$PROBE_ACQ_2',1,$T_BEFORE,$((T_BEFORE + TTL)),$T_BEFORE) ON CONFLICT(lease_name) DO UPDATE SET owner_token=excluded.owner_token, acquisition_id=excluded.acquisition_id, generation=publication_leases.generation+1, acquired_at_ms=excluded.acquired_at_ms, expires_at_ms=excluded.expires_at_ms, updated_at_ms=excluded.updated_at_ms WHERE publication_leases.owner_token IS NULL OR publication_leases.expires_at_ms <= excluded.acquired_at_ms;"
 ACQUIRE_SQL_2_EXPIRY="INSERT INTO publication_leases (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms) VALUES ('publisher','$PROBE_OWNER_2','$PROBE_ACQ_2',1,$T_EXPIRY,$((T_EXPIRY + TTL)),$T_EXPIRY) ON CONFLICT(lease_name) DO UPDATE SET owner_token=excluded.owner_token, acquisition_id=excluded.acquisition_id, generation=publication_leases.generation+1, acquired_at_ms=excluded.acquired_at_ms, expires_at_ms=excluded.expires_at_ms, updated_at_ms=excluded.updated_at_ms WHERE publication_leases.owner_token IS NULL OR publication_leases.expires_at_ms <= excluded.acquired_at_ms;"
 
 printf '\n=== REAL D1 LEASE SEMANTICS ===\n'
+
+# D1 meta.changes is based on sqlite3_total_changes(), so trigger-written audit rows contribute to
+# it. The acceptance oracle is therefore the resulting lease row + exact audit trail, not an exact
+# meta.changes value.
 FIRST="$(d1_json "$ACQUIRE_SQL_1")"
-printf '%s\n' "$FIRST" | json_assert 'Number(metas[0]?.changes) === 1' || fail 'First contender did not acquire exactly once.'
+printf 'First acquisition D1 metadata:\n%s\n' "$FIRST"
 
 ROW1="$(d1_json 'SELECT * FROM publication_leases WHERE lease_name="publisher";')"
 printf '%s\n' "$ROW1" | json_assert \
   "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_1' && rows[0].acquisition_id === '$PROBE_ACQ_1' && Number(rows[0].generation) === 1 && Number(rows[0].acquired_at_ms) === $T0 && Number(rows[0].expires_at_ms) === $T_EXPIRY" || \
   fail 'First lease row does not match the exact acquisition identity.'
 
+EVENTS1="$(d1_json 'SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;')"
+printf '%s\n' "$EVENTS1" | json_assert \
+  "rows.length === 1 && rows[0].generation == 1 && rows[0].owner_token === '$PROBE_OWNER_1' && rows[0].acquisition_id === '$PROBE_ACQ_1' && rows[0].event_type === 'acquired' && rows[0].event_at_ms == $T0 && rows[0].detail === 'initial-acquisition'" || \
+  fail 'First acquisition did not create exactly one matching audit grant.'
+
 BLOCKED="$(d1_json "$ACQUIRE_SQL_2_BEFORE")"
-printf '%s\n' "$BLOCKED" | json_assert 'Number(metas[0]?.changes) === 0' || fail 'Active lease was stealable before expiry.'
+printf 'Blocked contender D1 metadata:\n%s\n' "$BLOCKED"
 
 ROW_BLOCKED="$(d1_json 'SELECT * FROM publication_leases WHERE lease_name="publisher";')"
 printf '%s\n' "$ROW_BLOCKED" | json_assert \
-  "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_1' && Number(rows[0].generation) === 1" || \
+  "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_1' && rows[0].acquisition_id === '$PROBE_ACQ_1' && Number(rows[0].generation) === 1 && Number(rows[0].expires_at_ms) === $T_EXPIRY" || \
   fail 'Blocked contender changed the active lease.'
 
+EVENTS_BLOCKED="$(d1_json 'SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;')"
+printf '%s\n' "$EVENTS_BLOCKED" | json_assert \
+  "rows.length === 1 && rows[0].acquisition_id === '$PROBE_ACQ_1' && rows[0].event_type === 'acquired'" || \
+  fail 'Blocked contender created unexpected audit evidence.'
+
 TAKEOVER="$(d1_json "$ACQUIRE_SQL_2_EXPIRY")"
-printf '%s\n' "$TAKEOVER" | json_assert 'Number(metas[0]?.changes) === 1' || fail 'Exact-expiry takeover did not acquire.'
+printf 'Exact-expiry takeover D1 metadata:\n%s\n' "$TAKEOVER"
 
 ROW2="$(d1_json 'SELECT * FROM publication_leases WHERE lease_name="publisher";')"
 printf '%s\n' "$ROW2" | json_assert \
-  "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_2' && rows[0].acquisition_id === '$PROBE_ACQ_2' && Number(rows[0].generation) === 2 && Number(rows[0].acquired_at_ms) === $T_EXPIRY" || \
+  "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_2' && rows[0].acquisition_id === '$PROBE_ACQ_2' && Number(rows[0].generation) === 2 && Number(rows[0].acquired_at_ms) === $T_EXPIRY && Number(rows[0].expires_at_ms) === $((T_EXPIRY + TTL))" || \
   fail 'Takeover did not fence the old handle with generation 2.'
 
+EVENTS2="$(d1_json 'SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;')"
+printf '%s\n' "$EVENTS2" | json_assert \
+  "rows.length === 2 && rows[0].generation == 1 && rows[0].acquisition_id === '$PROBE_ACQ_1' && rows[0].event_type === 'acquired' && rows[1].generation == 2 && rows[1].owner_token === '$PROBE_OWNER_2' && rows[1].acquisition_id === '$PROBE_ACQ_2' && rows[1].event_type === 'acquired' && rows[1].event_at_ms == $T_EXPIRY && rows[1].detail === 'expired-lease-takeover'" || \
+  fail 'Exact-expiry takeover audit evidence is incorrect.'
+
 OLD_RELEASE="$(d1_json "UPDATE publication_leases SET owner_token=NULL, acquisition_id=NULL, expires_at_ms=$T_RELEASE, updated_at_ms=$T_RELEASE WHERE lease_name='publisher' AND owner_token='$PROBE_OWNER_1' AND acquisition_id='$PROBE_ACQ_1' AND generation=1;")"
-printf '%s\n' "$OLD_RELEASE" | json_assert 'Number(metas[0]?.changes) === 0' || fail 'Fenced generation-1 handle released generation 2.'
+printf 'Fenced old-handle release metadata:\n%s\n' "$OLD_RELEASE"
+
+ROW_OLD_RELEASE="$(d1_json 'SELECT * FROM publication_leases WHERE lease_name="publisher";')"
+printf '%s\n' "$ROW_OLD_RELEASE" | json_assert \
+  "rows.length === 1 && rows[0].owner_token === '$PROBE_OWNER_2' && rows[0].acquisition_id === '$PROBE_ACQ_2' && Number(rows[0].generation) === 2" || \
+  fail 'Fenced generation-1 handle altered generation 2.'
+
+EVENTS_OLD_RELEASE="$(d1_json 'SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;')"
+printf '%s\n' "$EVENTS_OLD_RELEASE" | json_assert \
+  'rows.length === 2 && rows.every(r => r.event_type === "acquired")' || \
+  fail 'Fenced old handle created release audit evidence.'
 
 NEW_RELEASE="$(d1_json "UPDATE publication_leases SET owner_token=NULL, acquisition_id=NULL, expires_at_ms=$T_RELEASE, updated_at_ms=$T_RELEASE WHERE lease_name='publisher' AND owner_token='$PROBE_OWNER_2' AND acquisition_id='$PROBE_ACQ_2' AND generation=2;")"
-printf '%s\n' "$NEW_RELEASE" | json_assert 'Number(metas[0]?.changes) === 1' || fail 'Current owner could not release its exact lease.'
+printf 'Current-owner release D1 metadata:\n%s\n' "$NEW_RELEASE"
 
 RELEASED="$(d1_json 'SELECT * FROM publication_leases WHERE lease_name="publisher";')"
 printf '%s\n' "$RELEASED" | json_assert \
   'rows.length === 1 && rows[0].owner_token === null && rows[0].acquisition_id === null && Number(rows[0].generation) === 2' || \
   fail 'Released row did not preserve generation fencing evidence.'
 
-EVENTS="$(d1_json "SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;")"
+EVENTS="$(d1_json 'SELECT generation,owner_token,acquisition_id,event_type,event_at_ms,detail FROM publication_lease_events ORDER BY id;')"
 printf '%s\n' "$EVENTS" | json_assert \
-  "rows.length === 3 && rows[0].generation == 1 && rows[0].acquisition_id === '$PROBE_ACQ_1' && rows[0].event_type === 'acquired' && rows[0].detail === 'initial-acquisition' && rows[1].generation == 2 && rows[1].acquisition_id === '$PROBE_ACQ_2' && rows[1].event_type === 'acquired' && rows[1].detail === 'expired-lease-takeover' && rows[2].generation == 2 && rows[2].acquisition_id === '$PROBE_ACQ_2' && rows[2].event_type === 'released' && rows[2].detail === 'owner-release'" || \
+  "rows.length === 3 && rows[0].generation == 1 && rows[0].acquisition_id === '$PROBE_ACQ_1' && rows[0].event_type === 'acquired' && rows[0].detail === 'initial-acquisition' && rows[1].generation == 2 && rows[1].acquisition_id === '$PROBE_ACQ_2' && rows[1].event_type === 'acquired' && rows[1].detail === 'expired-lease-takeover' && rows[2].generation == 2 && rows[2].owner_token === '$PROBE_OWNER_2' && rows[2].acquisition_id === '$PROBE_ACQ_2' && rows[2].event_type === 'released' && rows[2].event_at_ms == $T_RELEASE && rows[2].detail === 'owner-release'" || \
   fail 'Lease audit trail is not exactly acquire / takeover / release.'
 
 printf '\n=== CLEANUP OWNED PREVIEW PROBE ===\n'
