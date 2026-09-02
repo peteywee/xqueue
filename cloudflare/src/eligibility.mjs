@@ -174,21 +174,25 @@ function isNonEmptyString(value) {
 }
 
 function toEpochMs(now) {
-  if (now instanceof Date) {
-    const ms = now.getTime();
-    return Number.isFinite(ms) ? ms : null;
+  // The local runtime reads the clock two different ways and BOTH require a
+  // real Date:
+  //   src/runtime-health.mjs analyzeRuntime() calls now.getTime(), which
+  //     throws for a number or a string;
+  //   src/post-time.mjs isDue() compares `scheduledAt(post) <= now`, a
+  //     relational comparison that silently yields false for anything without
+  //     Date's numeric valueOf — so cmdPost would find NOTHING due.
+  // Coercing a number, a string, or a duck-typed { getTime } into an instant
+  // here would let this module evaluate — and report safeToPublish for — a
+  // clock the local runtime either refuses outright or reads as "nothing due".
+  // That is the one divergence direction that is not fail-closed, so anything
+  // that is not a usable Date becomes invalid_now.
+  if (Object.prototype.toString.call(now) !== '[object Date]') {
+    return null;
   }
 
-  if (typeof now === 'number') {
-    return Number.isFinite(now) ? now : null;
-  }
+  const ms = now.getTime();
 
-  if (isNonEmptyString(now)) {
-    const ms = Date.parse(now);
-    return Number.isFinite(ms) ? ms : null;
-  }
-
-  return null;
+  return typeof ms === 'number' && Number.isFinite(ms) ? ms : null;
 }
 
 /**
@@ -203,13 +207,26 @@ function checkQueueShape(queue) {
     return false;
   }
 
-  return queue.every((post) => (
-    isPlainObject(post) &&
-    isNonEmptyString(post.id) &&
-    isNonEmptyString(post.scheduledDate) &&
-    isNonEmptyString(post.scheduledTime) &&
-    isNonEmptyString(post.timezone)
-  ));
+  // An INDEX loop, not Array.prototype.every: `every` skips array holes, so a
+  // sparse queue used to pass this check and then crash the id scan below.
+  // A hole reads as undefined here and is rejected as malformed.
+  for (let i = 0; i < queue.length; i += 1) {
+    const post = queue[i];
+
+    const ok = (
+      isPlainObject(post) &&
+      isNonEmptyString(post.id) &&
+      isNonEmptyString(post.scheduledDate) &&
+      isNonEmptyString(post.scheduledTime) &&
+      isNonEmptyString(post.timezone)
+    );
+
+    if (!ok) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -242,7 +259,13 @@ function checkLedgerShape(ledger) {
     if (!isNonEmptyString(record.at) || !isNonEmptyString(record.reason)) {
       return false;
     }
-    if (Object.prototype.hasOwnProperty.call(posted, postId)) {
+    // normalizeState decides this with `if (posted[postId])` — a TRUTHINESS
+    // test that is also true for every inherited Object.prototype member, so a
+    // ledger keyed 'constructor'/'toString' makes the LOCAL runtime throw and
+    // refuse to publish at all. A hasOwnProperty test accepted such a ledger
+    // and reported safeToPublish for a post local would never reach. Mirror
+    // the local test exactly.
+    if (posted[postId]) {
       return false;
     }
   }
@@ -263,10 +286,9 @@ function checkLedgerShape(ledger) {
     if (!INFLIGHT_STATUSES.includes(inflight.status)) {
       return false;
     }
-    if (
-      Object.prototype.hasOwnProperty.call(posted, inflight.postId) ||
-      Object.prototype.hasOwnProperty.call(skipped, inflight.postId)
-    ) {
+    // Same truthiness semantics as normalizeState's
+    // `if (posted[inflight.postId] || skipped[inflight.postId])`.
+    if (posted[inflight.postId] || skipped[inflight.postId]) {
       return false;
     }
   }
