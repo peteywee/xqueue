@@ -25,6 +25,7 @@ export const DEFAULTS = {
   timezone: 'America/Chicago',
   daysOfWeek: [1, 2, 3, 4, 5], // Mon–Fri
   start: null,                 // ISO date; defaults to the next posting day
+  deferToEnd: [],              // exact post IDs rescheduled after the normal tail
 };
 
 /** Deterministic topical spread: walk the list with a stride coprime to its length. */
@@ -49,6 +50,56 @@ function* postingDays(startISO, daysOfWeek) {
     if (daysOfWeek.includes(d.getUTCDay())) yield ymd(d);
     d.setUTCDate(d.getUTCDate() + 1);
   }
+}
+
+function nextDay(dateISO) {
+  const d = new Date(`${dateISO}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return ymd(d);
+}
+
+function chronologyKey(post) {
+  return `${post.scheduledDate}T${post.scheduledTime}`;
+}
+
+/**
+ * Reschedule selected posts after the normal campaign tail without moving any
+ * other post. Historical missed slots therefore remain empty instead of being
+ * silently backfilled by unrelated content.
+ */
+function deferPostsToEnd(queue, ids, cfg) {
+  if (!ids?.length) return queue;
+
+  const requested = [...ids];
+  const unique = new Set(requested);
+  if (unique.size !== requested.length) {
+    throw new Error('deferToEnd contains duplicate post IDs');
+  }
+
+  const byId = new Map(queue.map((post) => [post.id, post]));
+  for (const id of requested) {
+    if (!byId.has(id)) throw new Error(`deferToEnd references unknown post: ${id}`);
+    if (byId.get(id).pinned) throw new Error(`refusing to defer pinned post: ${id}`);
+  }
+
+  const tail = [...queue].sort((a, b) => chronologyKey(a).localeCompare(chronologyKey(b))).at(-1);
+  const days = postingDays(nextDay(tail.scheduledDate), cfg.daysOfWeek);
+  let date = null;
+
+  for (let i = 0; i < requested.length; i++) {
+    const slotIndex = i % cfg.slots.length;
+    if (slotIndex === 0) date = days.next().value;
+
+    const post = byId.get(requested[i]);
+    post.scheduledDate = date;
+    post.scheduledTime = cfg.slots[slotIndex] ?? cfg.slots[cfg.slots.length - 1];
+    post.timezone = cfg.timezone;
+    post.slot = slotIndex === 0 ? 'lull' : 'post-close';
+    post.deferredToEnd = true;
+  }
+
+  queue.sort((a, b) => chronologyKey(a).localeCompare(chronologyKey(b)));
+  return queue;
 }
 
 export function schedule(posts, opts = {}) {
@@ -117,7 +168,7 @@ export function schedule(posts, opts = {}) {
     queue.unshift(moved);
   }
 
-  return queue;
+  return deferPostsToEnd(queue, cfg.deferToEnd, cfg);
 }
 
 export function stats(queue) {
