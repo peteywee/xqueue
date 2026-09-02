@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,6 +13,7 @@ import {
   join,
   resolve,
 } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -34,6 +36,8 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTENT = resolve(HERE, '../content');
+const SYSTEMD_SERVICE = resolve(HERE, '../deploy/systemd/xqueue.service');
+const SYSTEMD_RUNTIME_CHECK = resolve(HERE, '../deploy/systemd/check-runtime.sh');
 
 function withTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'xqueue-hardening-'));
@@ -178,3 +182,39 @@ test('owner can reconcile an ambiguous attempt as not posted', () => {
   assert.equal(state.inflight, null);
   assert.deepEqual(state.posted, {});
 });
+
+test('systemd service pins a checked runtime and keeps live publication explicit', () => {
+  const unit = readFileSync(SYSTEMD_SERVICE, 'utf8');
+  assert.match(unit, /EnvironmentFile=%h\/\.config\/xqueue\/runtime\.env/);
+  assert.match(unit, /ExecStartPre=.*check-runtime\.sh/);
+  assert.match(unit, /post:live/);
+  assert.doesNotMatch(unit, /bash\s+-lc/);
+});
+
+test('systemd runtime checker accepts explicit compatible binaries', () =>
+  withTempDir((dir) => {
+    const fakeCorepack = join(dir, 'corepack');
+    writeFileSync(
+      fakeCorepack,
+      '#!/usr/bin/env bash\nif [[ "$1" == "pnpm" && "$2" == "--version" ]]; then echo 11.24.0; exit 0; fi\nexit 2\n',
+      'utf8',
+    );
+    chmodSync(fakeCorepack, 0o755);
+
+    const nodeDir = dirname(process.execPath);
+    const result = spawnSync(
+      '/bin/bash',
+      [SYSTEMD_RUNTIME_CHECK],
+      {
+        encoding: 'utf8',
+        env: {
+          PATH: `${nodeDir}:/usr/local/bin:/usr/bin:/bin`,
+          XQUEUE_NODE: process.execPath,
+          XQUEUE_COREPACK: fakeCorepack,
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /pinned systemd runtime/i);
+  }));
