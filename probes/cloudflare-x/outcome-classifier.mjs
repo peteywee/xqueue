@@ -3,7 +3,15 @@ const CONFIRMED_NOT_POSTED = 'confirmed_not_posted';
 const NEEDS_RECONCILIATION = 'needs_reconciliation';
 
 function statusFrom(input) {
-  const status = input?.response?.status ?? input?.status;
+  const raw =
+    input?.response?.status ??
+    input?.status ??
+    input?.error?.status ??
+    input?.error?.statusCode ??
+    input?.error?.response?.status ??
+    input?.error?.response?.statusCode;
+
+  const status = Number(raw);
   return Number.isInteger(status) ? status : null;
 }
 
@@ -45,7 +53,7 @@ export function classifyPublicationOutcome(input = {}) {
     return result(NEEDS_RECONCILIATION, 'successful_response_without_post_id');
   }
 
-  if (status !== null && [400, 401, 403, 404, 409, 422, 429].includes(status)) {
+  if (status !== null && [400, 401, 403, 404, 409, 413, 422, 429].includes(status)) {
     return result(CONFIRMED_NOT_POSTED, `explicit_http_refusal_${status}`, {
       retryableLater: status === 429,
     });

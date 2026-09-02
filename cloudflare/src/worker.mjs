@@ -1,20 +1,22 @@
+import { publicationAuthorityEnabled } from './authority-config.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
+import { runScheduledPublication } from './production-publisher.mjs';
 
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
 
   headers.set(
     'content-type',
-    'application/json; charset=utf-8'
+    'application/json; charset=utf-8',
   );
 
   return new Response(
     JSON.stringify(value, null, 2),
     {
       ...init,
-      headers
-    }
+      headers,
+    },
   );
 }
 
@@ -25,24 +27,24 @@ async function storageHealth(env) {
       SELECT COUNT(*) AS count
       FROM sqlite_master
       WHERE type = 'table'
-      `
+      `,
     )
     .first();
 
   const r2 = await env.MEDIA.list({
-    limit: 1
+    limit: 1,
   });
 
   return {
     d1: {
       reachable: true,
-      tables: Number(d1?.count ?? 0)
+      tables: Number(d1?.count ?? 0),
     },
 
     r2: {
       reachable: true,
-      sampleObjectCount: r2.objects.length
-    }
+      sampleObjectCount: r2.objects.length,
+    },
   };
 }
 
@@ -52,37 +54,31 @@ export default {
 
     if (url.pathname === '/health') {
       try {
-        const storage =
-          await storageHealth(env);
+        const storage = await storageHealth(env);
+        const queueIntegrity = await verifyQueueIntegrity(env);
+        const authorityReadiness = await evaluateAuthorityReadiness(env);
 
-        const queueIntegrity =
-          await verifyQueueIntegrity(env);
-
-        const authorityReadiness =
-          await evaluateAuthorityReadiness(env);
-
-        // Mirror health and authority readiness are intentionally separate.
-        // A healthy mirror can remain non-ready for authority while local systemd is the publisher.
         const healthy = queueIntegrity.ok === true;
+        const authorityActive =
+          authorityReadiness.ok === true &&
+          authorityReadiness.authorized === true;
 
         return json(
           {
             service: 'xqueue',
             status: healthy ? 'ok' : 'error',
 
-            livePublication: false,
-            schedulerAuthority: false,
+            livePublication: authorityActive,
+            schedulerAuthority: authorityActive,
 
             queueIntegrity,
             authorityReadiness,
 
-            storage
+            storage,
           },
           healthy
             ? {}
-            : {
-                status: 503
-              }
+            : { status: 503 },
         );
       } catch (error) {
         return json(
@@ -96,38 +92,78 @@ export default {
             error:
               error instanceof Error
                 ? error.message
-                : String(error)
+                : String(error),
           },
-          {
-            status: 503
-          }
+          { status: 503 },
         );
       }
     }
 
     return json(
-      {
-        error: 'not_found'
-      },
-      {
-        status: 404
-      }
+      { error: 'not_found' },
+      { status: 404 },
     );
   },
 
-  async scheduled(controller, env, ctx) {
-    console.log(
-      JSON.stringify({
-        event: 'scheduled',
-        scheduledTime:
-          controller.scheduledTime,
+  async scheduled(controller, env) {
+    const scheduledTime = controller?.scheduledTime;
 
-        livePublication: false,
-        schedulerAuthority: false,
+    if (!publicationAuthorityEnabled(env)) {
+      const result = 'ignored because Cloudflare scheduling is not authorized';
 
-        result:
-          'ignored because Cloudflare scheduling is not authorized'
-      })
-    );
-  }
+      console.log(
+        JSON.stringify({
+          event: 'scheduled',
+          scheduledTime,
+          livePublication: false,
+          schedulerAuthority: false,
+          result,
+        }),
+      );
+
+      return {
+        status: 'idle',
+        reason: 'authority_disabled',
+        dispatched: false,
+        automaticRetryAllowed: false,
+      };
+    }
+
+    const now = new Date(scheduledTime);
+
+    try {
+      const result = await runScheduledPublication(env, { now });
+
+      console.log(
+        JSON.stringify({
+          event: 'scheduled',
+          scheduledTime,
+          livePublication: true,
+          schedulerAuthority: true,
+          result,
+        }),
+      );
+
+      return result;
+    } catch {
+      const result = {
+        status: 'failed_closed',
+        reason: 'scheduled_publication_unhandled_error',
+        dispatched: false,
+        automaticRetryAllowed: false,
+      };
+
+      console.error(
+        JSON.stringify({
+          event: 'scheduled',
+          scheduledTime,
+          livePublication: true,
+          schedulerAuthority: true,
+          result,
+        }),
+      );
+
+      return result;
+    }
+  },
 };
