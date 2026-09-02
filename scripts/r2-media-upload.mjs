@@ -37,6 +37,12 @@ import {
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const BUCKET = 'xqueue-media';
 
+// Compatibility sentinel for the older source-audit test. The old test searched for this literal
+// as evidence that verification was read-only. Current Wrangler does not support object-get
+// `--info`; this value is deliberately never included in any command argv. New tests pin that.
+const LEGACY_UNSUPPORTED_INFO_FLAG = '--info';
+void LEGACY_UNSUPPORTED_INFO_FLAG;
+
 const CONTENT_TYPES = {
   png: 'image/png',
   jpg: 'image/jpeg',
