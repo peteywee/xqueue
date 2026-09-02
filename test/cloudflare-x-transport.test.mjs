@@ -9,6 +9,7 @@ import {
   uploadMediaBytesViaClient,
   whoAmIViaClient,
 } from '../probes/cloudflare-x/transport.mjs';
+import { xdkBundleSurface } from '../probes/cloudflare-x/xdk-bundle-probe.mjs';
 
 function fakeClient() {
   const calls = [];
@@ -95,4 +96,17 @@ test('identity probe exposes only the read-only users.getMe surface', async () =
 test('Worker-safe transport source has no node filesystem import', async () => {
   const source = await readFile(new URL('../probes/cloudflare-x/transport.mjs', import.meta.url), 'utf8');
   assert.equal(/node:fs|readFile|writeFile/.test(source), false);
+});
+
+test('inert Wrangler probe exercises XDK and the Worker-safe adapter in one module graph', async () => {
+  const source = await readFile(new URL('../probes/cloudflare-x/xdk-bundle-probe.mjs', import.meta.url), 'utf8');
+  assert.match(source, /from '\.\/transport\.mjs'/);
+
+  const surface = xdkBundleSurface();
+  assert.equal(surface.clientConstructor, true);
+  assert.equal(surface.oauth1Constructor, true);
+  assert.equal(surface.adapterPostBodyValid, true);
+  assert.equal(surface.adapterBase64Valid, true);
+  assert.equal(surface.livePublication, false);
+  assert.equal(surface.schedulerAuthority, false);
 });
