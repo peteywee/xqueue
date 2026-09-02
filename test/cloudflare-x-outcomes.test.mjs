@@ -47,6 +47,21 @@ test('pre-dispatch validation/auth setup failure is confirmed not posted', () =>
   expect({ phase: 'pre_dispatch', error: { message: 'bad input' } }, CONFIRMED_NOT_POSTED, 'pre_dispatch_failure');
 });
 
+test('contradictory pre-dispatch/not-dispatched evidence is reconciliation-required', () => {
+  for (const phase of ['pre_dispatch', 'not_dispatched']) {
+    expect(
+      { phase, response: { status: 201, data: { id: 'could-have-posted' } } },
+      NEEDS_RECONCILIATION,
+      'contradictory_dispatch_evidence',
+    );
+    expect(
+      { phase, response: { status: 401 } },
+      NEEDS_RECONCILIATION,
+      'contradictory_dispatch_evidence',
+    );
+  }
+});
+
 test('explicit client-side HTTP refusals are confirmed not posted', () => {
   for (const status of [400, 401, 403, 404, 409, 422]) {
     expect(
@@ -95,7 +110,7 @@ test('known request-not-dispatched transport failure is confirmed not posted', (
   );
 });
 
-test('unknown or contradictory evidence fails closed to reconciliation', () => {
+test('unknown evidence fails closed to reconciliation', () => {
   expect({}, NEEDS_RECONCILIATION, 'insufficient_outcome_evidence');
   expect(
     { phase: 'dispatched', error: { code: 'SOMETHING_NEW' } },
