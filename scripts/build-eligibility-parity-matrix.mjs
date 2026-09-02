@@ -575,6 +575,90 @@ function fixtures(realQueue) {
   });
 
   add({
+    id: 'malformed-ledger-missing',
+    description:
+      'No ledger at all. Not knowing what has already been published is exactly when both sides must fail closed; a missing ledger is NOT an implied empty ledger.',
+    queue: [P1],
+    ledgerSetup: 'ledger is null',
+    ledger: null,
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'malformed-ledger-posted-record-without-tweet-id',
+    description:
+      'A posted record carries no tweetId, so the ledger cannot prove the post was actually published.',
+    queue: [P1],
+    ledgerSetup: 'posted: P1 with no tweetId',
+    ledger: ledger({ posted: { P1: { at: '2026-09-01T19:31:00.000Z' } } }),
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'malformed-ledger-skipped-record-without-reason',
+    description: 'A skipped record carries no reason, so the owner skip is unattributable.',
+    queue: [P1],
+    ledgerSetup: 'skipped: P1 with no reason',
+    ledger: ledger({ skipped: { P1: { at: '2026-09-01T19:32:00.000Z' } } }),
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'malformed-ledger-negative-spend',
+    description: 'spend is negative, so the ledger is not a trustworthy record of the campaign.',
+    queue: [P1],
+    ledgerSetup: 'spend: -0.01',
+    ledger: { version: 1, posted: {}, skipped: {}, spend: -0.01, inflight: null },
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'malformed-ledger-skipped-key-shadows-object-prototype',
+    description:
+      "ADVERSARIAL REGRESSION: skipped is keyed 'constructor'. normalizeState decides 'already posted?' with the truthiness test `if (posted[postId])`, which is true for every inherited Object.prototype member, so the LOCAL runtime throws and refuses to publish at all. A hasOwnProperty-based membership test would accept this ledger and select P1 — local refuses, Cloudflare accepts, the one dangerous divergence direction.",
+    queue: [P1],
+    ledgerSetup: "skipped: { constructor: ... } with an empty posted map",
+    ledger: ledger({
+      skipped: {
+        constructor: { at: '2026-09-01T19:32:00.000Z', reason: 'operator skip' },
+      },
+    }),
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'malformed-ledger-inflight-postid-shadows-object-prototype',
+    description:
+      "Same truthiness rule on the inflight guard: normalizeState rejects inflight.postId 'toString' via `posted[inflight.postId] || skipped[inflight.postId]`. The refusal must be the LEDGER refusal both sides, not the softer inflight block.",
+    queue: [P1],
+    ledgerSetup: "inflight: { postId: 'toString', status: 'publishing' }",
+    ledger: ledger({ inflight: { postId: 'toString', status: 'publishing' } }),
+    nowIso: '2026-09-01T19:40:00.000Z',
+  });
+
+  add({
+    id: 'failure-precedence-ledger-before-grace',
+    description:
+      'Two refusable inputs at once: a malformed ledger AND a negative graceMinutes. cmdPost reads state.json before it calls analyzeRuntime, so the reported refusal must be malformed_ledger, not invalid_grace. Pins the failure PRECEDENCE, not just the failure set.',
+    queue: [P1],
+    ledgerSetup: 'posted: P1 with no tweetId',
+    ledger: ledger({ posted: { P1: { at: '2026-09-01T19:31:00.000Z' } } }),
+    nowIso: '2026-09-01T19:40:00.000Z',
+    graceMinutes: -1,
+  });
+
+  add({
+    id: 'failure-precedence-grace-before-timezone',
+    description:
+      'A negative graceMinutes AND an unresolvable time zone. analyzeRuntime validates graceMinutes before it resolves any instant, so the reported refusal must be invalid_grace, not unknown_timezone.',
+    queue: [post('P1', '2026-09-01', '14:30', 'Mars/Phobos')],
+    ledgerSetup: 'empty ledger',
+    ledger: ledger(),
+    nowIso: '2026-09-01T19:40:00.000Z',
+    graceMinutes: -1,
+  });
+
+  add({
     id: 'unknown-timezone',
     description: 'A queue entry names a time zone this runtime cannot resolve.',
     queue: [post('P1', '2026-09-01', '14:30', 'Mars/Phobos')],
@@ -634,6 +718,21 @@ export function buildMatrix() {
       );
     }
 
+    // Safety direction, second rule: safeToPublish ANDs health.ok on top of the
+    // local decision, so it must never be true for an instant at which the REAL
+    // local analyzeRuntime reports an unhealthy runtime.
+    if (
+      !local.refused &&
+      local.health &&
+      local.health.ok === false &&
+      cloudflare.safeToPublish
+    ) {
+      safe = false;
+      divergences.push(
+        'FAIL: Cloudflare reports safeToPublish while the local health report is not ok.',
+      );
+    }
+
     if (!isDeepStrictEqual(local.selected, local.liveWouldPublish)) {
       divergences.push(
         `Documented: read-only projection selects ${JSON.stringify(local.selected)} while a local LIVE run would publish ${JSON.stringify(local.liveWouldPublish)} (cmdPost recovers a 'prepared' inflight by mutating state.json; a read-only evaluator must not assume that happened).`,
@@ -680,6 +779,8 @@ export function buildMatrix() {
       'safeToPublish is a Cloudflare-only extra gate (it ANDs health.ok on top of the local decision). It can only withhold, never permit; selection.selected still mirrors the local decision exactly.',
       'A missing ledger (null/undefined) is malformed_ledger rather than an implied empty ledger: not knowing what was already published is exactly when we must fail closed.',
       'invalid_now and invalid_max_publications are Cloudflare-only guards on inputs the local runtime hard-codes; both can only withhold. They are unit-tested rather than matrixed, because the local runtime has no corresponding refusal to compare against.',
+      'A queue entry with no usable id is PUBLISHED by the local runtime (isResolved falls through and isDue succeeds) but is malformed_queue for Cloudflare. Withholding only; asserted in test/cloudflare-eligibility-adversarial.test.mjs rather than matrixed, because the two sides legitimately disagree there.',
+      'A sparse (hole-containing) queue is likewise malformed_queue for Cloudflare while the local runtime silently skips the holes and publishes. Withholding only; unit-tested.',
     ],
     summary: { total: rows.length, pass, fail: rows.length - pass },
     cases: rows,
