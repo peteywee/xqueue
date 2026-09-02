@@ -23,12 +23,12 @@ case ":${PATH:-}:" in
     ;;
 esac
 
-NODE_VERSION="$($XQUEUE_NODE --version)"
+NODE_VERSION="$("$XQUEUE_NODE" --version)"
 if ! "$XQUEUE_NODE" -e 'const [M,m]=process.versions.node.split(".").map(Number);process.exit(M>22||(M===22&&m>=13)?0:1)'; then
   echo "ERROR: pinned Node runtime $NODE_VERSION is below required >=22.13" >&2
   exit 1
 fi
 
-PNPM_VERSION="$($XQUEUE_COREPACK pnpm --version)"
+PNPM_VERSION="$("$XQUEUE_COREPACK" pnpm --version)"
 
 printf 'XQueue pinned systemd runtime: Node %s, pnpm %s\n' "$NODE_VERSION" "$PNPM_VERSION"
