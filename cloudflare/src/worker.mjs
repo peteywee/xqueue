@@ -1,3 +1,4 @@
+import { publicationAuthorityEnabled } from './authority-config.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
 import { runScheduledPublication } from './production-publisher.mjs';
@@ -106,6 +107,28 @@ export default {
 
   async scheduled(controller, env) {
     const scheduledTime = controller?.scheduledTime;
+
+    if (!publicationAuthorityEnabled(env)) {
+      const result = 'ignored because Cloudflare scheduling is not authorized';
+
+      console.log(
+        JSON.stringify({
+          event: 'scheduled',
+          scheduledTime,
+          livePublication: false,
+          schedulerAuthority: false,
+          result,
+        }),
+      );
+
+      return {
+        status: 'idle',
+        reason: 'authority_disabled',
+        dispatched: false,
+        automaticRetryAllowed: false,
+      };
+    }
+
     const now = new Date(scheduledTime);
 
     try {
@@ -115,6 +138,8 @@ export default {
         JSON.stringify({
           event: 'scheduled',
           scheduledTime,
+          livePublication: true,
+          schedulerAuthority: true,
           result,
         }),
       );
@@ -132,6 +157,8 @@ export default {
         JSON.stringify({
           event: 'scheduled',
           scheduledTime,
+          livePublication: true,
+          schedulerAuthority: true,
           result,
         }),
       );
