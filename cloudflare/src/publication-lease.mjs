@@ -30,33 +30,9 @@ DO UPDATE SET
   acquired_at_ms = excluded.acquired_at_ms,
   expires_at_ms = excluded.expires_at_ms,
   updated_at_ms = excluded.updated_at_ms
-WHERE publication_leases.expires_at_ms <= excluded.acquired_at_ms
-`;
-
-const AUDIT_ACQUIRE_SQL = `
-INSERT INTO publication_lease_events (
-  lease_name,
-  generation,
-  owner_token,
-  acquisition_id,
-  event_type,
-  event_at_ms,
-  detail
-)
-SELECT
-  lease_name,
-  generation,
-  owner_token,
-  acquisition_id,
-  'acquired',
-  ?2,
-  CASE
-    WHEN generation = 1 THEN 'initial-acquisition'
-    ELSE 'expired-lease-takeover'
-  END
-FROM publication_leases
-WHERE lease_name = '${LEASE_NAME}'
-  AND acquisition_id = ?1
+WHERE
+  publication_leases.owner_token IS NULL OR
+  publication_leases.expires_at_ms <= excluded.acquired_at_ms
 `;
 
 const READ_SQL = `
@@ -73,33 +49,13 @@ WHERE lease_name = '${LEASE_NAME}'
 LIMIT 1
 `;
 
-const AUDIT_RELEASE_SQL = `
-INSERT INTO publication_lease_events (
-  lease_name,
-  generation,
-  owner_token,
-  acquisition_id,
-  event_type,
-  event_at_ms,
-  detail
-)
-SELECT
-  lease_name,
-  generation,
-  owner_token,
-  acquisition_id,
-  'released',
-  ?4,
-  'owner-release'
-FROM publication_leases
-WHERE lease_name = '${LEASE_NAME}'
-  AND owner_token = ?1
-  AND acquisition_id = ?2
-  AND generation = ?3
-`;
-
 const RELEASE_SQL = `
-DELETE FROM publication_leases
+UPDATE publication_leases
+SET
+  owner_token = NULL,
+  acquisition_id = NULL,
+  expires_at_ms = ?4,
+  updated_at_ms = ?4
 WHERE lease_name = '${LEASE_NAME}'
   AND owner_token = ?1
   AND acquisition_id = ?2
@@ -145,18 +101,32 @@ function firstResult(result) {
   return result?.results?.[0] ?? null;
 }
 
-function decodeLease(row) {
+function decodeLeaseRow(row) {
   if (!row) return null;
 
   return {
     leaseName: String(row.lease_name),
-    ownerToken: String(row.owner_token),
-    acquisitionId: String(row.acquisition_id),
+    ownerToken:
+      row.owner_token === null
+        ? null
+        : String(row.owner_token),
+    acquisitionId:
+      row.acquisition_id === null
+        ? null
+        : String(row.acquisition_id),
     generation: Number(row.generation),
     acquiredAtMs: Number(row.acquired_at_ms),
     expiresAtMs: Number(row.expires_at_ms),
     updatedAtMs: Number(row.updated_at_ms),
   };
+}
+
+function activeLease(row) {
+  if (!row?.ownerToken || !row?.acquisitionId) {
+    return null;
+  }
+
+  return row;
 }
 
 function redactLease(lease, nowMs) {
@@ -205,46 +175,36 @@ export async function acquirePublicationLease(
       nowMs,
       expiresAtMs,
     ),
-    db.prepare(AUDIT_ACQUIRE_SQL).bind(
-      acquisitionId,
-      nowMs,
-    ),
     db.prepare(READ_SQL),
   ]);
 
   const writeChanges = changes(results?.[0]);
-  const auditChanges = changes(results?.[1]);
-  const current = decodeLease(firstResult(results?.[2]));
+  const row = decodeLeaseRow(firstResult(results?.[1]));
+  const current = activeLease(row);
 
-  const acquired =
+  const identityMatches =
     current?.ownerToken === ownerToken &&
     current?.acquisitionId === acquisitionId &&
     current?.acquiredAtMs === nowMs &&
     current?.expiresAtMs === expiresAtMs;
 
-  if (acquired) {
-    if (writeChanges !== 1 || auditChanges !== 1) {
-      throw new Error(
-        'D1 lease acquisition changed state without exactly one audit event',
-      );
-    }
-
+  if (writeChanges === 1 && identityMatches) {
     return {
       acquired: true,
       lease: current,
     };
   }
 
-  if (writeChanges !== 0 || auditChanges !== 0) {
-    throw new Error(
-      'D1 lease acquisition reported unexpected partial state changes',
-    );
+  if (writeChanges === 0) {
+    return {
+      acquired: false,
+      current: redactLease(current, nowMs),
+    };
   }
 
-  return {
-    acquired: false,
-    current: redactLease(current, nowMs),
-  };
+  throw new Error(
+    'D1 lease acquisition produced inconsistent write/read results',
+  );
 }
 
 export async function releasePublicationLease(
@@ -266,33 +226,36 @@ export async function releasePublicationLease(
     throw new Error('lease.generation must be a positive safe integer');
   }
 
+  if (!Number.isSafeInteger(lease.acquiredAtMs) || lease.acquiredAtMs < 0) {
+    throw new Error('lease.acquiredAtMs must be a non-negative safe integer');
+  }
+
+  if (nowMs < lease.acquiredAtMs) {
+    throw new Error('release time cannot precede lease acquisition');
+  }
+
   const results = await db.batch([
-    db.prepare(AUDIT_RELEASE_SQL).bind(
+    db.prepare(RELEASE_SQL).bind(
       lease.ownerToken,
       lease.acquisitionId,
       lease.generation,
       nowMs,
     ),
-    db.prepare(RELEASE_SQL).bind(
-      lease.ownerToken,
-      lease.acquisitionId,
-      lease.generation,
-    ),
     db.prepare(READ_SQL),
   ]);
 
-  const auditChanges = changes(results?.[0]);
-  const deleteChanges = changes(results?.[1]);
-  const current = decodeLease(firstResult(results?.[2]));
+  const writeChanges = changes(results?.[0]);
+  const row = decodeLeaseRow(firstResult(results?.[1]));
+  const current = activeLease(row);
 
-  if (auditChanges === 1 && deleteChanges === 1) {
+  if (writeChanges === 1 && current === null) {
     return {
       released: true,
       current: null,
     };
   }
 
-  if (auditChanges === 0 && deleteChanges === 0) {
+  if (writeChanges === 0) {
     return {
       released: false,
       current: redactLease(current, nowMs),
@@ -300,7 +263,7 @@ export async function releasePublicationLease(
   }
 
   throw new Error(
-    'D1 lease release produced inconsistent audit/delete results',
+    'D1 lease release produced inconsistent write/read results',
   );
 }
 
@@ -317,15 +280,13 @@ export async function inspectPublicationLease(
     .first();
 
   return redactLease(
-    decodeLease(row),
+    activeLease(decodeLeaseRow(row)),
     nowMs,
   );
 }
 
 export const publicationLeaseSql = Object.freeze({
   acquire: ACQUIRE_SQL,
-  auditAcquire: AUDIT_ACQUIRE_SQL,
   read: READ_SQL,
-  auditRelease: AUDIT_RELEASE_SQL,
   release: RELEASE_SQL,
 });
