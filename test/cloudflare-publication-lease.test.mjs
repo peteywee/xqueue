@@ -73,11 +73,11 @@ function fixture() {
   const sqlite = new DatabaseSync(':memory:');
 
   for (const path of [
-    'cloudflare/migrations/0001_xqueue_runtime.sql',
-    'cloudflare/migrations/0002_runtime_evidence.sql',
-    'cloudflare/migrations/0003_publication_lease.sql',
+    '../cloudflare/migrations/0001_xqueue_runtime.sql',
+    '../cloudflare/migrations/0002_runtime_evidence.sql',
+    '../cloudflare/migrations/0003_publication_lease.sql',
   ]) {
-    sqlite.exec(readFileSync(path, 'utf8'));
+    sqlite.exec(readFileSync(new URL(path, import.meta.url), 'utf8'));
   }
 
   return { sqlite, db: new SqliteD1(sqlite) };
@@ -141,24 +141,23 @@ test('first contender acquires and is audited exactly once', async () => {
   }]);
 });
 
-test('same-instant contenders produce one winner and one audit grant', async () => {
+test('same-timestamp contenders still produce one winner and one audit grant', async () => {
   const { sqlite, db } = fixture();
+  const nowMs = 10_000;
 
-  const results = await Promise.all([
-    acquirePublicationLease(db, {
-      ...identity('alpha'),
-      nowMs: 10_000,
-      ttlMs: 5000,
-    }),
-    acquirePublicationLease(db, {
-      ...identity('bravo'),
-      nowMs: 10_000,
-      ttlMs: 5000,
-    }),
-  ]);
+  const alpha = await acquirePublicationLease(db, {
+    ...identity('alpha'),
+    nowMs,
+    ttlMs: 5000,
+  });
+  const bravo = await acquirePublicationLease(db, {
+    ...identity('bravo'),
+    nowMs,
+    ttlMs: 5000,
+  });
 
-  assert.equal(results.filter((r) => r.acquired).length, 1);
-  assert.equal(results.filter((r) => !r.acquired).length, 1);
+  assert.equal(alpha.acquired, true);
+  assert.equal(bravo.acquired, false);
   assert.equal(events(sqlite).length, 1);
   assert.equal(leaseRow(sqlite).generation, 1);
 });
@@ -356,6 +355,34 @@ test('an acquisition ID can never be granted again across generations', async ()
   assert.deepEqual(events(sqlite).map((event) => event.event_type), [
     'acquired',
     'released',
+  ]);
+});
+
+test('expired takeover with a replayed acquisition ID is rejected', async () => {
+  const { sqlite, db } = fixture();
+  const original = identity('alpha');
+
+  await acquirePublicationLease(db, {
+    ...original,
+    nowMs: 1000,
+    ttlMs: 5000,
+  });
+
+  await assert.rejects(
+    acquirePublicationLease(db, {
+      ownerToken: 'bravo-owner-token',
+      acquisitionId: original.acquisitionId,
+      nowMs: 6000,
+      ttlMs: 5000,
+    }),
+    /UNIQUE|constraint/i,
+  );
+
+  const row = leaseRow(sqlite);
+  assert.equal(row.owner_token, original.ownerToken);
+  assert.equal(row.generation, 1);
+  assert.deepEqual(events(sqlite).map((event) => event.event_type), [
+    'acquired',
   ]);
 });
 
