@@ -30,6 +30,10 @@ export function classifyPublicationOutcome(input = {}) {
   const postId = postIdFrom(input);
   const errorCode = typeof input?.error?.code === 'string' ? input.error.code : null;
 
+  if ((phase === 'pre_dispatch' || phase === 'not_dispatched') && status !== null) {
+    return result(NEEDS_RECONCILIATION, 'contradictory_dispatch_evidence');
+  }
+
   if (phase === 'pre_dispatch') {
     return result(CONFIRMED_NOT_POSTED, 'pre_dispatch_failure');
   }
