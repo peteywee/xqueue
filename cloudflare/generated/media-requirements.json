@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "generatedFrom": {
+    "policyVersion": 2,
+    "campaignStart": "2026-08-31",
+    "timezone": "America/Chicago"
+  },
+  "queueCount": 180,
+  "requiredCount": 4,
+  "allowedExtensions": [
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp"
+  ],
+  "objects": [
+    {
+      "postId": "D1",
+      "figure": 1,
+      "logicalMediaId": "figure-0001",
+      "keyPrefix": "media/figures/figure-0001"
+    },
+    {
+      "postId": "A4",
+      "figure": 9,
+      "logicalMediaId": "figure-0009",
+      "keyPrefix": "media/figures/figure-0009"
+    },
+    {
+      "postId": "A1",
+      "figure": 14,
+      "logicalMediaId": "figure-0014",
+      "keyPrefix": "media/figures/figure-0014"
+    },
+    {
+      "postId": "C1",
+      "figure": 23,
+      "logicalMediaId": "figure-0023",
+      "keyPrefix": "media/figures/figure-0023"
+    }
+  ]
+}

@@ -3,6 +3,8 @@
 
 # Generated/runtime state
 queue.json
+# Media manifest binds required figures to real local bytes; regenerate it locally.
+media-manifest.json
 state.json
 post.log
 .xqueue-publish.lock
@@ -11,6 +13,7 @@ post.log
 media/*
 !media/.gitkeep
 
+.wrangler/
 node_modules/
 
 # npm is not used here — the preinstall guard rejects it,

@@ -40,6 +40,12 @@ jobs:
       - name: Verify
         run: pnpm verify
 
+      - name: Assert the Cloudflare authority boundary is intact
+        run: node scripts/authority-boundary-audit.mjs
+
+      - name: Build exact Cloudflare Worker bundle
+        run: pnpm wrangler deploy --dry-run --outdir /tmp/xqueue-worker-bundle
+
       - name: Assert queue generation is portable
         shell: bash
         run: |

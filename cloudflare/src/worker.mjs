@@ -1,3 +1,6 @@
+import { verifyQueueIntegrity } from './queue-integrity.mjs';
+import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
+
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
 
@@ -52,15 +55,35 @@ export default {
         const storage =
           await storageHealth(env);
 
-        return json({
-          service: 'xqueue',
-          status: 'ok',
+        const queueIntegrity =
+          await verifyQueueIntegrity(env);
 
-          livePublication: false,
-          schedulerAuthority: false,
+        const authorityReadiness =
+          await evaluateAuthorityReadiness(env);
 
-          storage
-        });
+        // Mirror health and authority readiness are intentionally separate.
+        // A healthy mirror can remain non-ready for authority while local systemd is the publisher.
+        const healthy = queueIntegrity.ok === true;
+
+        return json(
+          {
+            service: 'xqueue',
+            status: healthy ? 'ok' : 'error',
+
+            livePublication: false,
+            schedulerAuthority: false,
+
+            queueIntegrity,
+            authorityReadiness,
+
+            storage
+          },
+          healthy
+            ? {}
+            : {
+                status: 503
+              }
+        );
       } catch (error) {
         return json(
           {
