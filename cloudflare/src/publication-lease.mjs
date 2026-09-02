@@ -3,6 +3,16 @@ const LEASE_NAME = 'publisher';
 export const MAX_PUBLICATION_LEASE_TTL_MS = 20 * 60 * 1000;
 export const MIN_PUBLICATION_LEASE_TTL_MS = 1000;
 
+const RETURNING_COLUMNS = `
+  lease_name,
+  owner_token,
+  acquisition_id,
+  generation,
+  acquired_at_ms,
+  expires_at_ms,
+  updated_at_ms
+`;
+
 const ACQUIRE_SQL = `
 INSERT INTO publication_leases (
   lease_name,
@@ -33,17 +43,12 @@ DO UPDATE SET
 WHERE
   publication_leases.owner_token IS NULL OR
   publication_leases.expires_at_ms <= excluded.acquired_at_ms
+RETURNING ${RETURNING_COLUMNS}
 `;
 
 const READ_SQL = `
 SELECT
-  lease_name,
-  owner_token,
-  acquisition_id,
-  generation,
-  acquired_at_ms,
-  expires_at_ms,
-  updated_at_ms
+${RETURNING_COLUMNS}
 FROM publication_leases
 WHERE lease_name = '${LEASE_NAME}'
 LIMIT 1
@@ -60,6 +65,7 @@ WHERE lease_name = '${LEASE_NAME}'
   AND owner_token = ?1
   AND acquisition_id = ?2
   AND generation = ?3
+RETURNING ${RETURNING_COLUMNS}
 `;
 
 function assertNonEmptyToken(name, value) {
@@ -90,11 +96,6 @@ function assertTtlMs(ttlMs) {
       `ttlMs must not exceed ${MAX_PUBLICATION_LEASE_TTL_MS}`,
     );
   }
-}
-
-function changes(result) {
-  const value = Number(result?.meta?.changes ?? 0);
-  return Number.isFinite(value) ? value : 0;
 }
 
 function firstResult(result) {
@@ -141,6 +142,20 @@ function redactLease(lease, nowMs) {
   };
 }
 
+function sameLease(a, b) {
+  return Boolean(
+    a &&
+    b &&
+    a.leaseName === b.leaseName &&
+    a.ownerToken === b.ownerToken &&
+    a.acquisitionId === b.acquisitionId &&
+    a.generation === b.generation &&
+    a.acquiredAtMs === b.acquiredAtMs &&
+    a.expiresAtMs === b.expiresAtMs &&
+    a.updatedAtMs === b.updatedAtMs
+  );
+}
+
 export function createPublicationLeaseIdentity() {
   return {
     ownerToken: crypto.randomUUID(),
@@ -178,33 +193,36 @@ export async function acquirePublicationLease(
     db.prepare(READ_SQL),
   ]);
 
-  const writeChanges = changes(results?.[0]);
-  const row = decodeLeaseRow(firstResult(results?.[1]));
-  const current = activeLease(row);
-
-  const identityMatches =
-    current?.ownerToken === ownerToken &&
-    current?.acquisitionId === acquisitionId &&
-    current?.acquiredAtMs === nowMs &&
-    current?.expiresAtMs === expiresAtMs;
-
-  if (writeChanges === 1 && identityMatches) {
-    return {
-      acquired: true,
-      lease: current,
-    };
-  }
-
-  if (writeChanges === 0) {
-    return {
-      acquired: false,
-      current: redactLease(current, nowMs),
-    };
-  }
-
-  throw new Error(
-    'D1 lease acquisition produced inconsistent write/read results',
+  const written = activeLease(
+    decodeLeaseRow(firstResult(results?.[0])),
   );
+  const current = activeLease(
+    decodeLeaseRow(firstResult(results?.[1])),
+  );
+
+  if (written !== null) {
+    const identityMatches =
+      written.ownerToken === ownerToken &&
+      written.acquisitionId === acquisitionId &&
+      written.acquiredAtMs === nowMs &&
+      written.expiresAtMs === expiresAtMs;
+
+    if (identityMatches && sameLease(written, current)) {
+      return {
+        acquired: true,
+        lease: current,
+      };
+    }
+
+    throw new Error(
+      'D1 lease acquisition produced inconsistent write/read results',
+    );
+  }
+
+  return {
+    acquired: false,
+    current: redactLease(current, nowMs),
+  };
 }
 
 export async function releasePublicationLease(
@@ -244,27 +262,34 @@ export async function releasePublicationLease(
     db.prepare(READ_SQL),
   ]);
 
-  const writeChanges = changes(results?.[0]);
-  const row = decodeLeaseRow(firstResult(results?.[1]));
-  const current = activeLease(row);
-
-  if (writeChanges === 1 && current === null) {
-    return {
-      released: true,
-      current: null,
-    };
-  }
-
-  if (writeChanges === 0) {
-    return {
-      released: false,
-      current: redactLease(current, nowMs),
-    };
-  }
-
-  throw new Error(
-    'D1 lease release produced inconsistent write/read results',
+  const writeRow = decodeLeaseRow(firstResult(results?.[0]));
+  const current = activeLease(
+    decodeLeaseRow(firstResult(results?.[1])),
   );
+
+  if (writeRow !== null) {
+    if (
+      writeRow.ownerToken === null &&
+      writeRow.acquisitionId === null &&
+      writeRow.generation === lease.generation &&
+      writeRow.updatedAtMs === nowMs &&
+      current === null
+    ) {
+      return {
+        released: true,
+        current: null,
+      };
+    }
+
+    throw new Error(
+      'D1 lease release produced inconsistent write/read results',
+    );
+  }
+
+  return {
+    released: false,
+    current: redactLease(current, nowMs),
+  };
 }
 
 export async function inspectPublicationLease(
