@@ -4,7 +4,14 @@
   "main": "cloudflare/src/worker.mjs",
   "compatibility_date": "2026-09-02",
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false
+    }
   },
   "d1_databases": [
     {
