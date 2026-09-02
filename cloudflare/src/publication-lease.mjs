@@ -35,6 +35,10 @@ WHERE
   publication_leases.expires_at_ms <= excluded.acquired_at_ms
 `;
 
+const DIRECT_CHANGES_SQL = `
+SELECT changes() AS direct_changes
+`;
+
 const READ_SQL = `
 SELECT
   lease_name,
@@ -92,13 +96,16 @@ function assertTtlMs(ttlMs) {
   }
 }
 
-function changes(result) {
-  const value = Number(result?.meta?.changes ?? 0);
-  return Number.isFinite(value) ? value : 0;
-}
-
 function firstResult(result) {
   return result?.results?.[0] ?? null;
+}
+
+function directChanges(result) {
+  const value = Number(firstResult(result)?.direct_changes);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('D1 direct change count is missing or invalid');
+  }
+  return value;
 }
 
 function decodeLeaseRow(row) {
@@ -175,11 +182,12 @@ export async function acquirePublicationLease(
       nowMs,
       expiresAtMs,
     ),
+    db.prepare(DIRECT_CHANGES_SQL),
     db.prepare(READ_SQL),
   ]);
 
-  const writeChanges = changes(results?.[0]);
-  const row = decodeLeaseRow(firstResult(results?.[1]));
+  const writeChanges = directChanges(results?.[1]);
+  const row = decodeLeaseRow(firstResult(results?.[2]));
   const current = activeLease(row);
 
   const identityMatches =
@@ -241,11 +249,12 @@ export async function releasePublicationLease(
       lease.generation,
       nowMs,
     ),
+    db.prepare(DIRECT_CHANGES_SQL),
     db.prepare(READ_SQL),
   ]);
 
-  const writeChanges = changes(results?.[0]);
-  const row = decodeLeaseRow(firstResult(results?.[1]));
+  const writeChanges = directChanges(results?.[1]);
+  const row = decodeLeaseRow(firstResult(results?.[2]));
   const current = activeLease(row);
 
   if (writeChanges === 1 && current === null) {
@@ -287,6 +296,7 @@ export async function inspectPublicationLease(
 
 export const publicationLeaseSql = Object.freeze({
   acquire: ACQUIRE_SQL,
+  directChanges: DIRECT_CHANGES_SQL,
   read: READ_SQL,
   release: RELEASE_SQL,
 });
