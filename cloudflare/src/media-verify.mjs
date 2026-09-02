@@ -13,6 +13,12 @@
 //   3. 'body_digest'        — last resort: read the body and digest it with crypto.subtle
 // If none of the three yields a digest, the object is NOT verified: it fails with 'no_hash_available'.
 // Absence of evidence is never treated as success.
+//
+// TRUST BOUNDARY. Sources 1 and 2 are ASSERTIONS BY THE BUCKET about bytes this module never reads;
+// only source 3 is an observation of the bytes themselves. A bucket that reports a checksum it does
+// not honour is therefore believed. Every object records which it was as `hashTrust`
+// ('bucket_asserted' | 'body_observed') and the summary counts the observed ones in
+// `bodyObservedCount`, so a caller can require real evidence when the trust level matters.
 
 export const KEY_ROOT = 'media/figures';
 export const ALLOWED_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
@@ -141,25 +147,32 @@ function failedObject(object, reason, extra = {}) {
     ok: false,
     reason,
     hashSource: null,
+    hashTrust: null,
     ...extra,
   };
 }
 
 async function resolveHash(bucket, key, head) {
   const fromChecksum = toHex(head?.checksums?.sha256);
-  if (fromChecksum) return { sha256: fromChecksum, hashSource: 'r2_checksum' };
+  if (fromChecksum) {
+    return { sha256: fromChecksum, hashSource: 'r2_checksum', hashTrust: 'bucket_asserted' };
+  }
 
   const fromMetadata = toHex(head?.customMetadata?.sha256);
-  if (fromMetadata) return { sha256: fromMetadata, hashSource: 'custom_metadata' };
+  if (fromMetadata) {
+    return { sha256: fromMetadata, hashSource: 'custom_metadata', hashTrust: 'bucket_asserted' };
+  }
 
   const body = await bucket.get(key);
   if (!body || typeof body.arrayBuffer !== 'function') {
-    return { sha256: null, hashSource: null };
+    return { sha256: null, hashSource: null, hashTrust: null };
   }
 
   const bytes = await body.arrayBuffer();
   const digested = await digestHex(bytes);
-  return digested ? { sha256: digested, hashSource: 'body_digest' } : { sha256: null, hashSource: null };
+  return digested
+    ? { sha256: digested, hashSource: 'body_digest', hashTrust: 'body_observed' }
+    : { sha256: null, hashSource: null, hashTrust: null };
 }
 
 async function verifyOne(bucket, object) {
@@ -210,6 +223,7 @@ async function verifyOne(bucket, object) {
 
   base.actual.sha256 = resolved.sha256;
   base.hashSource = resolved.hashSource;
+  base.hashTrust = resolved.hashTrust;
 
   if (resolved.sha256 !== String(object.sha256).toLowerCase()) {
     return { ...base, reason: 'hash_mismatch' };
@@ -218,48 +232,53 @@ async function verifyOne(bucket, object) {
   return { ...base, hashMatch: true, ok: true, reason: null };
 }
 
+export const MAX_LIST_PAGES = 100;
+
 /**
  * Lists bucket objects that the manifest does not require. Reporting only — nothing is deleted,
- * nothing is rewritten. Returns { ok, objects: [{key, size}], count, reason }.
+ * nothing is rewritten. Returns { ok, objects: [{key, size}], count, complete, reason }.
+ *
+ * `complete` is false when the walk stopped before the bucket was exhausted — the page ceiling was
+ * hit, or R2 reported `truncated` without handing back a cursor. An incomplete listing UNDER-reports
+ * strays, so it must never be mistaken for an observed absence of them.
  */
 export async function listUnrelatedObjects(env, manifest) {
   const bucket = env?.MEDIA;
   if (!bucket || typeof bucket.list !== 'function') {
-    return { ok: false, objects: [], count: 0, reason: 'r2_unreachable' };
+    return { ok: false, objects: [], count: 0, complete: false, reason: 'r2_unreachable' };
   }
 
   const required = expectedKeys(manifest);
   const found = [];
+  let complete = false;
 
   try {
     let cursor;
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < MAX_LIST_PAGES; page++) {
       const result = await bucket.list(cursor ? { cursor } : {});
       for (const object of result?.objects ?? []) {
         if (!required.has(object.key)) {
           found.push({ key: object.key, size: Number(object.size ?? 0) });
         }
       }
-      if (!result?.truncated || !result?.cursor) break;
+      if (!result?.truncated) {
+        complete = true;
+        break;
+      }
+      if (!result?.cursor) break;
       cursor = result.cursor;
     }
   } catch {
-    return { ok: false, objects: [], count: 0, reason: 'r2_unreachable' };
+    return { ok: false, objects: [], count: 0, complete: false, reason: 'r2_unreachable' };
   }
 
   found.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return { ok: true, objects: found, count: found.length, reason: null };
+  return { ok: true, objects: found, count: found.length, complete, reason: null };
 }
 
-/**
- * Verifies every object the manifest requires. Read-only.
- *
- * `ok` starts false and only becomes true when every required object is present with a matching
- * size AND a matching, actually-observed SHA-256. Unrelated objects are reported but never affect
- * `ok` and are never removed.
- */
-export async function verifyMediaObjects(env, manifest) {
-  const empty = {
+/** The fail-closed shape every result starts from: ok false, nothing verified, nothing claimed. */
+function emptySummary() {
+  return {
     ok: false,
     requiredCount: 0,
     verifiedCount: 0,
@@ -268,11 +287,17 @@ export async function verifyMediaObjects(env, manifest) {
     hashMismatchCount: 0,
     unrelatedObjectCount: 0,
     unrelatedObjects: [],
+    unrelatedListing: { ok: false, complete: false, reason: 'r2_unreachable' },
+    bodyObservedCount: 0,
     objects: [],
     failures: [],
     reason: null,
     readOnly: true,
   };
+}
+
+async function verifyMediaObjectsInner(env, manifest) {
+  const empty = emptySummary();
 
   const inspection = await inspectManifest(manifest).catch(() => ({
     ok: false,
@@ -327,6 +352,8 @@ export async function verifyMediaObjects(env, manifest) {
     hashMismatchCount: objects.filter((o) => o.reason === 'hash_mismatch').length,
     unrelatedObjectCount: unrelated.count,
     unrelatedObjects: unrelated.objects,
+    unrelatedListing: { ok: unrelated.ok, complete: unrelated.complete, reason: unrelated.reason },
+    bodyObservedCount: objects.filter((o) => o.hashTrust === 'body_observed').length,
     objects,
     failures,
     reason: failures.length === 0 ? null : (failures[0]?.reason ?? 'unverified'),
@@ -338,5 +365,33 @@ export async function verifyMediaObjects(env, manifest) {
     summary.verifiedCount === summary.requiredCount &&
     failures.length === 0;
 
+  // A manifest that requires nothing can never be evidence that the bucket is correct. It is not ok,
+  // and it must say why rather than reporting a reasonless failure.
+  if (summary.requiredCount === 0 && summary.reason === null) {
+    summary.reason = 'empty_required_set';
+  }
+
   return summary;
+}
+
+/**
+ * Verifies every object the manifest requires. Read-only.
+ *
+ * `ok` starts false and only becomes true when every required object is present with a matching
+ * size AND a matching SHA-256 — see the TRUST BOUNDARY note above for what "matching" rests on per
+ * object (`hashTrust`). Unrelated objects are reported but never affect `ok` and are never removed.
+ *
+ * Never throws. Any unexpected failure — including a manifest whose own property access raises —
+ * collapses to a fail-closed summary rather than a rejected promise.
+ */
+export async function verifyMediaObjects(env, manifest) {
+  try {
+    return await verifyMediaObjectsInner(env, manifest);
+  } catch {
+    return {
+      ...emptySummary(),
+      reason: 'manifest_malformed',
+      failures: [failedObject(null, 'manifest_malformed')],
+    };
+  }
 }

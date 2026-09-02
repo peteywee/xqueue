@@ -38,9 +38,13 @@ const CONTENT_TYPES = {
 };
 
 export function contentTypeFor(extension) {
-  const type = CONTENT_TYPES[String(extension).toLowerCase()];
-  if (!type) throw new Error(`Unsupported media extension: ${extension}`);
-  return type;
+  // Own-property lookup only: a plain-object index would resolve '__proto__' or 'constructor' off
+  // the prototype chain and hand a junk value to --content-type instead of refusing.
+  const key = String(extension).toLowerCase();
+  if (!Object.hasOwn(CONTENT_TYPES, key)) {
+    throw new Error(`Unsupported media extension: ${extension}`);
+  }
+  return CONTENT_TYPES[key];
 }
 
 /** The exact argv `wrangler r2 object put` is invoked with. No other bucket is ever named. */

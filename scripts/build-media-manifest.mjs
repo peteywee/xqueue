@@ -11,7 +11,7 @@
 // This script has no publication authority. It uploads nothing and posts nothing.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,16 +33,27 @@ export function defaultMediaDir({ root = ROOT, env = process.env } = {}) {
 /**
  * Resolve one figure number to its local source file.
  *
- * The match convention is EXACTLY src/cli.mjs `figurePath`:
+ * The match convention is src/cli.mjs `figurePath`:
  *   /(?:figure[-_]?)?0*<n>\.(png|jpg|jpeg|gif|webp)$/i
- * over the entries of MEDIA_DIR. Unlike the CLI (which takes the first hit), this returns every
- * candidate so an ambiguous figure can be rejected instead of silently resolved.
+ * over the entries of MEDIA_DIR, with ONE deliberate difference beyond returning every candidate
+ * rather than the first: the number must not be preceded by another digit.
+ *
+ * The CLI pattern is unanchored, so `0*1\.png$` also matches `figure-11.png`, `figure-21.png` and
+ * `figure-101.png`. In a real media directory holding figures 1..30 that makes figures 1 and 9
+ * ambiguous, and this builder — correctly refusing ambiguity — could then never produce a manifest
+ * at all. The `[^0-9]` boundary removes exactly those digit-suffix collisions and nothing else: the
+ * accepted set is a strict subset of the CLI's, so a name this resolves is always a name the CLI
+ * would also accept. A name it no longer matches fails loudly as "no local source file found".
  */
 export function findFigureCandidates(mediaDir, figure) {
   if (!existsSync(mediaDir)) return null;
 
+  if (!Number.isInteger(figure) || figure < 0) {
+    throw new Error(`figure must be a non-negative integer, received: ${String(figure)}`);
+  }
+
   const pattern = new RegExp(
-    `(?:figure[-_]?)?0*${figure}\\.(${ALLOWED_EXTENSIONS.join('|')})$`,
+    `^(?:.*[^0-9])?0*${figure}\\.(${ALLOWED_EXTENSIONS.join('|')})$`,
     'i',
   );
 
@@ -121,7 +132,23 @@ export function buildMediaManifest({
 
     const fileName = candidates[0];
     const localSource = join(mediaDir, fileName);
-    const byteSize = statSync(localSource).size;
+
+    // A directory or a dangling symlink named like a figure would otherwise escape as a raw EISDIR
+    // or ENOENT from statSync/readFileSync, losing the figure and post the operator needs to fix.
+    const stats = lstatSync(localSource, { throwIfNoEntry: false });
+    const resolved = stats?.isSymbolicLink()
+      ? statSync(localSource, { throwIfNoEntry: false })
+      : stats;
+
+    if (!resolved || !resolved.isFile()) {
+      problems.push(
+        `figure ${requirement.figure} (post ${requirement.postId}, ${requirement.logicalMediaId}): ` +
+          `local source is not a regular file: ${localSource}`,
+      );
+      continue;
+    }
+
+    const byteSize = resolved.size;
 
     if (byteSize === 0) {
       problems.push(
