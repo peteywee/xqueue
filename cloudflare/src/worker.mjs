@@ -1,3 +1,5 @@
+import { verifyQueueIntegrity } from './queue-integrity.mjs';
+
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
 
@@ -52,15 +54,30 @@ export default {
         const storage =
           await storageHealth(env);
 
-        return json({
-          service: 'xqueue',
-          status: 'ok',
+        const queueIntegrity =
+          await verifyQueueIntegrity(env);
 
-          livePublication: false,
-          schedulerAuthority: false,
+        // Fail closed: an unverifiable queue is an unhealthy runtime.
+        const healthy = queueIntegrity.ok === true;
 
-          storage
-        });
+        return json(
+          {
+            service: 'xqueue',
+            status: healthy ? 'ok' : 'error',
+
+            livePublication: false,
+            schedulerAuthority: false,
+
+            queueIntegrity,
+
+            storage
+          },
+          healthy
+            ? {}
+            : {
+                status: 503
+              }
+        );
       } catch (error) {
         return json(
           {
