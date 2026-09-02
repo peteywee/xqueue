@@ -34,6 +34,27 @@ test('missing bindings fail closed while never leaking supplied secret values', 
   }
 });
 
+test('null or hostile binding access fails closed without leaking thrown text', () => {
+  assert.throws(() => readXBindings(null), /Missing required X binding/);
+
+  const leaked = 'getter-secret-value';
+  const env = new Proxy({}, {
+    get() {
+      throw new Error(leaked);
+    },
+  });
+
+  let error;
+  try {
+    readXBindings(env);
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(error?.name, 'XIdentityContractError');
+  assert.equal(error.message.includes(leaked), false);
+  assert.match(error.message, /Unable to read X binding/);
+});
+
 test('identity evidence is reduced to id and username only', () => {
   const identity = sanitizeIdentityEvidence({
     data: {
@@ -77,6 +98,22 @@ test('read-only probe accepts only an injected getMe function', async () => {
   });
   assert.deepEqual(identity, { id: '123', username: 'PatrickCra94338' });
   assert.equal(calls, 1);
+});
+
+test('identity request failure is reduced to a generic redacted error', async () => {
+  const leaked = 'oauth-token-should-not-leak';
+  let error;
+  try {
+    await probeReadOnlyIdentity({
+      getMe: async () => { throw new Error(leaked); },
+      expected: { username: 'PatrickCra94338' },
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(error?.name, 'XIdentityContractError');
+  assert.equal(error.message, 'X identity probe failed');
+  assert.equal(error.message.includes(leaked), false);
 });
 
 test('read-only identity contract has no post or media-upload capability', async () => {
