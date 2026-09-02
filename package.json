@@ -16,6 +16,7 @@
     "validate:production": "node src/cli.mjs validate --production",
     "build": "node src/cli.mjs build",
     "build:production": "node scripts/build-production-queue.mjs",
+    "build:cf-bundle": "node scripts/build-cloudflare-queue-bundle.mjs",
     "stats": "node src/cli.mjs stats",
     "next": "node src/cli.mjs next",
     "health": "node scripts/xqueue-health.mjs",
