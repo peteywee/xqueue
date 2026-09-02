@@ -869,8 +869,31 @@ test('adversarial: the upload helper has no delete, sync, prune or publication p
     );
   }
 
-  // The only wrangler subcommands present are `object put` and the read-only `object get --info`.
+  // The only wrangler subcommands present are `object put` and the read-only `object get`.
   const subcommands = [...code.matchAll(/'(put|get|delete|list)'/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(subcommands)].sort(), ['get', 'put']);
-  assert.ok(code.includes("'--info'"), 'the post-upload check stays read-only');
+
+  // The post-upload check must stay read-only AND must observe the bytes rather than trust the
+  // bucket's own metadata. `--info` reports what R2 asserts about an object; downloading it and
+  // re-hashing locally is the only way to know what the bucket actually holds. Asserting on the
+  // download path keeps both properties pinned: the fetch is a `get`, and the bytes are re-hashed.
+  assert.match(
+    code,
+    /export function downloadCommand[\s\S]*?'get'[\s\S]*?'--file'/,
+    'the post-upload fetch uses the read-only get subcommand and writes to a file',
+  );
+  assert.doesNotMatch(
+    code,
+    /export function downloadCommand[\s\S]*?'(put|delete)'/,
+    'the post-upload fetch must never mutate',
+  );
+  assert.ok(
+    code.includes('verifyRemoteBytes'),
+    'downloaded bytes are re-hashed locally rather than trusted from metadata',
+  );
+  assert.match(
+    code,
+    /createHash\('sha256'\)\.update\(bytes\)/,
+    'remote verification digests the actual downloaded bytes',
+  );
 });
