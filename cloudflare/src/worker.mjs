@@ -1,4 +1,5 @@
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
+import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
 
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
@@ -57,7 +58,11 @@ export default {
         const queueIntegrity =
           await verifyQueueIntegrity(env);
 
-        // Fail closed: an unverifiable queue is an unhealthy runtime.
+        const authorityReadiness =
+          await evaluateAuthorityReadiness(env);
+
+        // Mirror health and authority readiness are intentionally separate.
+        // A healthy mirror can remain non-ready for authority while local systemd is the publisher.
         const healthy = queueIntegrity.ok === true;
 
         return json(
@@ -69,6 +74,7 @@ export default {
             schedulerAuthority: false,
 
             queueIntegrity,
+            authorityReadiness,
 
             storage
           },
