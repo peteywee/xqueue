@@ -11,6 +11,8 @@
 //     split exactly and never puts two posts from the same pillar on one day.
 //     Repeating it 9 times consumes exactly the 180-post library.
 
+import { resolveUniqueWallClock } from './schedule-slot.mjs';
+
 export const PILLAR_CYCLE = [
   ['A', 'B'], ['A', 'C'], ['B', 'D'], ['A', 'B'], ['A', 'D'],
   ['A', 'C'], ['B', 'C'], ['A', 'B'], ['A', 'D'], ['A', 'C'],
@@ -62,6 +64,14 @@ function chronologyKey(post) {
   return `${post.scheduledDate}T${post.scheduledTime}`;
 }
 
+function validateSlot(scheduledDate, scheduledTime, timezone) {
+  // Scheduling is the authority boundary for wall-clock validity. Reject a
+  // nonexistent or ambiguous local time before it can enter a queue. Runtime
+  // readers may still carry compatibility conversion code during migration,
+  // but they must never receive such a slot from this generator.
+  resolveUniqueWallClock({ scheduledDate, scheduledTime, timezone });
+}
+
 /**
  * Reschedule selected posts after the normal campaign tail without moving any
  * other post. Historical missed slots therefore remain empty instead of being
@@ -90,9 +100,12 @@ function deferPostsToEnd(queue, ids, cfg) {
     const slotIndex = i % cfg.slots.length;
     if (slotIndex === 0) date = days.next().value;
 
+    const scheduledTime = cfg.slots[slotIndex] ?? cfg.slots[cfg.slots.length - 1];
+    validateSlot(date, scheduledTime, cfg.timezone);
+
     const post = byId.get(requested[i]);
     post.scheduledDate = date;
-    post.scheduledTime = cfg.slots[slotIndex] ?? cfg.slots[cfg.slots.length - 1];
+    post.scheduledTime = scheduledTime;
     post.timezone = cfg.timezone;
     post.slot = slotIndex === 0 ? 'lull' : 'post-close';
     post.deferredToEnd = true;
@@ -141,10 +154,13 @@ export function schedule(posts, opts = {}) {
           })();
       if (!pick) break;
 
+      const scheduledTime = cfg.slots[s] ?? cfg.slots[cfg.slots.length - 1];
+      validateSlot(date, scheduledTime, cfg.timezone);
+
       queue.push({
         ...pick,
         scheduledDate: date,
-        scheduledTime: cfg.slots[s] ?? cfg.slots[cfg.slots.length - 1],
+        scheduledTime,
         timezone: cfg.timezone,
         slot: s === 0 ? 'lull' : 'post-close',
         status: 'queued',
