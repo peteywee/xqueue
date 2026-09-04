@@ -378,31 +378,71 @@ function fixtures(realQueue) {
   add({
     id: 'deferred-tail-B1',
     description:
-      'Real 180-post production queue, everything but the deferred tail published. B1 2027-01-04 14:30 America/Chicago is exactly due.',
+      'Real 180-post production queue with 173 posts resolved before B1. B1 2027-01-04 14:30 America/Chicago is exactly due.',
     queue: realQueue,
-    ledgerSetup: 'posted: all 177 posts before the deferred tail',
-    ledger: ledger({ posted: postedAllExcept(realQueue, ['B1', 'A30', 'C1']) }),
+    ledgerSetup: 'posted: 173 posts before B1',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['B1', 'A30', 'C1', 'B30', 'D1', 'B14', 'A59']) }),
     nowIso: '2027-01-04T20:30:00.000Z',
   });
 
   add({
     id: 'deferred-tail-A30',
     description:
-      'Real production queue with B1 published. A30 2027-01-04 22:15 America/Chicago is exactly due.',
+      'Real 180-post production queue with 174 posts resolved before A30. A30 2027-01-04 22:15 America/Chicago is exactly due.',
     queue: realQueue,
-    ledgerSetup: 'posted: all 178 posts through B1',
-    ledger: ledger({ posted: postedAllExcept(realQueue, ['A30', 'C1']) }),
+    ledgerSetup: 'posted: 174 posts before A30',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['A30', 'C1', 'B30', 'D1', 'B14', 'A59']) }),
     nowIso: '2027-01-05T04:15:00.000Z',
   });
 
   add({
     id: 'deferred-tail-C1',
     description:
-      'Real production queue with only C1 outstanding. C1 2027-01-05 14:30 America/Chicago is exactly due and is the final post.',
+      'Real 180-post production queue with 175 posts resolved before C1. C1 2027-01-05 14:30 America/Chicago is exactly due.',
     queue: realQueue,
-    ledgerSetup: 'posted: all 179 posts through A30',
-    ledger: ledger({ posted: postedAllExcept(realQueue, ['C1']) }),
+    ledgerSetup: 'posted: 175 posts before C1',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['C1', 'B30', 'D1', 'B14', 'A59']) }),
     nowIso: '2027-01-05T20:30:00.000Z',
+  });
+
+  add({
+    id: 'deferred-tail-B30',
+    description:
+      'Real 180-post production queue with 176 posts resolved before B30. B30 2027-01-05 22:15 America/Chicago is exactly due.',
+    queue: realQueue,
+    ledgerSetup: 'posted: 176 posts before B30',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['B30', 'D1', 'B14', 'A59']) }),
+    nowIso: '2027-01-06T04:15:00.000Z',
+  });
+
+  add({
+    id: 'deferred-tail-D1',
+    description:
+      'Real 180-post production queue with 177 posts resolved before D1. D1 2027-01-06 14:30 America/Chicago is exactly due.',
+    queue: realQueue,
+    ledgerSetup: 'posted: 177 posts before D1',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['D1', 'B14', 'A59']) }),
+    nowIso: '2027-01-06T20:30:00.000Z',
+  });
+
+  add({
+    id: 'deferred-tail-B14',
+    description:
+      'Real 180-post production queue with 178 posts resolved before B14. B14 2027-01-06 22:15 America/Chicago is exactly due.',
+    queue: realQueue,
+    ledgerSetup: 'posted: 178 posts before B14',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['B14', 'A59']) }),
+    nowIso: '2027-01-07T04:15:00.000Z',
+  });
+
+  add({
+    id: 'deferred-tail-A59',
+    description:
+      'Real 180-post production queue with 179 posts resolved before A59. A59 2027-01-07 14:30 America/Chicago is exactly due.',
+    queue: realQueue,
+    ledgerSetup: 'posted: 179 posts before A59',
+    ledger: ledger({ posted: postedAllExcept(realQueue, ['A59']) }),
+    nowIso: '2027-01-07T20:30:00.000Z',
   });
 
   // ---- DST ---------------------------------------------------------------

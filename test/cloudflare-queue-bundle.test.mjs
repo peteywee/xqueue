@@ -30,7 +30,7 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const CANONICAL_SHA256 =
-  '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1';
+  'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7';
 
 /** A minimal fake D1 binding. `rows` is what the SELECT returns. */
 function fakeEnv(rows, { throwOnQuery = false } = {}) {
@@ -82,7 +82,15 @@ test('bundle exposes the documented export surface', () => {
   assert.equal(GENERATED_FROM.timezone, 'America/Chicago');
   assert.deepEqual(GENERATED_FROM.slots, ['14:30', '22:15']);
   assert.deepEqual(GENERATED_FROM.daysOfWeek, [1, 2, 3, 4, 5]);
-  assert.deepEqual(GENERATED_FROM.deferToEnd, ['B1', 'A30', 'C1']);
+  assert.deepEqual(GENERATED_FROM.deferToEnd, [
+    'B1',
+    'A30',
+    'C1',
+    'B30',
+    'D1',
+    'B14',
+    'A59',
+  ]);
 });
 
 test('bundle decodes to exactly 180 posts with 180 unique IDs', () => {
@@ -120,10 +128,10 @@ test('canonical text is byte-identical to a live regeneration from content + pol
 
   assert.equal(live.length, CANONICAL_QUEUE_JSON.length);
   assert.equal(live, CANONICAL_QUEUE_JSON);
-  assert.equal(Buffer.byteLength(live, 'utf8'), 160277);
+  assert.equal(Buffer.byteLength(live, 'utf8'), 160385);
 });
 
-test('deferred tail is exactly B1 / A30 / C1 with their exact schedules', async () => {
+test('deferred tail is exactly the seven policy-deferred posts with their exact schedules', async () => {
   const expected = [
     {
       id: 'B1',
@@ -143,6 +151,30 @@ test('deferred tail is exactly B1 / A30 / C1 with their exact schedules', async 
       scheduledTime: '14:30',
       timezone: 'America/Chicago',
     },
+    {
+      id: 'B30',
+      scheduledDate: '2027-01-05',
+      scheduledTime: '22:15',
+      timezone: 'America/Chicago',
+    },
+    {
+      id: 'D1',
+      scheduledDate: '2027-01-06',
+      scheduledTime: '14:30',
+      timezone: 'America/Chicago',
+    },
+    {
+      id: 'B14',
+      scheduledDate: '2027-01-06',
+      scheduledTime: '22:15',
+      timezone: 'America/Chicago',
+    },
+    {
+      id: 'A59',
+      scheduledDate: '2027-01-07',
+      scheduledTime: '14:30',
+      timezone: 'America/Chicago',
+    },
   ];
 
   assert.deepEqual(EXPECTED_DEFERRED_TAIL, expected);
@@ -153,7 +185,7 @@ test('deferred tail is exactly B1 / A30 / C1 with their exact schedules', async 
   assert.equal(integrity.declaredMatches, true);
 
   const queue = decodeBundledQueue();
-  for (const post of queue.slice(-3)) {
+  for (const post of queue.slice(-7)) {
     assert.equal(post.deferredToEnd, true);
   }
 });
@@ -176,7 +208,7 @@ test('verifyQueueIntegrity returns ok against a matching D1 mirror', async () =>
   assert.equal(verdict.count, 180);
   assert.equal(verdict.uniqueIdCount, 180);
   assert.equal(verdict.expectedCount, 180);
-  assert.equal(verdict.deferredTail.length, 3);
+  assert.equal(verdict.deferredTail.length, 7);
 });
 
 test('verifyQueueIntegrity is ok when D1 omits the optional queue.count row', async () => {
@@ -258,7 +290,7 @@ test('negative: reordered deferred tail -> bundle_deferred_tail_mismatch', async
 
   assert.equal(verdict.ok, false);
   assert.equal(verdict.reason, 'bundle_deferred_tail_mismatch');
-  assert.equal(verdict.deferredTail[0].id, 'C1');
+  assert.equal(verdict.deferredTail[4].id, 'A59');
 });
 
 test('negative: altered scheduled time in the tail -> bundle_deferred_tail_mismatch', async () => {

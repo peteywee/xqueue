@@ -37,7 +37,7 @@ import worker from '../cloudflare/src/worker.mjs';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const CANONICAL_SHA256 =
-  '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1';
+  'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7';
 
 function fakeEnv(rows) {
   return {
@@ -96,7 +96,7 @@ test('the gate pins the canonical sha independently of the bundle', () => {
 });
 
 test('attack: a forged bundle that is internally consistent and mirrored in D1', async () => {
-  // 177 of 180 posts rewritten. Count, unique IDs and the deferred tail are all
+  // 173 of 180 posts rewritten. Count, unique IDs and the deferred tail are all
   // still correct, the declared sha matches the forged text, and the D1 mirror
   // echoes the forged sha. Only an independently pinned sha can catch this.
   const real = decodeBundledQueue();

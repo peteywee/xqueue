@@ -65,6 +65,10 @@ test('the parity matrix covers every required scenario', () => {
     'deferred-tail-B1',
     'deferred-tail-A30',
     'deferred-tail-C1',
+    'deferred-tail-B30',
+    'deferred-tail-D1',
+    'deferred-tail-B14',
+    'deferred-tail-A59',
     'dst-spring-forward',
     'dst-fall-back',
     'dst-spring-forward-gap-due',
@@ -86,7 +90,7 @@ test('the parity matrix is built against the canonical 180-post queue', () => {
   assert.equal(matrix.productionQueue.count, 180);
   assert.equal(
     matrix.productionQueue.sha256,
-    '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1',
+    'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7',
   );
 });
 
