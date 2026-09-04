@@ -71,7 +71,7 @@ function readinessDb(ledger = fullyResolvedLedger()) {
               results: [
                 {
                   key: 'queue.sha256',
-                  value: '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1',
+                  value: 'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7',
                 },
                 { key: 'queue.count', value: '180' },
               ],

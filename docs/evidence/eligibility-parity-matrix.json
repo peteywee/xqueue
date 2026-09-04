@@ -18,7 +18,7 @@
   "maxPublications": 1,
   "productionQueue": {
     "count": 180,
-    "sha256": "09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1"
+    "sha256": "a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7"
   },
   "documentedDivergences": [
     "Read-only fail-closed on a 'prepared' inflight: local live mode clears it by writing state.json and proceeds; the Cloudflare evaluator cannot write, so it blocks with reason inflight_prepared.",
@@ -29,8 +29,8 @@
     "A sparse (hole-containing) queue is likewise malformed_queue for Cloudflare while the local runtime silently skips the holes and publishes. Withholding only; unit-tested."
   ],
   "summary": {
-    "total": 40,
-    "pass": 40,
+    "total": 44,
+    "pass": 44,
     "fail": 0
   },
   "cases": [
@@ -134,19 +134,19 @@
     },
     {
       "id": "deferred-tail-A30",
-      "description": "Real production queue with B1 published. A30 2027-01-04 22:15 America/Chicago is exactly due.",
+      "description": "Real 180-post production queue with 174 posts resolved before A30. A30 2027-01-04 22:15 America/Chicago is exactly due.",
       "nowIso": "2027-01-05T04:15:00.000Z",
       "timezone": "America/Chicago",
       "graceMinutes": 20,
-      "ledgerSetup": "posted: all 178 posts through B1",
+      "ledgerSetup": "posted: 174 posts before A30",
       "local": {
         "refused": false,
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 178,
+          "postedCount": 174,
           "skippedCount": 0,
-          "unresolvedCount": 2,
+          "unresolvedCount": 6,
           "due": [
             "A30"
           ],
@@ -169,9 +169,9 @@
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 178,
+          "postedCount": 174,
           "skippedCount": 0,
-          "unresolvedCount": 2,
+          "unresolvedCount": 6,
           "due": [
             "A30"
           ],
@@ -184,6 +184,65 @@
         "blockReason": null,
         "selected": [
           "A30"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-A59",
+      "description": "Real 180-post production queue with 179 posts resolved before A59. A59 2027-01-07 14:30 America/Chicago is exactly due.",
+      "nowIso": "2027-01-07T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: 179 posts before A59",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 179,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "A59"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "A59"
+        ],
+        "liveWouldPublish": [
+          "A59"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 179,
+          "skippedCount": 0,
+          "unresolvedCount": 1,
+          "due": [
+            "A59"
+          ],
+          "overdue": [],
+          "next": null,
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "A59"
         ],
         "safeToPublish": true,
         "failures": []
@@ -193,19 +252,19 @@
     },
     {
       "id": "deferred-tail-B1",
-      "description": "Real 180-post production queue, everything but the deferred tail published. B1 2027-01-04 14:30 America/Chicago is exactly due.",
+      "description": "Real 180-post production queue with 173 posts resolved before B1. B1 2027-01-04 14:30 America/Chicago is exactly due.",
       "nowIso": "2027-01-04T20:30:00.000Z",
       "timezone": "America/Chicago",
       "graceMinutes": 20,
-      "ledgerSetup": "posted: all 177 posts before the deferred tail",
+      "ledgerSetup": "posted: 173 posts before B1",
       "local": {
         "refused": false,
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 177,
+          "postedCount": 173,
           "skippedCount": 0,
-          "unresolvedCount": 3,
+          "unresolvedCount": 7,
           "due": [
             "B1"
           ],
@@ -228,9 +287,9 @@
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 177,
+          "postedCount": 173,
           "skippedCount": 0,
-          "unresolvedCount": 3,
+          "unresolvedCount": 7,
           "due": [
             "B1"
           ],
@@ -251,25 +310,143 @@
       "verdict": "PASS"
     },
     {
-      "id": "deferred-tail-C1",
-      "description": "Real production queue with only C1 outstanding. C1 2027-01-05 14:30 America/Chicago is exactly due and is the final post.",
-      "nowIso": "2027-01-05T20:30:00.000Z",
+      "id": "deferred-tail-B14",
+      "description": "Real 180-post production queue with 178 posts resolved before B14. B14 2027-01-06 22:15 America/Chicago is exactly due.",
+      "nowIso": "2027-01-07T04:15:00.000Z",
       "timezone": "America/Chicago",
       "graceMinutes": 20,
-      "ledgerSetup": "posted: all 179 posts through A30",
+      "ledgerSetup": "posted: 178 posts before B14",
       "local": {
         "refused": false,
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 179,
+          "postedCount": 178,
           "skippedCount": 0,
-          "unresolvedCount": 1,
+          "unresolvedCount": 2,
+          "due": [
+            "B14"
+          ],
+          "overdue": [],
+          "next": "A59",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B14"
+        ],
+        "liveWouldPublish": [
+          "B14"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 178,
+          "skippedCount": 0,
+          "unresolvedCount": 2,
+          "due": [
+            "B14"
+          ],
+          "overdue": [],
+          "next": "A59",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B14"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-B30",
+      "description": "Real 180-post production queue with 176 posts resolved before B30. B30 2027-01-05 22:15 America/Chicago is exactly due.",
+      "nowIso": "2027-01-06T04:15:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: 176 posts before B30",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 176,
+          "skippedCount": 0,
+          "unresolvedCount": 4,
+          "due": [
+            "B30"
+          ],
+          "overdue": [],
+          "next": "D1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B30"
+        ],
+        "liveWouldPublish": [
+          "B30"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 176,
+          "skippedCount": 0,
+          "unresolvedCount": 4,
+          "due": [
+            "B30"
+          ],
+          "overdue": [],
+          "next": "D1",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "B30"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-C1",
+      "description": "Real 180-post production queue with 175 posts resolved before C1. C1 2027-01-05 14:30 America/Chicago is exactly due.",
+      "nowIso": "2027-01-05T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: 175 posts before C1",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 175,
+          "skippedCount": 0,
+          "unresolvedCount": 5,
           "due": [
             "C1"
           ],
           "overdue": [],
-          "next": null,
+          "next": "B30",
           "inflight": null,
           "graceMinutes": 20
         },
@@ -287,14 +464,14 @@
         "refusalCode": null,
         "health": {
           "ok": true,
-          "postedCount": 179,
+          "postedCount": 175,
           "skippedCount": 0,
-          "unresolvedCount": 1,
+          "unresolvedCount": 5,
           "due": [
             "C1"
           ],
           "overdue": [],
-          "next": null,
+          "next": "B30",
           "inflight": null,
           "graceMinutes": 20
         },
@@ -302,6 +479,65 @@
         "blockReason": null,
         "selected": [
           "C1"
+        ],
+        "safeToPublish": true,
+        "failures": []
+      },
+      "divergences": [],
+      "verdict": "PASS"
+    },
+    {
+      "id": "deferred-tail-D1",
+      "description": "Real 180-post production queue with 177 posts resolved before D1. D1 2027-01-06 14:30 America/Chicago is exactly due.",
+      "nowIso": "2027-01-06T20:30:00.000Z",
+      "timezone": "America/Chicago",
+      "graceMinutes": 20,
+      "ledgerSetup": "posted: 177 posts before D1",
+      "local": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 177,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "D1"
+          ],
+          "overdue": [],
+          "next": "B14",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "D1"
+        ],
+        "liveWouldPublish": [
+          "D1"
+        ]
+      },
+      "cloudflare": {
+        "refused": false,
+        "refusalCode": null,
+        "health": {
+          "ok": true,
+          "postedCount": 177,
+          "skippedCount": 0,
+          "unresolvedCount": 3,
+          "due": [
+            "D1"
+          ],
+          "overdue": [],
+          "next": "B14",
+          "inflight": null,
+          "graceMinutes": 20
+        },
+        "blocked": false,
+        "blockReason": null,
+        "selected": [
+          "D1"
         ],
         "safeToPublish": true,
         "failures": []

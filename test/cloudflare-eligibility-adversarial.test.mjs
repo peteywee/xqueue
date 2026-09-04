@@ -659,10 +659,14 @@ test('the deferred tail becomes eligible only at or after its deferred instant',
     ['B1', '2027-01-04T20:30:00.000Z'],
     ['A30', '2027-01-05T04:15:00.000Z'],
     ['C1', '2027-01-05T20:30:00.000Z'],
+    ['B30', '2027-01-06T04:15:00.000Z'],
+    ['D1', '2027-01-06T20:30:00.000Z'],
+    ['B14', '2027-01-07T04:15:00.000Z'],
+    ['A59', '2027-01-07T20:30:00.000Z'],
   ];
 
   // The tail sits at the very end of the queue, in this order.
-  assert.deepEqual(queue.slice(-3).map((p) => p.id), tail.map(([id]) => id));
+  assert.deepEqual(queue.slice(-7).map((p) => p.id), tail.map(([id]) => id));
 
   const outstanding = tail.map(([id]) => id);
 
@@ -711,7 +715,15 @@ test('the deferred tail becomes eligible only at or after its deferred instant',
 
 test('no deferred tail post is ever selected at a pre-deferral position in the campaign', () => {
   const queue = productionQueue();
-  const deferred = new Set(['B1', 'A30', 'C1']);
+  const deferred = new Set([
+    'B1',
+    'A30',
+    'C1',
+    'B30',
+    'D1',
+    'B14',
+    'A59',
+  ]);
   const firstTailInstant = Date.parse('2027-01-04T20:30:00.000Z');
 
   // Walk the whole campaign: at every non-deferred post's instant, with only
