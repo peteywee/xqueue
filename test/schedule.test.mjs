@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { schedule, stats, PILLAR_CYCLE } from '../src/schedule.mjs';
+import { resolveUniqueWallClock } from '../src/schedule-slot.mjs';
 
 /** Build a synthetic library with the same shape as the real one. */
 function library({ A = 72, B = 45, C = 36, D = 27 } = {}) {
@@ -120,6 +121,63 @@ test('custom slot times are honoured', () => {
   const q = schedule(library(), { start: '2026-09-07', slots: ['09:00', '17:30'] });
   assert.equal(q[0].scheduledTime, '09:00');
   assert.equal(q[1].scheduledTime, '17:30');
+});
+
+test('spring-forward nonexistent wall clocks are rejected at assignment time', () => {
+  assert.throws(
+    () => schedule(library(), {
+      start: '2027-03-14',
+      daysOfWeek: [0],
+      slots: ['02:30', '14:30'],
+      timezone: 'America/Chicago',
+    }),
+    /nonexistent local wall-clock time/,
+  );
+});
+
+test('fall-back ambiguous wall clocks are rejected unless explicitly disambiguated', () => {
+  assert.throws(
+    () => schedule(library(), {
+      start: '2027-11-07',
+      daysOfWeek: [0],
+      slots: ['01:30', '14:30'],
+      timezone: 'America/Chicago',
+    }),
+    /ambiguous local wall-clock time/,
+  );
+
+  assert.equal(
+    resolveUniqueWallClock({
+      scheduledDate: '2027-11-07',
+      scheduledTime: '01:30',
+      timezone: 'America/Chicago',
+      utcOffsetMinutes: -300,
+    }).toISOString(),
+    '2027-11-07T06:30:00.000Z',
+  );
+
+  assert.equal(
+    resolveUniqueWallClock({
+      scheduledDate: '2027-11-07',
+      scheduledTime: '01:30',
+      timezone: 'America/Chicago',
+      utcOffsetMinutes: -360,
+    }).toISOString(),
+    '2027-11-07T07:30:00.000Z',
+  );
+});
+
+test('strict wall-clock parsing rejects calendar and time rollover', () => {
+  for (const spec of [
+    { scheduledDate: '2027-02-30', scheduledTime: '14:30' },
+    { scheduledDate: '2027-03-14', scheduledTime: '24:00' },
+    { scheduledDate: '2027-03-14', scheduledTime: '02:60' },
+  ]) {
+    assert.throws(
+      () => resolveUniqueWallClock({ ...spec, timezone: 'America/Chicago' }),
+      /scheduledDate\/scheduledTime/,
+    );
+  }
 });
 
 test('an unbalanced library still schedules every post', () => {
