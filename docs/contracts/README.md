@@ -14,12 +14,12 @@
 |---|---|
 | Doc ID | XQ-DOC-CONTRACT-0000 |
 | Status | proposed — not yet approved |
-| Version | 0.2.0 |
+| Version | 0.2.1 |
 | Created | 2026-09-03 |
-| Last updated | 2026-09-03 |
+| Last updated | 2026-09-04 |
 | Owner | Patrick Craven (sole approving authority) |
-| Drafted by | Claude, revised against the ChatGPT contract audit of 2026-09-03 |
-| Verified against implementation | No — repository not inspectable from the drafting session |
+| Drafted by | Claude, revised against the ChatGPT contract audit of 2026-09-03; scheduling contract added by ChatGPT on 2026-09-04 after recovery failed |
+| Verified against implementation | No — implementation conformance is audited separately |
 
 ## What a contract is
 
@@ -94,15 +94,17 @@ never filled with a plausible value.
 
 | # | File | Version | Status | Last updated | Answers |
 |---|---|---|---|---|---|
-| 1 | `scheduling-and-missed-slot-contract.md` | Not yet verified | Not yet verified | Not yet verified | What happens when time passes, slots are missed, DST shifts, or content is deferred |
+| 1 | `scheduling-and-missed-slot-contract.md` | 0.1.0 | proposed | 2026-09-04 | What happens when time passes, slots are missed, DST shifts, or content is deferred |
 | 2 | `publication-transaction-contract.md` | 0.2.0 | proposed | 2026-09-03 | When X may be called, what an attempt produced, how many dispatches |
 | 3 | `authority-and-ownership-contract.md` | 0.2.0 | proposed | 2026-09-03 | Who may publish, who may schedule, what is owner-reserved |
 | 4 | `durable-state-and-ledger-contract.md` | 0.2.0 | proposed | 2026-09-03 | What is authoritative, which transitions are legal, what is append-only |
 | 5 | `workflow-lifecycle-contract.md` | 0.2.0 | proposed | 2026-09-03 | Workflow IDs, schedule versions, supersession, replacement, stale wakeups |
 
-Contract 1 already exists in the repository and is not re-authored here. Three requirements now
-depend on it and are listed in `durable-state-and-ledger-contract.md` §4.1; reconcile it before
-activating the set.
+Contract 1 was referenced by the supplied 0.2.0 set but could not be recovered from `main` or
+available saved xqueue materials. Issue #42 records that gap. A fresh 0.1.0 proposal was added on
+2026-09-04 from the already-stated cross-contract business intent and safety constraints. It was
+explicitly not reverse-engineered from current scheduler code. Implementation conformance is a
+separate audit.
 
 Deliberately **not** separate contracts: timezone, retry, idempotency, concurrency, D1, R2, and
 X API behavior. Each belongs inside one of the five above.
@@ -185,12 +187,14 @@ individually; a finding that was rejected is recorded as rejected rather than dr
 All five documents are `proposed`. They become binding when Patrick marks them `active`. Until
 then they MUST NOT be cited as authority in a milestone, evidence index, or status report.
 
-Blocking open questions across the four documents in this set: **22**. They are listed per
-contract and summarised in `reviews/2026-09-03-audit-disposition.md`.
+Blocking open questions remain listed per contract and in the review/tracking issues. The
+implementation-alignment program is tracked in #48; issue closure, code merge, production cutover,
+and contract activation are intentionally separate decisions.
 
 ## Change log
 
 | Date | Version | Change |
 |---|---|---|
+| 2026-09-04 | 0.2.1 | Registered the newly created scheduling/missed-slot contract after the referenced prior file could not be recovered; corrected the README's recovery history without deriving requirements from implementation. |
 | 2026-09-03 | 0.2.0 | Revised against external audit. Added layer vocabulary; corrected tooling claims; added `contract-lint.mjs` and `install-doc-scripts.mjs`; added reviews directory; relaxed supersession ceremony for proposed drafts. |
 | 2026-09-03 | 0.1.0 | Initial directory established. |
