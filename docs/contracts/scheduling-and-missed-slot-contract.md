@@ -102,7 +102,7 @@ slot. `due` MUST NOT be persisted as lifecycle state.
 **SCHED-11** — The grace window MUST be an explicit scheduling-policy value. A runtime MUST NOT
 invent, extend, or shorten grace based on how late a worker happened to wake up.
 
-**SCHED-12** — An unresolved slot becomes missed only when the current instant is strictly later
+**SCHED-12** — An unresolved slot MUST become missed only when the current instant is strictly later
 than `resolved_instant + grace_window`. The exact boundary instant remains inside grace.
 
 **SCHED-13** — Once a slot is missed, the stale slot MUST NOT authorize a publication dispatch.
