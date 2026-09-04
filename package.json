@@ -36,7 +36,11 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
+    "doc:stamp": "node scripts/doc-stamp.mjs",
+    "doc:stamp:check": "node scripts/doc-stamp.mjs --check",
+    "contract:lint": "node scripts/contract-lint.mjs",
+    "contract:lint:strict": "node scripts/contract-lint.mjs --strict",
+    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/contract-lint.mjs scripts/doc-stamp.mjs scripts/install-doc-scripts.mjs && node scripts/contract-lint.mjs --strict && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
