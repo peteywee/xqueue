@@ -187,6 +187,8 @@ export default {
         dispatched: false,
         automaticRetryAllowed: false,
       };
+      const logResult =
+        'ignored because Cloudflare scheduling is not authorized';
 
       await recordObservation(env, {
         scheduledTimeMs,
@@ -201,7 +203,7 @@ export default {
           scheduledTime,
           livePublication: false,
           schedulerAuthority: false,
-          result,
+          result: logResult,
         }),
       );
 
