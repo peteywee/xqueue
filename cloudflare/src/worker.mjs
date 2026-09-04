@@ -1,6 +1,10 @@
 import { publicationAuthorityEnabled } from './authority-config.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
+import {
+  inspectSchedulerLiveness,
+  recordSchedulerObservation,
+} from './scheduler-liveness.mjs';
 import { runScheduledPublication } from './production-publisher.mjs';
 
 function json(value, init = {}) {
@@ -48,6 +52,46 @@ async function storageHealth(env) {
   };
 }
 
+function scheduledMs(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0
+    ? number
+    : null;
+}
+
+export function schedulerAuthorityFrom(publicationAuthority, schedulerLiveness) {
+  return publicationAuthority === true && schedulerLiveness?.ok === true;
+}
+
+async function recordObservation(env, {
+  scheduledTimeMs,
+  phase,
+  authorityEnabled,
+  result = null,
+}) {
+  if (scheduledTimeMs === null) {
+    return { ok: false, reason: 'scheduled_time_invalid' };
+  }
+
+  const verdict = await recordSchedulerObservation(env, {
+    scheduledTimeMs,
+    observedAtMs: Date.now(),
+    phase,
+    authorityEnabled,
+    result,
+  });
+
+  if (!verdict.ok) {
+    console.error(JSON.stringify({
+      event: 'scheduler_observation_write_failed',
+      phase,
+      reason: verdict.reason,
+    }));
+  }
+
+  return verdict;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -57,19 +101,30 @@ export default {
         const storage = await storageHealth(env);
         const queueIntegrity = await verifyQueueIntegrity(env);
         const authorityReadiness = await evaluateAuthorityReadiness(env);
+        const schedulerLiveness = await inspectSchedulerLiveness(env);
 
         const healthy = queueIntegrity.ok === true;
-        const authorityActive =
+        const publicationAuthority =
           authorityReadiness.ok === true &&
           authorityReadiness.authorized === true;
+        const schedulerAuthority = schedulerAuthorityFrom(
+          publicationAuthority,
+          schedulerLiveness,
+        );
 
         return json(
           {
             service: 'xqueue',
             status: healthy ? 'ok' : 'error',
 
-            livePublication: authorityActive,
-            schedulerAuthority: authorityActive,
+            // Backward-compatible capability signal. This says the publication path
+            // is authorized/readiness-gated; it does NOT claim scheduler liveness.
+            livePublication: publicationAuthority,
+            publicationAuthority,
+
+            // Scheduler authority now requires independent durable liveness evidence.
+            schedulerAuthority,
+            schedulerLiveness,
 
             queueIntegrity,
             authorityReadiness,
@@ -87,7 +142,13 @@ export default {
             status: 'error',
 
             livePublication: false,
+            publicationAuthority: false,
             schedulerAuthority: false,
+            schedulerLiveness: {
+              ok: false,
+              status: 'unknown',
+              reason: 'health_evaluation_failed',
+            },
 
             error:
               error instanceof Error
@@ -107,9 +168,32 @@ export default {
 
   async scheduled(controller, env) {
     const scheduledTime = controller?.scheduledTime;
+    const scheduledTimeMs = scheduledMs(scheduledTime);
+    const authorityEnabled = publicationAuthorityEnabled(env);
 
-    if (!publicationAuthorityEnabled(env)) {
-      const result = 'ignored because Cloudflare scheduling is not authorized';
+    // Heartbeat evidence is best-effort and cannot authorize publication. Failure to
+    // record it is surfaced to the watchdog/health path but does not create a second
+    // publication decision system.
+    await recordObservation(env, {
+      scheduledTimeMs,
+      phase: 'started',
+      authorityEnabled,
+    });
+
+    if (!authorityEnabled) {
+      const result = {
+        status: 'idle',
+        reason: 'authority_disabled',
+        dispatched: false,
+        automaticRetryAllowed: false,
+      };
+
+      await recordObservation(env, {
+        scheduledTimeMs,
+        phase: 'completed',
+        authorityEnabled,
+        result,
+      });
 
       console.log(
         JSON.stringify({
@@ -121,18 +205,20 @@ export default {
         }),
       );
 
-      return {
-        status: 'idle',
-        reason: 'authority_disabled',
-        dispatched: false,
-        automaticRetryAllowed: false,
-      };
+      return result;
     }
 
     const now = new Date(scheduledTime);
 
     try {
       const result = await runScheduledPublication(env, { now });
+
+      await recordObservation(env, {
+        scheduledTimeMs,
+        phase: 'completed',
+        authorityEnabled,
+        result,
+      });
 
       console.log(
         JSON.stringify({
@@ -152,6 +238,13 @@ export default {
         dispatched: false,
         automaticRetryAllowed: false,
       };
+
+      await recordObservation(env, {
+        scheduledTimeMs,
+        phase: 'completed',
+        authorityEnabled,
+        result,
+      });
 
       console.error(
         JSON.stringify({

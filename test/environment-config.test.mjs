@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import {
   PREVIEW,
   PRODUCTION,
+  WATCHDOG,
   parseStrictJsonConfig,
   validatePreviewConfig,
   validateProductionConfig,
+  validateWatchdogConfig,
   verifyRepositoryEnvironmentConfigs,
 } from '../scripts/verify-environment-config.mjs';
 
@@ -25,6 +27,11 @@ const preview = parseStrictJsonConfig(
   'wrangler.jsonc',
 );
 
+const watchdog = parseStrictJsonConfig(
+  fs.readFileSync(new URL('../wrangler.watchdog.jsonc', import.meta.url), 'utf8'),
+  'wrangler.watchdog.jsonc',
+);
+
 test('repository environment configs are structurally isolated', () => {
   const result = verifyRepositoryEnvironmentConfigs(
     new URL('..', import.meta.url).pathname,
@@ -33,6 +40,8 @@ test('repository environment configs are structurally isolated', () => {
   assert.equal(result.ok, true);
   assert.equal(result.production.databaseId, PRODUCTION.databaseId);
   assert.equal(result.preview.databaseId, PREVIEW.databaseId);
+  assert.equal(result.watchdog.worker, WATCHDOG.workerName);
+  assert.equal(result.watchdog.publicationCapability, false);
 });
 
 test('production config accepts the pinned production-only shape', () => {
@@ -41,6 +50,11 @@ test('production config accepts the pinned production-only shape', () => {
 
 test('preview config accepts the pinned preview-only inert shape', () => {
   assert.equal(validatePreviewConfig(preview), true);
+});
+
+test('watchdog config accepts production D1 read/write metadata with no publication surface', () => {
+  assert.equal(validateWatchdogConfig(watchdog), true);
+  assert.equal('r2_buckets' in watchdog, false);
 });
 
 test('production config rejects preview_database_id even when production database_id is correct', () => {
@@ -91,6 +105,43 @@ test('preview config rejects publication cron registration', () => {
   assert.throws(
     () => validatePreviewConfig(hostile),
     /preview config must not register publication cron triggers/,
+  );
+});
+
+test('watchdog config rejects R2 media capability', () => {
+  const hostile = clone(watchdog);
+  hostile.r2_buckets = [{ binding: 'MEDIA', bucket_name: 'xqueue-media' }];
+
+  assert.throws(
+    () => validateWatchdogConfig(hostile),
+    /must not bind R2 publication media/,
+  );
+});
+
+test('watchdog config rejects publication authority or X credential names', () => {
+  for (const secret of [
+    'XQUEUE_PUBLISH_AUTHORITY',
+    'X_API_KEY',
+    'X_API_SECRET',
+    'X_ACCESS_TOKEN',
+    'X_ACCESS_SECRET',
+  ]) {
+    const hostile = clone(watchdog);
+    hostile.vars = { [secret]: 'forbidden' };
+    assert.throws(
+      () => validateWatchdogConfig(hostile),
+      /forbidden publication capability/,
+    );
+  }
+});
+
+test('watchdog config rejects the publication Worker module', () => {
+  const hostile = clone(watchdog);
+  hostile.main = 'cloudflare/src/worker.mjs';
+
+  assert.throws(
+    () => validateWatchdogConfig(hostile),
+    /watchdog main must be/,
   );
 });
 

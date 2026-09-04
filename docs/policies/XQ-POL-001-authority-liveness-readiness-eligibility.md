@@ -1,6 +1,6 @@
 # XQ-POL-001 — Authority, Liveness, Readiness, and Eligibility
 
-Status: Proposed
+Status: Proposed / implementation in draft PR #61
 Owner: Top Shelf Service / xqueue owner
 Source: Production incident #56; implementation tracker #58
 
@@ -22,11 +22,26 @@ In particular:
 3. Scheduler liveness MUST be backed by durable or independently observable invocation evidence.
 4. Unknown/stale liveness MUST be reported as unknown/failed rather than healthy.
 5. The liveness-control path MUST be structurally incapable of publishing.
+6. Heartbeat persistence failure MUST NOT manufacture publication authority or convert monitoring into a publication decision path.
 
 ## Required controls
 
-Implementation is tracked by #58 and the durable authority work referenced by #46/#59.
+- Production scheduled invocations persist a sanitized scheduler observation in D1 metadata.
+- `/health` exposes `schedulerLiveness` separately from `publicationAuthority` and `authorityReadiness`.
+- `schedulerAuthority` is true only when publication authority is valid AND durable liveness evidence is fresh.
+- `xqueue-watchdog` is a separate Worker bundle with D1 only: no R2 media binding, X credentials, publication authority config, or publication imports.
+- Watchdog alert/recovery state is provider-neutral and bounded: initial stale threshold 3 hours; re-notification no more frequently than 12 hours.
+- Notification-provider selection remains owner-reserved under #58.
 
 ## Failure behavior
 
-When authority is conflicting or unknown, publication fails closed. When liveness is unknown or stale, health must say so explicitly; it must not fabricate scheduler proof.
+When authority is conflicting or unknown, publication fails closed. When liveness is unknown or stale, health says so explicitly and `schedulerAuthority` remains false. Monitoring failure does not gain publication capability.
+
+## Required negative verification
+
+- authority present + heartbeat absent => scheduler authority false;
+- stale heartbeat => liveness stale;
+- watchdog config with R2/X/publication capability => verification fail;
+- watchdog source importing publication machinery => authority audit fail;
+- alert path can emit a signal without dispatching a publication;
+- recovery produces one recovery signal, then returns to silence.

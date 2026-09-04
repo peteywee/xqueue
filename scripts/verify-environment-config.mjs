@@ -17,6 +17,14 @@ export const PREVIEW = Object.freeze({
   databaseId: 'f5f9bea9-e88c-41ab-9407-70356079a638',
 });
 
+export const WATCHDOG = Object.freeze({
+  workerName: 'xqueue-watchdog',
+  main: 'cloudflare/src/liveness-watchdog.mjs',
+  databaseName: PRODUCTION.databaseName,
+  databaseId: PRODUCTION.databaseId,
+  cron: '7 * * * *',
+});
+
 function fail(message) {
   const error = new Error(message);
   error.code = 'XQUEUE_ENV_CONFIG_INVALID';
@@ -51,6 +59,21 @@ function requireSingleDb(config, label) {
 function exactCrons(config) {
   const crons = config?.triggers?.crons;
   return Array.isArray(crons) ? crons : [];
+}
+
+function assertNoPublicationSecrets(config, label) {
+  const serialized = JSON.stringify(config);
+  for (const forbidden of [
+    'XQUEUE_PUBLISH_AUTHORITY',
+    'X_API_KEY',
+    'X_API_SECRET',
+    'X_ACCESS_TOKEN',
+    'X_ACCESS_SECRET',
+  ]) {
+    if (serialized.includes(forbidden)) {
+      fail(`${label} contains forbidden publication capability ${forbidden}`);
+    }
+  }
 }
 
 export function validateProductionConfig(config) {
@@ -111,6 +134,39 @@ export function validatePreviewConfig(config) {
   return true;
 }
 
+export function validateWatchdogConfig(config) {
+  requireObject(config, 'watchdog config');
+  const db = requireSingleDb(config, 'watchdog config');
+
+  if (config.name !== WATCHDOG.workerName) {
+    fail(`watchdog worker name must be ${WATCHDOG.workerName}`);
+  }
+  if (config.main !== WATCHDOG.main) {
+    fail(`watchdog main must be ${WATCHDOG.main}`);
+  }
+  if (db.database_name !== WATCHDOG.databaseName || db.database_id !== WATCHDOG.databaseId) {
+    fail('watchdog must read the pinned production D1 database');
+  }
+
+  const crons = exactCrons(config);
+  if (crons.length !== 1 || crons[0] !== WATCHDOG.cron) {
+    fail(`watchdog config must define exactly one cron: ${WATCHDOG.cron}`);
+  }
+
+  if (Array.isArray(config.r2_buckets) && config.r2_buckets.length > 0) {
+    fail('watchdog config must not bind R2 publication media');
+  }
+
+  assertNoPublicationSecrets(config, 'watchdog config');
+
+  const serialized = JSON.stringify(config);
+  if (serialized.includes(PREVIEW.databaseId) || serialized.includes(PREVIEW.databaseName)) {
+    fail('watchdog config contains preview D1 identity');
+  }
+
+  return true;
+}
+
 export function parseStrictJsonConfig(text, label = 'config') {
   try {
     return JSON.parse(text);
@@ -120,21 +176,22 @@ export function parseStrictJsonConfig(text, label = 'config') {
 }
 
 export function verifyRepositoryEnvironmentConfigs(root = process.cwd()) {
-  const productionPath = path.join(root, 'wrangler.authority.jsonc');
-  const previewPath = path.join(root, 'wrangler.jsonc');
-
   const production = parseStrictJsonConfig(
-    fs.readFileSync(productionPath, 'utf8'),
+    fs.readFileSync(path.join(root, 'wrangler.authority.jsonc'), 'utf8'),
     'wrangler.authority.jsonc',
   );
-
   const preview = parseStrictJsonConfig(
-    fs.readFileSync(previewPath, 'utf8'),
+    fs.readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8'),
     'wrangler.jsonc',
+  );
+  const watchdog = parseStrictJsonConfig(
+    fs.readFileSync(path.join(root, 'wrangler.watchdog.jsonc'), 'utf8'),
+    'wrangler.watchdog.jsonc',
   );
 
   validateProductionConfig(production);
   validatePreviewConfig(preview);
+  validateWatchdogConfig(watchdog);
 
   return {
     ok: true,
@@ -147,6 +204,12 @@ export function verifyRepositoryEnvironmentConfigs(root = process.cwd()) {
       worker: preview.name,
       databaseId: preview.d1_databases[0].database_id,
       crons: preview.triggers.crons,
+    },
+    watchdog: {
+      worker: watchdog.name,
+      databaseId: watchdog.d1_databases[0].database_id,
+      cron: watchdog.triggers.crons[0],
+      publicationCapability: false,
     },
   };
 }

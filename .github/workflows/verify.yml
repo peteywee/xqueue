@@ -49,6 +49,9 @@ jobs:
       - name: Build exact authority cutover Worker bundle
         run: pnpm wrangler deploy --config wrangler.authority.jsonc --dry-run --outdir /tmp/xqueue-authority-worker-bundle
 
+      - name: Build exact liveness watchdog bundle
+        run: pnpm wrangler deploy --config wrangler.watchdog.jsonc --dry-run --outdir /tmp/xqueue-watchdog-worker-bundle
+
       - name: Build inert XDK compatibility probe
         run: pnpm wrangler deploy --config wrangler.x-probe.jsonc --dry-run --outdir /tmp/xqueue-xdk-probe
 

@@ -6,7 +6,7 @@ Convert the verified production failure and recovery evidence from incident #56 
 
 ## P0 — Environment isolation
 
-Status: implementing on `hardening/incident-56-controls`
+Status: implemented on draft branch; exact candidate `46d8ff5036cb5ecdf593a8f58e51141913ca7717` passed both `verify` and `XQueue Integrity` before the next slice began.
 
 - [x] Remove preview D1 identity from production authority config.
 - [x] Make default Wrangler config target preview instead of production.
@@ -14,16 +14,25 @@ Status: implementing on `hardening/incident-56-controls`
 - [x] Add machine verifier for production/preview identity.
 - [x] Add negative tests for cross-environment bindings and cron drift.
 - [x] Wire verifier into `pnpm verify`.
-- [ ] Observe CI on exact branch head.
-- [ ] Review candidate diff and merge only after green evidence.
+- [x] Align the authority audit with structurally isolated environments.
+- [x] Observe both required CI workflows green on an exact candidate.
+- [ ] Merge only after final combined hardening candidate is reviewed and approved.
 
 ## P0 — Scheduler liveness (#58)
 
-- [ ] Add durable `last_scheduled_observation_at` and last-result metadata.
-- [ ] Build a separate watchdog path with no publication capability and no X write credentials.
-- [ ] Expose liveness separately from authority/readiness/eligibility.
-- [ ] Add stale-heartbeat and recovery tests.
-- [ ] Test notification delivery end-to-end after owner selects provider.
+Status: provider-neutral implementation in progress on draft PR #61; no watchdog deployment and no notification vendor selected.
+
+- [x] Add durable scheduler observation metadata.
+- [x] Record scheduled invocation start/completion without turning heartbeat persistence into publication authority.
+- [x] Expose `schedulerLiveness` separately from publication authority/readiness/eligibility.
+- [x] Require fresh liveness evidence before `/health.schedulerAuthority` can be true.
+- [x] Build separate `xqueue-watchdog` Worker bundle with D1 only and no publication/R2/X surface.
+- [x] Add stale-heartbeat, bounded re-notification, recovery, and no-heartbeat negative tests.
+- [x] Add CI dry-run build for the watchdog bundle.
+- [ ] Observe full CI green on the exact liveness candidate.
+- [ ] Owner selects notification provider/channel.
+- [ ] Implement and negatively test the selected notification transport.
+- [ ] Deploy watchdog only after separate owner approval and exact-candidate evidence.
 
 ## P0 — Durable single-authority ownership (#46/#59)
 
