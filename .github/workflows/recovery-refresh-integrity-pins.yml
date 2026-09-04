@@ -19,224 +19,182 @@ jobs:
         with:
           node-version: '22.22.3'
 
-      - name: Refresh independently pinned recovery invariants
+      - name: Refresh approved recovery invariants
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          root = Path('.')
-          old_sha = '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1'
-          new_sha = 'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7'
-          tail = [
-              ('B1', '2027-01-04', '14:30'),
-              ('A30', '2027-01-04', '22:15'),
-              ('C1', '2027-01-05', '14:30'),
-              ('B30', '2027-01-05', '22:15'),
-              ('D1', '2027-01-06', '14:30'),
-              ('B14', '2027-01-06', '22:15'),
-              ('A59', '2027-01-07', '14:30'),
+          OLD = '09c36e24207d7720c46d163b83b9cee9465e6ded36221499032c0acee218bbc1'
+          NEW = 'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7'
+          TAIL = [
+              ('B1', '2027-01-04', '14:30', '2027-01-04T20:30:00.000Z'),
+              ('A30', '2027-01-04', '22:15', '2027-01-05T04:15:00.000Z'),
+              ('C1', '2027-01-05', '14:30', '2027-01-05T20:30:00.000Z'),
+              ('B30', '2027-01-05', '22:15', '2027-01-06T04:15:00.000Z'),
+              ('D1', '2027-01-06', '14:30', '2027-01-06T20:30:00.000Z'),
+              ('B14', '2027-01-06', '22:15', '2027-01-07T04:15:00.000Z'),
+              ('A59', '2027-01-07', '14:30', '2027-01-07T20:30:00.000Z'),
           ]
 
-          def replace_once(path, old, new):
-              p = root / path
-              text = p.read_text()
-              if text.count(old) != 1:
-                  raise SystemExit(f'{path}: expected exactly one guarded match, found {text.count(old)}')
-              p.write_text(text.replace(old, new, 1))
+          def read(path):
+              return Path(path).read_text()
 
-          # Independent canonical queue pin and exact seven-row deferred tail.
-          p = root / 'cloudflare/src/queue-integrity.mjs'
-          text = p.read_text()
-          if text.count(old_sha) != 1:
-              raise SystemExit('queue-integrity canonical SHA guard did not match exactly once')
-          text = text.replace(old_sha, new_sha, 1)
-          start = text.index('export const EXPECTED_DEFERRED_TAIL = [')
-          end = text.index('];', start) + 2
-          tail_block = 'export const EXPECTED_DEFERRED_TAIL = [\n' + ''.join(
-              f"  {{\n    id: '{post_id}',\n    scheduledDate: '{date}',\n    scheduledTime: '{time}',\n    timezone: 'America/Chicago',\n  }},\n"
-              for post_id, date, time in tail
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def replace_exact(path, old, new, count=1):
+              text = read(path)
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(f'{path}: expected {count} occurrence(s), found {found}: {old[:80]}')
+              write(path, text.replace(old, new, count))
+
+          # Canonical queue integrity remains independently pinned.
+          path = 'cloudflare/src/queue-integrity.mjs'
+          text = read(path)
+          if text.count(OLD) != 1:
+              raise SystemExit('queue-integrity: old canonical SHA not unique')
+          text = text.replace(OLD, NEW, 1)
+          block = "export const EXPECTED_DEFERRED_TAIL = [\n" + ''.join(
+              f"  {{\n    id: '{pid}',\n    scheduledDate: '{date}',\n    scheduledTime: '{clock}',\n    timezone: 'America/Chicago',\n  }},\n"
+              for pid, date, clock, _ in TAIL
           ) + '];'
-          p.write_text(text[:start] + tail_block + text[end:])
+          text, n = re.subn(
+              r"export const EXPECTED_DEFERRED_TAIL = \[.*?\n\];",
+              block,
+              text,
+              count=1,
+              flags=re.S,
+          )
+          if n != 1:
+              raise SystemExit('queue-integrity: deferred-tail block not found exactly once')
+          write(path, text)
 
-          # Fixed SHA fixtures remain independent pins; update to the approved candidate.
+          # Fixed SHA fixtures are explicit independent expectations.
           for path in [
               'test/cloudflare-runtime-readiness.test.mjs',
               'test/cloudflare-queue-bundle-adversarial.test.mjs',
               'test/cloudflare-eligibility-parity.test.mjs',
               'test/cloudflare-queue-bundle.test.mjs',
           ]:
-              replace_once(path, old_sha, new_sha)
+              replace_exact(path, OLD, NEW)
 
-          # Parity suite must explicitly require all seven deferred-tail cases.
-          p = root / 'test/cloudflare-eligibility-parity.test.mjs'
-          text = p.read_text()
-          marker = "    'deferred-tail-B1',\n    'deferred-tail-A30',\n    'deferred-tail-C1',\n"
-          if text.count(marker) != 1:
-              raise SystemExit('parity required-scenario marker did not match exactly once')
-          text = text.replace(marker, marker +
+          # Required parity scenarios: all seven deferred positions must exist.
+          path = 'test/cloudflare-eligibility-parity.test.mjs'
+          text = read(path)
+          anchor = "    'deferred-tail-C1',\n"
+          addition = (
               "    'deferred-tail-B30',\n"
               "    'deferred-tail-D1',\n"
               "    'deferred-tail-B14',\n"
-              "    'deferred-tail-A59',\n", 1)
-          p.write_text(text)
+              "    'deferred-tail-A59',\n"
+          )
+          if text.count(anchor) != 1 or addition in text:
+              raise SystemExit('parity test: scenario anchor is not in expected baseline state')
+          write(path, text.replace(anchor, anchor + addition, 1))
 
-          # Adversarial eligibility must prove every deferred post remains unavailable early.
-          p = root / 'test/cloudflare-eligibility-adversarial.test.mjs'
-          text = p.read_text()
-          old_tail = """  const tail = [
-            ['B1', '2027-01-04T20:30:00.000Z'],
-            ['A30', '2027-01-05T04:15:00.000Z'],
-            ['C1', '2027-01-05T20:30:00.000Z'],
-          ];
-
-          // The tail sits at the very end of the queue, in this order.
-          assert.deepEqual(queue.slice(-3).map((p) => p.id), tail.map(([id]) => id));
-          """
-          new_tail = """  const tail = [
-            ['B1', '2027-01-04T20:30:00.000Z'],
-            ['A30', '2027-01-05T04:15:00.000Z'],
-            ['C1', '2027-01-05T20:30:00.000Z'],
-            ['B30', '2027-01-06T04:15:00.000Z'],
-            ['D1', '2027-01-06T20:30:00.000Z'],
-            ['B14', '2027-01-07T04:15:00.000Z'],
-            ['A59', '2027-01-07T20:30:00.000Z'],
-          ];
-
-          // The tail sits at the very end of the queue, in this order.
-          assert.deepEqual(queue.slice(-7).map((p) => p.id), tail.map(([id]) => id));
-          """
-          if text.count(old_tail) != 1:
-              raise SystemExit('eligibility adversarial tail block did not match exactly once')
-          text = text.replace(old_tail, new_tail, 1)
+          # Adversarial selection tests protect every deferred row.
+          path = 'test/cloudflare-eligibility-adversarial.test.mjs'
+          text = read(path)
+          tail_rows = ''.join(f"    ['{pid}', '{iso}'],\n" for pid, _, _, iso in TAIL)
+          text, n = re.subn(
+              r"  const tail = \[\n(?:    \['(?:B1|A30|C1)', '[^']+'\],\n){3}  \];",
+              "  const tail = [\n" + tail_rows + "  ];",
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit('eligibility adversarial: old three-row tail not found')
+          if text.count('queue.slice(-3)') != 1:
+              raise SystemExit('eligibility adversarial: old tail slice not unique')
+          text = text.replace('queue.slice(-3)', 'queue.slice(-7)', 1)
           old_set = "const deferred = new Set(['B1', 'A30', 'C1']);"
-          new_set = """const deferred = new Set([
-            'B1',
-            'A30',
-            'C1',
-            'B30',
-            'D1',
-            'B14',
-            'A59',
-          ]);"""
+          new_set = "const deferred = new Set([\n    'B1',\n    'A30',\n    'C1',\n    'B30',\n    'D1',\n    'B14',\n    'A59',\n  ]);"
           if text.count(old_set) != 1:
-              raise SystemExit('eligibility adversarial deferred set did not match exactly once')
-          p.write_text(text.replace(old_set, new_set, 1))
+              raise SystemExit('eligibility adversarial: old deferred set not unique')
+          write(path, text.replace(old_set, new_set, 1))
 
-          # Bundle tests retain independent exact-tail assertions rather than deriving expected truth.
-          p = root / 'test/cloudflare-queue-bundle.test.mjs'
-          text = p.read_text()
-          old_ids = "assert.deepEqual(GENERATED_FROM.deferToEnd, ['B1', 'A30', 'C1']);"
-          new_ids = """assert.deepEqual(GENERATED_FROM.deferToEnd, [
-            'B1',
-            'A30',
-            'C1',
-            'B30',
-            'D1',
-            'B14',
-            'A59',
-          ]);"""
-          if text.count(old_ids) != 1:
-              raise SystemExit('bundle generated-from tail assertion did not match exactly once')
-          text = text.replace(old_ids, new_ids, 1)
-          text = text.replace("assert.equal(Buffer.byteLength(live, 'utf8'), 160277);", "assert.equal(Buffer.byteLength(live, 'utf8'), 160385);", 1)
-          start = text.index("test('deferred tail is exactly B1 / A30 / C1 with their exact schedules'")
-          end = text.index("\ntest('readD1QueueMetadata", start)
-          exact_tail_test = "test('deferred tail is exactly the seven policy-deferred posts with their exact schedules', async () => {\n  const expected = [\n" + ''.join(
-              f"    {{\n      id: '{post_id}',\n      scheduledDate: '{date}',\n      scheduledTime: '{time}',\n      timezone: 'America/Chicago',\n    }},\n"
-              for post_id, date, time in tail
-          ) + """  ];
-
-            assert.deepEqual(EXPECTED_DEFERRED_TAIL, expected);
-            assert.deepEqual(DECLARED_DEFERRED_TAIL, expected);
-
-            const integrity = await computeBundleIntegrity();
-            assert.deepEqual(integrity.deferredTail, expected);
-            assert.equal(integrity.declaredMatches, true);
-
-            const queue = decodeBundledQueue();
-            for (const post of queue.slice(-7)) {
-              assert.equal(post.deferredToEnd, true);
-            }
-          });
-          """
-          text = text[:start] + exact_tail_test + text[end:]
+          # Bundle tests pin the new generated metadata, bytes, exact tail, and attack result.
+          path = 'test/cloudflare-queue-bundle.test.mjs'
+          text = read(path)
+          old_generated = "assert.deepEqual(GENERATED_FROM.deferToEnd, ['B1', 'A30', 'C1']);"
+          new_generated = "assert.deepEqual(GENERATED_FROM.deferToEnd, [\n    'B1',\n    'A30',\n    'C1',\n    'B30',\n    'D1',\n    'B14',\n    'A59',\n  ]);"
+          if text.count(old_generated) != 1:
+              raise SystemExit('queue-bundle test: old GENERATED_FROM tail not unique')
+          text = text.replace(old_generated, new_generated, 1)
+          if text.count("Buffer.byteLength(live, 'utf8'), 160277") != 1:
+              raise SystemExit('queue-bundle test: old canonical byte length not unique')
+          text = text.replace("Buffer.byteLength(live, 'utf8'), 160277", "Buffer.byteLength(live, 'utf8'), 160385", 1)
+          expected_rows = ''.join(
+              f"    {{\n      id: '{pid}',\n      scheduledDate: '{date}',\n      scheduledTime: '{clock}',\n      timezone: 'America/Chicago',\n    }},\n"
+              for pid, date, clock, _ in TAIL
+          )
+          replacement = (
+              "test('deferred tail is exactly the seven policy-deferred posts with their exact schedules', async () => {\n"
+              "  const expected = [\n" + expected_rows + "  ];\n\n"
+              "  assert.deepEqual(EXPECTED_DEFERRED_TAIL, expected);\n"
+              "  assert.deepEqual(DECLARED_DEFERRED_TAIL, expected);\n\n"
+              "  const integrity = await computeBundleIntegrity();\n"
+              "  assert.deepEqual(integrity.deferredTail, expected);\n"
+              "  assert.equal(integrity.declaredMatches, true);\n\n"
+              "  const queue = decodeBundledQueue();\n"
+              "  for (const post of queue.slice(-7)) {\n"
+              "    assert.equal(post.deferredToEnd, true);\n"
+              "  }\n"
+              "});\n"
+          )
+          text, n = re.subn(
+              r"test\('deferred tail is exactly B1 / A30 / C1 with their exact schedules', async \(\) => \{.*?\n\}\);\n",
+              replacement,
+              text,
+              count=1,
+              flags=re.S,
+          )
+          if n != 1:
+              raise SystemExit('queue-bundle test: old exact-tail test not found')
+          if text.count('assert.equal(verdict.deferredTail.length, 3);') != 1:
+              raise SystemExit('queue-bundle test: old tail length assertion not unique')
           text = text.replace('assert.equal(verdict.deferredTail.length, 3);', 'assert.equal(verdict.deferredTail.length, 7);', 1)
+          if text.count("assert.equal(verdict.deferredTail[0].id, 'C1');") != 1:
+              raise SystemExit('queue-bundle test: reordered-tail assertion not unique')
           text = text.replace("assert.equal(verdict.deferredTail[0].id, 'C1');", "assert.equal(verdict.deferredTail[4].id, 'A59');", 1)
-          p.write_text(text)
+          write(path, text)
 
-          # Keep attack model accurate: seven protected tail rows means 173 non-tail rows.
-          p = root / 'test/cloudflare-queue-bundle-adversarial.test.mjs'
-          text = p.read_text().replace(
+          # Keep the attack-model comment consistent with seven protected tail rows.
+          replace_exact(
+              'test/cloudflare-queue-bundle-adversarial.test.mjs',
               '// 177 of 180 posts rewritten. Count, unique IDs and the deferred tail are all',
               '// 173 of 180 posts rewritten. Count, unique IDs and the deferred tail are all',
-              1,
           )
-          p.write_text(text)
 
-          # Regenerate parity scenarios for every deferred-tail assignment.
-          p = root / 'scripts/build-eligibility-parity-matrix.mjs'
-          text = p.read_text()
-          old_section = """  // ---- real 180-post production queue, deferred tail ---------------------
-            add({
-              id: 'deferred-tail-B1',
-              description:
-                'Real 180-post production queue, everything but the deferred tail published. B1 2027-01-04 14:30 America/Chicago is exactly due.',
-              queue: realQueue,
-              ledgerSetup: 'posted: all 177 posts before the deferred tail',
-              ledger: ledger({ posted: postedAllExcept(realQueue, ['B1', 'A30', 'C1']) }),
-              nowIso: '2027-01-04T20:30:00.000Z',
-            });
-
-            add({
-              id: 'deferred-tail-A30',
-              description:
-                'Real production queue with B1 published. A30 2027-01-04 22:15 America/Chicago is exactly due.',
-              queue: realQueue,
-              ledgerSetup: 'posted: all 178 posts through B1',
-              ledger: ledger({ posted: postedAllExcept(realQueue, ['A30', 'C1']) }),
-              nowIso: '2027-01-05T04:15:00.000Z',
-            });
-
-            add({
-              id: 'deferred-tail-C1',
-              description:
-                'Real production queue with only C1 outstanding. C1 2027-01-05 14:30 America/Chicago is exactly due and is the final post.',
-              queue: realQueue,
-              ledgerSetup: 'posted: all 179 posts through A30',
-              ledger: ledger({ posted: postedAllExcept(realQueue, ['C1']) }),
-              nowIso: '2027-01-05T20:30:00.000Z',
-            });
-          """
-          if text.count(old_section) != 1:
-              raise SystemExit('parity matrix deferred section did not match exactly once')
-          tail_iso = [
-              ('B1', '2027-01-04T20:30:00.000Z'),
-              ('A30', '2027-01-05T04:15:00.000Z'),
-              ('C1', '2027-01-05T20:30:00.000Z'),
-              ('B30', '2027-01-06T04:15:00.000Z'),
-              ('D1', '2027-01-06T20:30:00.000Z'),
-              ('B14', '2027-01-07T04:15:00.000Z'),
-              ('A59', '2027-01-07T20:30:00.000Z'),
-          ]
-          section = '  // ---- real 180-post production queue, deferred tail ---------------------\n'
-          for index, (post_id, instant) in enumerate(tail_iso):
-              outstanding = [row[0] for row in tail_iso[index:]]
+          # Generate seven real-queue parity cases instead of three.
+          path = 'scripts/build-eligibility-parity-matrix.mjs'
+          text = read(path)
+          start_marker = '  // ---- real 180-post production queue, deferred tail ---------------------\n'
+          end_marker = '  // ---- DST ---------------------------------------------------------------\n'
+          start = text.find(start_marker)
+          end = text.find(end_marker)
+          if start < 0 or end <= start:
+              raise SystemExit('parity builder: deferred section markers not found')
+          section = start_marker
+          for index, (pid, date, clock, iso) in enumerate(TAIL):
+              outstanding = [row[0] for row in TAIL[index:]]
               posted_count = 180 - len(outstanding)
-              date, time = next((date, time) for ident, date, time in tail if ident == post_id)
-              js_array = '[' + ', '.join(repr(item) for item in outstanding) + ']'
-              section += f"""  add({{
-                id: 'deferred-tail-{post_id}',
-                description:
-                  'Real 180-post production queue with {posted_count} posts resolved before {post_id}. {post_id} {date} {time} America/Chicago is exactly due.',
-                queue: realQueue,
-                ledgerSetup: 'posted: {posted_count} posts before {post_id}',
-                ledger: ledger({{ posted: postedAllExcept(realQueue, {js_array}) }}),
-                nowIso: '{instant}',
-              }});
-
-          """
-          p.write_text(text.replace(old_section, section, 1))
+              js = '[' + ', '.join(f"'{item}'" for item in outstanding) + ']'
+              section += (
+                  "  add({\n"
+                  f"    id: 'deferred-tail-{pid}',\n"
+                  "    description:\n"
+                  f"      'Real 180-post production queue with {posted_count} posts resolved before {pid}. {pid} {date} {clock} America/Chicago is exactly due.',\n"
+                  "    queue: realQueue,\n"
+                  f"    ledgerSetup: 'posted: {posted_count} posts before {pid}',\n"
+                  f"    ledger: ledger({{ posted: postedAllExcept(realQueue, {js}) }}),\n"
+                  f"    nowIso: '{iso}',\n"
+                  "  });\n\n"
+              )
+          write(path, text[:start] + section + text[end:])
           PY
 
       - name: Regenerate parity evidence
@@ -253,7 +211,7 @@ jobs:
           node --check test/cloudflare-runtime-readiness.test.mjs
           node --test test/cloudflare-eligibility-parity.test.mjs test/cloudflare-eligibility-adversarial.test.mjs test/cloudflare-queue-bundle.test.mjs
 
-      - name: Commit recovery invariant refresh
+      - name: Commit approved recovery invariant refresh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
