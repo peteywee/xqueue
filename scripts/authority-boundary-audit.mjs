@@ -1,22 +1,30 @@
 #!/usr/bin/env node
 // authority-boundary-audit.mjs — mechanical proof of the Cloudflare authority boundary.
 //
-// The repository now contains dormant production-publication capability, but the DEFAULT deployed
-// config remains non-scheduled and the publisher remains fail-closed unless an exact runtime secret
-// enables authority. The separately tracked authority config is evidence for the final cutover and
-// must not be deployed until local systemd has been disabled and proven off.
+// Environment identity is intentionally asymmetric:
+// - wrangler.jsonc is preview-safe, inert, and must never target production.
+// - wrangler.authority.jsonc is production-only and carries the publication cron.
+//
+// The publication code remains fail-closed behind runtime authority, and the local
+// systemd publisher remains a rollback path that must not run concurrently with the
+// Cloudflare publication authority.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  validatePreviewConfig,
+  validateProductionConfig,
+} from './verify-environment-config.mjs';
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const results = [];
 
 function gate(name, ok, detail = '') {
   results.push({ name, ok, detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name.padEnd(54)}${detail ? `  ${detail}` : ''}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name.padEnd(58)}${detail ? `  ${detail}` : ''}`);
 }
 
 function walk(dir) {
@@ -57,6 +65,18 @@ function readJsonc(path) {
   };
 }
 
+function validationResult(fn, value) {
+  try {
+    fn(value);
+    return { ok: true, detail: 'exact environment identity' };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 const cloudflareFiles = readAll(walk(join(ROOT, 'cloudflare')));
 const workerFiles = cloudflareFiles.filter((file) => file.path.startsWith('cloudflare/src/'));
 const productionPublisherPath = 'cloudflare/src/production-publisher.mjs';
@@ -65,10 +85,24 @@ const publicationLedgerPath = 'cloudflare/src/publication-ledger.mjs';
 const defaultConfig = readJsonc('wrangler.jsonc');
 const authorityConfig = readJsonc('wrangler.authority.jsonc');
 
-// --------------------------------------------------------------- 1. schedules
+// --------------------------------------------------------------- 1. environment + schedules
 
 const defaultCrons = defaultConfig.value.triggers?.crons ?? [];
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
+const previewValidation = validationResult(validatePreviewConfig, defaultConfig.value);
+const productionValidation = validationResult(validateProductionConfig, authorityConfig.value);
+
+gate(
+  'default Wrangler config is preview-safe and inert',
+  previewValidation.ok,
+  previewValidation.detail,
+);
+
+gate(
+  'authority Wrangler config is production-only and exact',
+  productionValidation.ok,
+  productionValidation.detail,
+);
 
 gate(
   'default Cloudflare cron trigger count is 0',
@@ -84,18 +118,17 @@ gate(
   JSON.stringify(authorityCrons),
 );
 
-const configIdentityMatches =
-  authorityConfig.value.name === defaultConfig.value.name &&
-  authorityConfig.value.main === defaultConfig.value.main &&
-  authorityConfig.value.d1_databases?.[0]?.database_id ===
-    defaultConfig.value.d1_databases?.[0]?.database_id &&
-  authorityConfig.value.r2_buckets?.[0]?.bucket_name ===
-    defaultConfig.value.r2_buckets?.[0]?.bucket_name;
+gate(
+  'preview and production Worker identities are distinct',
+  defaultConfig.value.name !== authorityConfig.value.name,
+  `${defaultConfig.value.name ?? 'missing'} != ${authorityConfig.value.name ?? 'missing'}`,
+);
 
 gate(
-  'authority config targets the exact production Worker/storage',
-  configIdentityMatches,
-  authorityConfig.value.name ?? 'missing',
+  'preview and production D1 identities are distinct',
+  defaultConfig.value.d1_databases?.[0]?.database_id !==
+    authorityConfig.value.d1_databases?.[0]?.database_id,
+  `${defaultConfig.value.d1_databases?.[0]?.database_id ?? 'missing'} != ${authorityConfig.value.d1_databases?.[0]?.database_id ?? 'missing'}`,
 );
 
 // --------------------------------------------------------- 2. runtime authority
