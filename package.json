@@ -12,8 +12,10 @@
   "scripts": {
     "preinstall": "node scripts/only-pnpm.mjs",
     "test": "node --test test/*.test.mjs",
+    "test:environment-config": "node --test test/environment-config.test.mjs",
     "validate": "node src/cli.mjs validate",
     "validate:production": "node src/cli.mjs validate --production",
+    "verify:environment-config": "node scripts/verify-environment-config.mjs",
     "build": "node src/cli.mjs build",
     "build:production": "node scripts/build-production-queue.mjs",
     "build:cf-bundle": "node scripts/build-cloudflare-queue-bundle.mjs",
@@ -36,7 +38,7 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
+    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/verify-environment-config.mjs && pnpm verify:environment-config && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",

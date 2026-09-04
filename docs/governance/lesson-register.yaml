@@ -1,0 +1,81 @@
+version: 1
+lessons:
+  - id: LESSON-2026-09-04-001
+    source:
+      project: xqueue
+      incident: "#56"
+      date: "2026-09-04"
+    observation: >-
+      Production and preview D1 identities coexisted in Wrangler configuration,
+      allowing deployment tooling to bind a production Worker to the wrong D1 target.
+    verified_cause: >-
+      Environment identity was declared but not structurally isolated; deployment
+      success was therefore not proof of correct resource binding.
+    principle: >-
+      Dangerous environment ambiguity must be impossible to represent, and actual
+      deployed bindings must be verified before production is considered healthy.
+    policy_refs:
+      - XQ-POL-002
+    controls:
+      - production-only authority config
+      - preview-safe default config
+      - environment configuration verifier
+      - negative cross-environment binding tests
+      - exact deployment read-back
+    evidence_required:
+      - exact candidate SHA
+      - environment verifier PASS
+      - negative tests PASS
+      - deployment binding/cron evidence
+      - post-deploy health parity
+    status: implementing
+
+  - id: LESSON-2026-09-04-002
+    source:
+      project: xqueue
+      incident: "#56"
+      date: "2026-09-04"
+    observation: >-
+      Authority readiness could appear healthy even when no scheduler invocation had
+      been proven during the valid publication window.
+    verified_cause: >-
+      Authority, readiness, liveness, and eligibility were not independently observable.
+    principle: >-
+      Authority, liveness, readiness, and eligibility are distinct operational facts
+      and must not be inferred from one another.
+    policy_refs:
+      - XQ-POL-001
+    controls:
+      - issue-58 independent scheduler heartbeat
+      - stale heartbeat detection
+      - separate liveness health surface
+    evidence_required:
+      - observed scheduled invocation
+      - durable heartbeat
+      - stale-heartbeat negative test
+    status: planned
+
+  - id: LESSON-2026-09-04-003
+    source:
+      project: xqueue
+      incident: "#56"
+      date: "2026-09-04"
+    observation: >-
+      A later cron event created a reasonable suspicion that A16 had missed, while
+      authoritative D1 state showed A16 had actually posted at 14:30:08 CT.
+    verified_cause: >-
+      Partial observation was temporarily interpreted before correlated durable state
+      was read back.
+    principle: >-
+      A suspected failure must not become a confirmed incident solely from absent,
+      delayed, or partial observation when authoritative evidence can settle the state.
+    policy_refs:
+      - TSS-POL-001
+    controls:
+      - incident snapshot command
+      - explicit suspected/confirmed/indeterminate classification
+    evidence_required:
+      - durable state
+      - correlated runtime event
+      - external side-effect identifier when applicable
+    status: planned
