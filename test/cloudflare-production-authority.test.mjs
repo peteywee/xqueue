@@ -66,22 +66,49 @@ function eligible() {
   };
 }
 
+function prepared(sql, params = []) {
+  return {
+    sql,
+    params,
+    bind(...next) {
+      return prepared(sql, next);
+    },
+  };
+}
+
 function changeProofDb() {
   const operations = [];
 
   return {
     operations,
     prepare(sql) {
-      return {
-        bind(...args) {
-          return {
-            async run() {
-              operations.push({ sql, args });
-              return { success: true };
-            },
-          };
-        },
-      };
+      return prepared(sql);
+    },
+    async batch(statements) {
+      operations.push(...statements);
+      return [
+        { success: true, results: [] },
+        { success: true, results: [{ direct_changes: 1 }] },
+        { success: true, results: [] },
+        { success: true, results: [{ direct_changes: 1 }] },
+        { success: true, results: [] },
+        { success: true, results: [{ direct_changes: 1 }] },
+      ];
+    },
+  };
+}
+
+function mockXClient() {
+  return {
+    users: {
+      async getMe() {
+        return { data: { id: 'test-user-id', username: 'PatrickCra94338' } };
+      },
+    },
+    posts: {
+      async create() {
+        return { data: { id: '999999' } };
+      },
     },
   };
 }
@@ -143,13 +170,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
         makeClient() {
-          return {
-            users: {
-              async getMe() {
-                return { data: { id: 'test-user-id', username: 'PatrickCra94338' } };
-              },
-            },
-          };
+          return mockXClient();
         },
         async acquirePublicationLease() {
           return {
@@ -185,7 +206,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
         async persistPublicationOutcome(db, snapshot, input) {
           evidenceRecorded = { db, snapshot, input };
         },
-        async simulatePublicationTransaction(deps, input) {
+        async simulatePublicationTransaction(deps) {
           const identity = await deps.verifyIdentity();
           assert.equal(identity.username, 'PatrickCra94338');
           const lease = (await deps.acquireLease()).lease;
@@ -419,13 +440,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
         makeClient() {
-          return {
-            users: {
-              async getMe() {
-                return { data: { id: 'test-user-id', username: 'PatrickCra94338' } };
-              },
-            },
-          };
+          return mockXClient();
         },
         async acquirePublicationLease() {
           return {
