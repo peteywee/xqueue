@@ -57,6 +57,8 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/health') {
+      const schedulerLivenessRequired = publicationAuthorityEnabled(env);
+
       try {
         const storage = await storageHealth(env);
         const queueIntegrity = await verifyQueueIntegrity(env);
@@ -103,7 +105,7 @@ export default {
             livePublication: false,
             schedulerAuthority: false,
             schedulerLiveness: {
-              required: true,
+              required: schedulerLivenessRequired,
               ok: false,
               state: 'unavailable',
             },
