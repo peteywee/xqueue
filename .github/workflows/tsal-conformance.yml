@@ -198,26 +198,27 @@ jobs:
           node ../tsal-standard/tooling/cli.mjs audit .
 
       - name: Upload audit and candidate evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: tsal-audit-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             xqueue/tsal-audit.json
             xqueue/docs/evidence/tsal-candidate/*.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload runtime evidence
-        if: github.event_name != 'pull_request'
+        if: ${{ always() && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: tsal-runtime-${{ github.sha }}-${{ github.run_id }}
           path: xqueue/docs/evidence/tsal-runtime/runtime-safe.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload deployment evidence
-        if: github.event_name != 'pull_request'
+        if: ${{ always() && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: tsal-deployment-${{ github.sha }}-${{ github.run_id }}
           path: xqueue/docs/evidence/tsal-deployment/deployment-authority.json
-          if-no-files-found: error
+          if-no-files-found: warn
