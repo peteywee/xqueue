@@ -1,9 +1,9 @@
 {
-  "schema_version": "0.1",
+  "schema_version": "0.2",
   "automation": {
     "id": "xqueue-publisher",
     "name": "XQueue Scheduled Publisher",
-    "version": "1",
+    "version": "2",
     "owner": "Patrick / Top Shelf Service LLC",
     "description": "Bounded, fail-closed scheduled publisher that selects and publishes eligible XQueue content according to explicit production policy."
   },
@@ -74,21 +74,30 @@
     "possible": true,
     "detection": "A create request may have escaped to the remote provider without a conclusive provider result being received locally.",
     "on_unknown": "Record the operation as requiring reconciliation and block later automatic live publication that could create a duplicate.",
-    "reconciliation": "The owner verifies the actual production X account and records whether the attempted item was posted or positively verified as not posted before normal publication resumes.",
-    "automatic_retry_allowed_when_unknown": false
+    "reconciliation": "The owner verifies the actual production X account and records whether the attempted item was posted or positively verified as not posted before normal publication resumes."
   },
   "retry": {
-    "strategy": "Do not blindly retry an ambiguous external create operation. Future scheduler invocations may reevaluate work only when the prior outcome is conclusively safe to retry.",
-    "maximum_attempts": 0,
-    "backoff": "Not applicable to ambiguous create operations; provider-specific known failures are handled by later eligible execution rather than an uncontrolled retry loop.",
-    "retryable_conditions": [],
-    "non_retryable_conditions": [
-      "Ambiguous create-post outcome",
-      "Missing production authority",
-      "Invalid production identity",
-      "Invalid or corrupted durable state",
-      "Unresolved reconciliation requirement"
-    ]
+    "dispatch": {
+      "strategy": "Do not perform an immediate blind retry of the external create operation. Known pre-request or conclusively non-executed failures may be retried only under explicit bounded policy.",
+      "maximum_retry_attempts": 0,
+      "backoff": "No in-dispatch retry loop is permitted for the public create operation.",
+      "retryable_conditions": [],
+      "non_retryable_conditions": [
+        "Ambiguous create-post outcome",
+        "Missing production authority",
+        "Invalid production identity",
+        "Invalid or corrupted durable state",
+        "Unresolved reconciliation requirement"
+      ]
+    },
+    "scheduler_reevaluation": {
+      "allowed": true,
+      "condition": "A later scheduler invocation may reevaluate the work item only when durable state and remote truth establish that the prior attempt is conclusively safe to reconsider under current eligibility policy."
+    },
+    "ambiguous_outcome": {
+      "automatic_retry_allowed": false,
+      "requires_reconciliation": true
+    }
   },
   "backlog": {
     "stale_definition": "Unresolved work outside the runtime grace window is stale and must not be silently flushed as normal catch-up work.",
