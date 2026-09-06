@@ -1,0 +1,41 @@
+{
+  "schema_version": "0.2",
+  "tsal_version": "0.2.0",
+  "project": {
+    "id": "xqueue",
+    "name": "XQueue",
+    "owner": "Patrick / Top Shelf Service LLC",
+    "kind": "automation",
+    "repository": "https://github.com/peteywee/xqueue",
+    "description": "Fail-closed scheduled publishing automation for X with deterministic queue generation, bounded production authority, durable execution state, reconciliation, and recovery controls."
+  },
+  "automations": [
+    {
+      "id": "xqueue-publisher",
+      "contract": "automation.contract.json",
+      "enabled": true,
+      "risk": "R3"
+    }
+  ],
+  "artifacts": {
+    "evidence_directory": "docs/evidence",
+    "incidents_directory": "docs/incidents",
+    "runbook": "docs/RUNBOOK.md",
+    "architecture": "README.md"
+  },
+  "integration": {
+    "adapters": [],
+    "control_plane": {
+      "enabled": false,
+      "type": null,
+      "endpoint": null,
+      "project_key": null
+    }
+  },
+  "metadata": {
+    "tsal_adoption": "first-reference-project",
+    "local_first": true,
+    "ai_required": false,
+    "backend_required": false
+  }
+}
