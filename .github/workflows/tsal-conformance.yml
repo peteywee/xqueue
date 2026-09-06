@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   audit:
@@ -209,33 +208,6 @@ jobs:
         run: |
           node ../tsal-standard/tooling/cli.mjs audit . --json | tee tsal-audit.json
           node ../tsal-standard/tooling/cli.mjs audit .
-
-      - name: Open deduplicated scheduled conformance incident
-        if: ${{ failure() && github.event_name == 'schedule' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title='[AUTO] XQueue scheduled conformance incident'
-          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
-          if [[ -z "$existing" ]]; then
-            gh issue create \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$title" \
-              --body "The independent scheduled TSAL observer failed. Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. This issue is deduplicated and will be closed automatically after a later scheduled conformance run succeeds."
-          fi
-
-      - name: Close scheduled conformance incident on recovery
-        if: ${{ success() && github.event_name == 'schedule' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title='[AUTO] XQueue scheduled conformance incident'
-          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
-          if [[ -n "$existing" ]]; then
-            gh issue close "$existing" \
-              --repo "$GITHUB_REPOSITORY" \
-              --comment "Recovered on scheduled TSAL run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
-          fi
 
       - name: Upload audit and candidate evidence
         if: ${{ always() }}
