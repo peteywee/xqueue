@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // authority-boundary-audit.mjs — mechanical proof of the Cloudflare authority boundary.
 //
-// Ordinary deployment and scheduler-authority mutation are separate authority classes.
-// wrangler.jsonc is preview-only and MUST NOT declare triggers. wrangler.authority.jsonc is the
-// only tracked production config and the only config allowed to declare the production cron.
-// Production publication still requires the exact runtime authority flag before any public side
-// effect can occur.
+// The Cloudflare Workers Builds integration is connected to xqueue-production, so wrangler.jsonc
+// must identify that Worker. Ordinary code deployment remains a lower authority class because it
+// carries production identity only and omits scheduler triggers. Preview D1 access is isolated in
+// wrangler.preview.jsonc. wrangler.authority.jsonc is the only tracked config allowed to declare
+// the production cron.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const results = [];
+const PRODUCTION_DB_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
+const PREVIEW_DB_ID = 'f5f9bea9-e88c-41ab-9407-70356079a638';
 
 function gate(name, ok, detail = '') {
   results.push({ name, ok, detail });
@@ -66,6 +68,7 @@ const schedulerLivenessPath = 'cloudflare/src/scheduler-liveness.mjs';
 
 const defaultConfig = readJsonc('wrangler.jsonc');
 const authorityConfig = readJsonc('wrangler.authority.jsonc');
+const previewConfig = readJsonc('wrangler.preview.jsonc');
 
 // --------------------------------------------------------------- 1. schedules / environments
 
@@ -73,12 +76,22 @@ const defaultDeclaresTriggers = Object.prototype.hasOwnProperty.call(
   defaultConfig.value,
   'triggers',
 );
+const previewDeclaresTriggers = Object.prototype.hasOwnProperty.call(
+  previewConfig.value,
+  'triggers',
+);
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 
 gate(
-  'default deploy cannot mutate scheduler authority',
+  'ordinary production deploy preserves scheduler authority',
   defaultDeclaresTriggers === false,
   defaultDeclaresTriggers ? 'triggers declared — destructive replacement risk' : 'triggers omitted',
+);
+
+gate(
+  'preview config cannot declare scheduler authority',
+  previewDeclaresTriggers === false,
+  previewDeclaresTriggers ? 'triggers declared' : 'triggers omitted',
 );
 
 gate(
@@ -89,35 +102,42 @@ gate(
   JSON.stringify(authorityCrons),
 );
 
-const previewDbId = defaultConfig.value.d1_databases?.[0]?.database_id;
-const productionDbId = authorityConfig.value.d1_databases?.[0]?.database_id;
-const environmentIdentityIsolated =
-  defaultConfig.value.name === 'xqueue-preview' &&
+const defaultDb = defaultConfig.value.d1_databases?.[0];
+const authorityDb = authorityConfig.value.d1_databases?.[0];
+const previewDb = previewConfig.value.d1_databases?.[0];
+
+const productionIdentityExact =
+  defaultConfig.value.name === 'xqueue-production' &&
   authorityConfig.value.name === 'xqueue-production' &&
   defaultConfig.value.main === authorityConfig.value.main &&
-  previewDbId &&
-  productionDbId &&
-  previewDbId !== productionDbId &&
-  defaultConfig.value.d1_databases?.[0]?.preview_database_id === undefined &&
-  authorityConfig.value.d1_databases?.[0]?.preview_database_id === undefined;
+  defaultDb?.database_id === PRODUCTION_DB_ID &&
+  authorityDb?.database_id === PRODUCTION_DB_ID &&
+  defaultDb?.database_name === 'xqueue-production' &&
+  authorityDb?.database_name === 'xqueue-production';
 
 gate(
-  'preview and production Worker/D1 identities are isolated',
-  Boolean(environmentIdentityIsolated),
-  `${defaultConfig.value.name ?? 'missing'}:${previewDbId ?? 'missing'} -> ${authorityConfig.value.name ?? 'missing'}:${productionDbId ?? 'missing'}`,
+  'ordinary and authority configs target exact production identity',
+  productionIdentityExact,
+  `${defaultConfig.value.name ?? 'missing'}:${defaultDb?.database_id ?? 'missing'}`,
 );
 
 gate(
-  'production authority config carries no preview D1 identity',
-  !authorityConfig.raw.includes('f5f9bea9-e88c-41ab-9407-70356079a638') &&
+  'production configs carry zero preview D1 identities',
+  !defaultConfig.raw.includes(PREVIEW_DB_ID) &&
+    !authorityConfig.raw.includes(PREVIEW_DB_ID) &&
+    !/preview_database_id/.test(defaultConfig.raw) &&
     !/preview_database_id/.test(authorityConfig.raw),
   'production-only D1 binding',
 );
 
 gate(
-  'preview config carries no production D1 identity',
-  !defaultConfig.raw.includes('fc85026e-bfc8-435f-8bb0-c60e139178a3'),
-  'preview-only D1 binding',
+  'explicit preview config carries only preview D1 identity',
+  previewConfig.value.name === 'xqueue-preview' &&
+    previewDb?.database_id === PREVIEW_DB_ID &&
+    previewDb?.database_name === 'xqueue-preview' &&
+    !previewConfig.raw.includes(PRODUCTION_DB_ID) &&
+    !/preview_database_id/.test(previewConfig.raw),
+  `${previewConfig.value.name ?? 'missing'}:${previewDb?.database_id ?? 'missing'}`,
 );
 
 // --------------------------------------------------------- 2. runtime authority
@@ -128,7 +148,8 @@ const publisherText = publisher?.text ?? '';
 const exactAuthorityImport = /publicationAuthorityEnabled/.test(publisherText);
 const authorityHardcodedInConfig =
   /XQUEUE_PUBLISH_AUTHORITY/.test(defaultConfig.raw) ||
-  /XQUEUE_PUBLISH_AUTHORITY/.test(authorityConfig.raw);
+  /XQUEUE_PUBLISH_AUTHORITY/.test(authorityConfig.raw) ||
+  /XQUEUE_PUBLISH_AUTHORITY/.test(previewConfig.raw);
 
 gate(
   'production publisher is guarded by runtime authority check',
@@ -155,6 +176,7 @@ const credentialHitsOutsidePublisher = findMatches(
 const credentialConfigHits = [
   ...findMatches([{ path: 'wrangler.jsonc', text: defaultConfig.raw }], CREDENTIAL_RE),
   ...findMatches([{ path: 'wrangler.authority.jsonc', text: authorityConfig.raw }], CREDENTIAL_RE),
+  ...findMatches([{ path: 'wrangler.preview.jsonc', text: previewConfig.raw }], CREDENTIAL_RE),
 ];
 
 gate(
