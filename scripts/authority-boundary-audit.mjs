@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // authority-boundary-audit.mjs — mechanical proof of the Cloudflare authority boundary.
 //
-// The repository now contains dormant production-publication capability, but the DEFAULT deployed
-// config remains non-scheduled and the publisher remains fail-closed unless an exact runtime secret
-// enables authority. The separately tracked authority config is evidence for the final cutover and
-// must not be deployed until local systemd has been disabled and proven off.
+// Ordinary deployment and scheduler-authority mutation are separate authority classes.
+// wrangler.jsonc MUST NOT declare triggers at all; that omission preserves externally managed
+// scheduler state during normal code deploys. wrangler.authority.jsonc is the only tracked config
+// allowed to declare the production cron, and the publisher still requires the exact runtime
+// authority flag before any public side effect can occur.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -67,13 +68,16 @@ const authorityConfig = readJsonc('wrangler.authority.jsonc');
 
 // --------------------------------------------------------------- 1. schedules
 
-const defaultCrons = defaultConfig.value.triggers?.crons ?? [];
+const defaultDeclaresTriggers = Object.prototype.hasOwnProperty.call(
+  defaultConfig.value,
+  'triggers',
+);
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 
 gate(
-  'default Cloudflare cron trigger count is 0',
-  Array.isArray(defaultCrons) && defaultCrons.length === 0,
-  `count=${defaultCrons.length}`,
+  'default deploy preserves scheduler authority',
+  defaultDeclaresTriggers === false,
+  defaultDeclaresTriggers ? 'triggers declared — destructive replacement risk' : 'triggers omitted',
 );
 
 gate(
@@ -242,7 +246,6 @@ const tracked = execFileSync('git', ['ls-files'], {
 
 const mustNotTrack = ['queue.json', 'state.json', '.env', 'media-manifest.json'];
 const leaked = mustNotTrack.filter((name) => tracked.includes(name));
-
 gate(
   'generated/secret artifacts are untracked',
   leaked.length === 0,
