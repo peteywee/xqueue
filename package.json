@@ -29,6 +29,7 @@
     "cf:preview:lease-rehearsal": "bash scripts/cloudflare-preview-lease-rehearsal.sh",
     "runtime:health": "node src/cli.mjs runtime-health",
     "tsal:runtime-evidence": "node scripts/tsal-runtime-evidence.mjs",
+    "tsal:deployment-evidence": "node scripts/tsal-deployment-evidence.mjs",
     "preflight:production": "bash scripts/production-preflight.sh",
     "parity:eligibility": "node scripts/build-eligibility-parity-matrix.mjs",
     "post": "node src/cli.mjs post --dry-run",
@@ -37,7 +38,7 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/tsal-runtime-evidence.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
+    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/cloudflare-preview-lease-rehearsal.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/tsal-runtime-evidence.mjs scripts/tsal-deployment-evidence.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
