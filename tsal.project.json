@@ -1,6 +1,6 @@
 {
-  "schema_version": "0.2",
-  "tsal_version": "0.2.0",
+  "schema_version": "0.3",
+  "tsal_version": "0.3.1",
   "project": {
     "id": "xqueue",
     "name": "XQueue",
@@ -32,8 +32,13 @@
       "project_key": null
     }
   },
+  "conformance": {
+    "mode": "advisory",
+    "minimum_result": "partial"
+  },
   "metadata": {
     "tsal_adoption": "first-reference-project",
+    "tsal_migration": "0.3-evidence-driven-conformance",
     "local_first": true,
     "ai_required": false,
     "backend_required": false

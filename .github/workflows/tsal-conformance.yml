@@ -1,0 +1,178 @@
+name: TSAL Conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout exact XQueue candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: xqueue
+
+      - name: Checkout exact TSAL 0.3.1
+        uses: actions/checkout@v4
+        with:
+          repository: peteywee/TSAL
+          ref: 8590ef85d33386725f36444e61699a317fcf1f1b
+          path: tsal-standard
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: xqueue/pnpm-lock.yaml
+
+      - name: Install XQueue dependencies
+        working-directory: xqueue
+        run: pnpm install --frozen-lockfile
+
+      - name: TSAL Doctor
+        working-directory: xqueue
+        run: node ../tsal-standard/tooling/cli.mjs doctor .
+
+      - name: Prove candidate safety claims
+        working-directory: xqueue
+        run: |
+          node --test \
+            test/cloudflare-production-authority.test.mjs \
+            test/cloudflare-publication-lease.test.mjs \
+            test/cloudflare-publication-lease-d1-meta.test.mjs \
+            test/cloudflare-x-outcomes.test.mjs \
+            test/cloudflare-x-simulation-harness.test.mjs \
+            test/hardening.test.mjs
+
+      - name: Emit exact-candidate TSAL evidence
+        working-directory: xqueue
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+          GITHUB_ACTOR_VALUE: ${{ github.actor }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const outDir = path.join('docs', 'evidence', 'tsal-candidate');
+          fs.mkdirSync(outDir, { recursive: true });
+
+          const producedAt = new Date().toISOString();
+          const candidateSha = process.env.CANDIDATE_SHA;
+          const commonTests = [
+            'test/cloudflare-production-authority.test.mjs',
+            'test/cloudflare-publication-lease.test.mjs',
+            'test/cloudflare-publication-lease-d1-meta.test.mjs',
+            'test/cloudflare-x-outcomes.test.mjs',
+            'test/cloudflare-x-simulation-harness.test.mjs',
+            'test/hardening.test.mjs'
+          ];
+
+          const claims = [
+            {
+              slug: 'authority-enforced',
+              claim_id: 'xqueue-publisher.authority.enforced',
+              claim: 'Execution authority and concurrent publication ownership are enforced by the candidate.',
+              tests: [
+                'test/cloudflare-production-authority.test.mjs',
+                'test/cloudflare-publication-lease.test.mjs',
+                'test/cloudflare-publication-lease-d1-meta.test.mjs',
+                'test/cloudflare-x-simulation-harness.test.mjs'
+              ]
+            },
+            {
+              slug: 'retry-bounded',
+              claim_id: 'xqueue-publisher.retry.bounded',
+              claim: 'The candidate prevents uncontrolled or ambiguous publication retry and preserves bounded retry semantics.',
+              tests: [
+                'test/cloudflare-x-outcomes.test.mjs',
+                'test/cloudflare-x-simulation-harness.test.mjs',
+                'test/cloudflare-production-authority.test.mjs'
+              ]
+            },
+            {
+              slug: 'ambiguity-fail-closed',
+              claim_id: 'xqueue-publisher.ambiguity.fail_closed',
+              claim: 'Ambiguous external publication outcomes fail closed and require reconciliation before replay.',
+              tests: [
+                'test/cloudflare-x-outcomes.test.mjs',
+                'test/cloudflare-production-authority.test.mjs',
+                'test/hardening.test.mjs'
+              ]
+            },
+            {
+              slug: 'recovery-verified',
+              claim_id: 'xqueue-publisher.recovery.verified',
+              claim: 'The candidate verifies both posted and not-posted reconciliation recovery paths for an ambiguous publication attempt.',
+              tests: ['test/hardening.test.mjs']
+            }
+          ];
+
+          for (const item of claims) {
+            const record = {
+              schema_version: '0.3',
+              evidence_id: `xqueue-${item.slug}-${candidateSha}`,
+              project_id: 'xqueue',
+              automation_id: 'xqueue-publisher',
+              tsal_version: '0.3.1',
+              candidate: {
+                type: 'git_commit',
+                id: candidateSha,
+                immutable: true
+              },
+              produced_at: producedAt,
+              valid_until: null,
+              claim_id: item.claim_id,
+              claim: item.claim,
+              result: 'pass',
+              evidence_class: 'candidate',
+              evidence_type: 'test',
+              details: {
+                test_files: item.tests,
+                candidate_test_command: `node --test ${commonTests.join(' ')}`,
+                note: 'Generated in CI only after the targeted exact-candidate test step completed successfully.'
+              },
+              provenance: {
+                producer: 'XQueue TSAL Conformance GitHub Actions workflow',
+                source: 'targeted exact-candidate Node test suite',
+                run_id: process.env.GITHUB_RUN_ID_VALUE,
+                actor: process.env.GITHUB_ACTOR_VALUE
+              }
+            };
+
+            fs.writeFileSync(
+              path.join(outDir, `${item.slug}.json`),
+              `${JSON.stringify(record, null, 2)}\n`
+            );
+          }
+          NODE
+
+      - name: TSAL Audit
+        working-directory: xqueue
+        run: |
+          node ../tsal-standard/tooling/cli.mjs audit . --json | tee tsal-audit.json
+          node ../tsal-standard/tooling/cli.mjs audit .
+
+      - name: Upload audit and candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsal-audit-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            xqueue/tsal-audit.json
+            xqueue/docs/evidence/tsal-candidate/*.json
+          if-no-files-found: error
