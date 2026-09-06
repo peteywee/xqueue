@@ -78,7 +78,7 @@ export function buildRuntimeEvidence({
     produced_at: producedAt,
     valid_until: isoAfter(producedAt, validityMinutes),
     claim_id: CLAIM_ID,
-    claim: 'Current XQueue production runtime is technically healthy and its scheduler heartbeat is current under the read-only runtime readiness model.',
+    claim: 'Current XQueue production runtime is technically healthy; whenever production scheduler authority is expected, its durable scheduler heartbeat is current.',
     result,
     evidence_class: 'runtime',
     evidence_type: 'runtime_observation',
