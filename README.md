@@ -32,6 +32,19 @@ Key invariants:
 - A publication intent is persisted before the X create call begins.
 - An ambiguous create-post result blocks automatic retry until the owner reconciles it.
 - Production media validation blocks missing referenced figures.
+- Ordinary Cloudflare deploys do not declare scheduler state and therefore must preserve existing Cron Trigger authority.
+- Scheduler authority is expressed only by the explicit `wrangler.authority.jsonc` deployment path.
+- Production deployment is not considered fully verified until TSAL reconciles repository intent with Cloudflare control-plane and runtime evidence.
+
+### Cloudflare deployment authority boundary
+
+`wrangler.jsonc` and `wrangler.authority.jsonc` deliberately have different authority roles even though they identify the same production Worker and storage.
+
+- `wrangler.jsonc` is the ordinary deployment configuration. It MUST NOT contain a `triggers` property. Ordinary code deployment is not authorized to create, replace, or delete scheduler authority.
+- `wrangler.authority.jsonc` is the explicit scheduler-authority configuration. It pins exactly one cron: `*/15 * * * *`.
+- An explicit empty scheduler declaration such as `"crons": []` is forbidden in the ordinary config because provider replacement semantics can turn an apparently empty value into deletion of live external state.
+
+The repository test suite enforces this distinction, while TSAL deployment evidence independently verifies the live Cloudflare state after deployment.
 
 ## Layout
 

@@ -27,8 +27,5 @@
       "binding": "MEDIA",
       "bucket_name": "xqueue-media"
     }
-  ],
-  "triggers": {
-    "crons": []
-  }
+  ]
 }
