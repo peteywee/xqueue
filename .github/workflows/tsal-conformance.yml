@@ -177,6 +177,20 @@ jobs:
             --actor '${{ github.actor }}' \
             --observer-commit '${{ github.sha }}'
 
+      - name: Collect read-only Cloudflare deployment evidence
+        if: github.event_name != 'pull_request'
+        working-directory: xqueue
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node scripts/tsal-deployment-evidence.mjs \
+            --output docs/evidence/tsal-deployment/deployment-authority.json \
+            --valid-minutes 90 \
+            --run-id '${{ github.run_id }}' \
+            --actor '${{ github.actor }}' \
+            --observer-commit '${{ github.sha }}'
+
       - name: TSAL Audit
         working-directory: xqueue
         run: |
@@ -198,4 +212,12 @@ jobs:
         with:
           name: tsal-runtime-${{ github.sha }}-${{ github.run_id }}
           path: xqueue/docs/evidence/tsal-runtime/runtime-safe.json
+          if-no-files-found: error
+
+      - name: Upload deployment evidence
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsal-deployment-${{ github.sha }}-${{ github.run_id }}
+          path: xqueue/docs/evidence/tsal-deployment/deployment-authority.json
           if-no-files-found: error
