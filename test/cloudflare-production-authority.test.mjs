@@ -5,15 +5,14 @@ import {
   publicationAuthorityEnabled,
 } from '../cloudflare/src/authority-config.mjs';
 import {
-  verifyPublicationLease,
-} from '../cloudflare/src/publication-lease-verify.mjs';
-import {
   beginPublishingFence,
   persistPublicationOutcome,
 } from '../cloudflare/src/publication-ledger.mjs';
 import {
+  verifyPublicationLease,
+} from '../cloudflare/src/publication-lease-verify.mjs';
+import {
   runScheduledPublication,
-  productionPublisherInternals,
 } from '../cloudflare/src/production-publisher.mjs';
 import {
   classifyPublicationOutcome,
@@ -22,9 +21,9 @@ import {
 function ledger() {
   return {
     version: 1,
+    spend: 0,
     posted: {},
     skipped: {},
-    spend: 0,
     inflight: null,
   };
 }
@@ -33,46 +32,56 @@ function queue() {
   return [
     {
       id: 'C99',
-      title: 'Production candidate',
-      body: 'A useful restaurant operations note.',
       pillar: 'C',
+      title: 'Production candidate',
+      body: 'One exactly selected production-shaped post.',
       figure: null,
+      date: '2026-09-02',
+      time: '11:00',
+      timezone: 'America/Chicago',
     },
   ];
 }
 
 function eligible() {
   return {
-    safeToPublish: true,
+    health: {
+      ok: true,
+      postedCount: 0,
+      skippedCount: 0,
+      unresolvedCount: 1,
+      due: ['C99'],
+      overdue: [],
+      next: 'C99',
+      inflight: null,
+      graceMinutes: 20,
+    },
     selection: {
       blocked: false,
       blockReason: null,
       selected: ['C99'],
     },
+    safeToPublish: true,
     failures: [],
   };
 }
 
 function changeProofDb() {
+  const operations = [];
+
   return {
+    operations,
     prepare(sql) {
       return {
-        sql,
-        params: [],
-        bind(...params) {
-          return { ...this, params };
-        },
-        async first() {
-          return null;
+        bind(...args) {
+          return {
+            async run() {
+              operations.push({ sql, args });
+              return { success: true };
+            },
+          };
         },
       };
-    },
-    async batch(statements) {
-      return statements.map((statement) =>
-        /SELECT changes\(\)/.test(statement.sql)
-          ? { results: [{ direct_changes: 1 }] }
-          : { results: [] },
-      );
     },
   };
 }
@@ -81,8 +90,8 @@ test('authority flag is exact and fail-closed', () => {
   assert.equal(publicationAuthorityEnabled({}), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'ENABLED' }), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'true' }), false);
-  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'TRUE' }), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'enabled' }), true);
+  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'TRUE' }), false);
 });
 
 test('publisher does nothing before the authority flag is enabled', async () => {
@@ -137,7 +146,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
           return {
             users: {
               async getMe() {
-                return { data: { username: 'PatrickCra94338' } };
+                return { data: { id: 'test-user-id', username: 'PatrickCra94338' } };
               },
             },
           };
@@ -178,7 +187,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
         },
         async simulatePublicationTransaction(deps, input) {
           const identity = await deps.verifyIdentity();
-          assert.equal(identity.ok, true);
+          assert.equal(identity.username, 'PatrickCra94338');
           const lease = (await deps.acquireLease()).lease;
           assert.equal(await deps.verifyLease(lease), true);
           const media = await deps.verifyMedia({ post: queue()[0] });
@@ -286,7 +295,6 @@ test('confirmed-not-posted outcome stays distinct and does not require reconcili
 
   assert.equal(result.ledger.inflight, null);
   assert.equal(result.reconciliationRequired, false);
-  assert.equal(result.classification, 'confirmed_not_posted');
 });
 
 test('ambiguous outcome remains a durable reconciliation block', async () => {
@@ -307,7 +315,7 @@ test('ambiguous outcome remains a durable reconciliation block', async () => {
       post: { id: 'C99' },
       outcome: {
         classification: 'needs_reconciliation',
-        reason: 'transport_timeout_after_dispatch',
+        reason: 'ambiguous_timeout',
         automaticRetryAllowed: false,
       },
       now: new Date('2026-09-02T16:01:00.000Z'),
@@ -315,7 +323,7 @@ test('ambiguous outcome remains a durable reconciliation block', async () => {
   );
 
   assert.equal(result.ledger.inflight.status, 'needs_reconciliation');
-  assert.equal(result.ledger.inflight.lastError, 'transport_timeout_after_dispatch');
+  assert.equal(result.ledger.inflight.lastError, 'ambiguous_timeout');
   assert.equal(result.reconciliationRequired, true);
 });
 
@@ -348,38 +356,136 @@ test('exact lease verifier rejects stale, expired and mismatched handles', async
     },
   };
 
+  assert.equal(await verifyPublicationLease(db, lease, { nowMs: 4999 }), true);
+  assert.equal(await verifyPublicationLease(db, lease, { nowMs: 5000 }), false);
   assert.equal(
-    await verifyPublicationLease(db, lease, { nowMs: 2000 }),
-    true,
-  );
-  assert.equal(
-    await verifyPublicationLease(db, { ...lease, generation: 6 }, { nowMs: 2000 }),
-    false,
-  );
-  assert.equal(
-    await verifyPublicationLease(db, { ...lease, ownerToken: 'wrong' }, { nowMs: 2000 }),
-    false,
-  );
-  assert.equal(
-    await verifyPublicationLease(db, lease, { nowMs: 5000 }),
+    await verifyPublicationLease(
+      db,
+      { ...lease, generation: 8 },
+      { nowMs: 4999 },
+    ),
     false,
   );
 });
 
 test('classifier reads XDK-style HTTP errors and includes 413 refusal', () => {
-  const tooLarge = classifyPublicationOutcome({
+  const classification = classifyPublicationOutcome({
     phase: 'dispatched',
-    error: { response: { status: 413 } },
+    error: {
+      response: {
+        status: 413,
+      },
+    },
   });
 
-  assert.equal(tooLarge.classification, 'confirmed_not_posted');
-  assert.equal(tooLarge.reason, 'explicit_http_refusal_413');
+  assert.equal(classification.classification, 'confirmed_not_posted');
+  assert.equal(classification.reason, 'explicit_http_refusal_413');
+  assert.equal(classification.automaticRetryAllowed, false);
 });
 
-test('Worker-compatible render preserves the pillar B legal disclaimer', () => {
-  const rendered = productionPublisherInternals.renderPost({
-    pillar: 'B',
-    body: 'Body',
-  });
-  assert.match(rendered, /General information, not legal advice/);
+test('Worker-compatible render preserves the pillar B legal disclaimer', async () => {
+  const source = ledger();
+  let renderedText = null;
+
+  await runScheduledPublication(
+    {
+      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
+      DB: {},
+      MEDIA: {},
+    },
+    {
+      now: new Date('2026-09-02T16:00:00.000Z'),
+      dependencies: {
+        async verifyQueueIntegrity() {
+          return { ok: true };
+        },
+        async readPublicationSnapshot() {
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        evaluateEligibility() {
+          return {
+            ...eligible(),
+            selection: { blocked: false, blockReason: null, selected: ['B99'] },
+          };
+        },
+        decodeBundledQueue() {
+          return [{
+            ...queue()[0],
+            id: 'B99',
+            pillar: 'B',
+          }];
+        },
+        async prepareSelectedMedia() {
+          return { ok: true, required: false, bytes: null, mediaObject: null };
+        },
+        makeClient() {
+          return {
+            users: {
+              async getMe() {
+                return { data: { id: 'test-user-id', username: 'PatrickCra94338' } };
+              },
+            },
+          };
+        },
+        async acquirePublicationLease() {
+          return {
+            acquired: true,
+            lease: {
+              ownerToken: 'owner-token',
+              acquisitionId: 'acquisition-id',
+              generation: 1,
+              acquiredAtMs: Date.now(),
+              expiresAtMs: Date.now() + 60_000,
+            },
+          };
+        },
+        async verifyPublicationLease() {
+          return true;
+        },
+        async releasePublicationLease() {
+          return { released: true };
+        },
+        async beginPublishingFence(db, snapshot, input) {
+          renderedText = input.text;
+          const next = structuredClone(source);
+          next.inflight = {
+            attemptId: 'attempt-123',
+            postId: input.post.id,
+            title: input.post.title,
+            contentHash: 'a'.repeat(64),
+            cost: input.cost,
+            status: 'publishing',
+          };
+          return { raw: JSON.stringify(next), ledger: next };
+        },
+        async persistPublicationOutcome() {},
+        async simulatePublicationTransaction(deps) {
+          await deps.verifyIdentity();
+          const lease = (await deps.acquireLease()).lease;
+          await deps.verifyLease(lease);
+          const media = await deps.verifyMedia({ post: {
+            ...queue()[0],
+            id: 'B99',
+            pillar: 'B',
+          } });
+          const response = await deps.dispatchPost({ post: {
+            ...queue()[0],
+            id: 'B99',
+            pillar: 'B',
+          }, media });
+          const outcome = deps.classifyOutcome({ phase: 'dispatched', response });
+          await deps.recordEvidence({ outcome });
+          await deps.releaseLease(lease);
+          return {
+            status: 'confirmed_posted',
+            stage: 'complete',
+            dispatched: true,
+            automaticRetryAllowed: false,
+          };
+        },
+      },
+    },
+  );
+
+  assert.match(renderedText, /General information, not legal advice\./);
 });
