@@ -1,0 +1,46 @@
+name: XQueue Monitor Alert
+
+on:
+  workflow_run:
+    workflows: ["TSAL Conformance"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  incident:
+    if: ${{ github.event.workflow_run.event == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Open one deduplicated incident on scheduled observer failure
+        if: ${{ github.event.workflow_run.conclusion != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          title='[AUTO] XQueue scheduled conformance incident'
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body "The independent scheduled TSAL observer failed. Run: $RUN_URL. This notifier has no Cloudflare or X credentials. The issue is deduplicated and will be closed automatically after a later scheduled conformance run succeeds."
+          fi
+
+      - name: Close incident after scheduled observer recovery
+        if: ${{ github.event.workflow_run.conclusion == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          title='[AUTO] XQueue scheduled conformance incident'
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue close "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "Recovered on scheduled TSAL run $RUN_URL."
+          fi
