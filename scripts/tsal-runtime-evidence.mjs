@@ -68,7 +68,7 @@ export function buildRuntimeEvidence({
     evidence_id: `xqueue-runtime-safe-${evidenceIdSuffix}`,
     project_id: 'xqueue',
     automation_id: 'xqueue-publisher',
-    tsal_version: '0.3.1',
+    tsal_version: '0.3.2',
     candidate: null,
     produced_at: producedAt,
     valid_until: isoAfter(producedAt, validityMinutes),

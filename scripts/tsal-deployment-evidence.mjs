@@ -307,7 +307,7 @@ export function buildDeploymentEvidence({
     evidence_id: `xqueue-deployment-authority-${runId || producedAt.replace(/[^0-9]/g, '').slice(0, 14)}`,
     project_id: 'xqueue',
     automation_id: 'xqueue-publisher',
-    tsal_version: '0.3.1',
+    tsal_version: '0.3.2',
     candidate: null,
     produced_at: producedAt,
     valid_until: isoAfter(producedAt, validityMinutes),

@@ -23,11 +23,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: xqueue
 
-      - name: Checkout exact TSAL 0.3.1
+      - name: Checkout exact TSAL 0.3.2
         uses: actions/checkout@v4
         with:
           repository: peteywee/TSAL
-          ref: 8590ef85d33386725f36444e61699a317fcf1f1b
+          ref: aa3ab7ef7fa1a53d9dd4f7bf3d65d4ebbe27e759
           path: tsal-standard
 
       - uses: pnpm/action-setup@v4
@@ -59,6 +59,7 @@ jobs:
             test/cloudflare-publication-lease-d1-meta.test.mjs \
             test/cloudflare-x-outcomes.test.mjs \
             test/cloudflare-x-simulation-harness.test.mjs \
+            test/deployment-config-preservation.test.mjs \
             test/hardening.test.mjs
 
       - name: Emit exact-candidate TSAL evidence
@@ -83,6 +84,7 @@ jobs:
             'test/cloudflare-publication-lease-d1-meta.test.mjs',
             'test/cloudflare-x-outcomes.test.mjs',
             'test/cloudflare-x-simulation-harness.test.mjs',
+            'test/deployment-config-preservation.test.mjs',
             'test/hardening.test.mjs'
           ];
 
@@ -90,12 +92,13 @@ jobs:
             {
               slug: 'authority-enforced',
               claim_id: 'xqueue-publisher.authority.enforced',
-              claim: 'Execution authority and concurrent publication ownership are enforced by the candidate.',
+              claim: 'Execution authority, scheduler-preservation boundaries, and concurrent publication ownership are enforced by the candidate.',
               tests: [
                 'test/cloudflare-production-authority.test.mjs',
                 'test/cloudflare-publication-lease.test.mjs',
                 'test/cloudflare-publication-lease-d1-meta.test.mjs',
-                'test/cloudflare-x-simulation-harness.test.mjs'
+                'test/cloudflare-x-simulation-harness.test.mjs',
+                'test/deployment-config-preservation.test.mjs'
               ]
             },
             {
@@ -132,7 +135,7 @@ jobs:
               evidence_id: `xqueue-${item.slug}-${candidateSha}`,
               project_id: 'xqueue',
               automation_id: 'xqueue-publisher',
-              tsal_version: '0.3.1',
+              tsal_version: '0.3.2',
               candidate: {
                 type: 'git_commit',
                 id: candidateSha,
