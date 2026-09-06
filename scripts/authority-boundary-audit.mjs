@@ -2,10 +2,10 @@
 // authority-boundary-audit.mjs — mechanical proof of the Cloudflare authority boundary.
 //
 // Ordinary deployment and scheduler-authority mutation are separate authority classes.
-// wrangler.jsonc MUST NOT declare triggers at all; that omission preserves externally managed
-// scheduler state during normal code deploys. wrangler.authority.jsonc is the only tracked config
-// allowed to declare the production cron, and the publisher still requires the exact runtime
-// authority flag before any public side effect can occur.
+// wrangler.jsonc is preview-only and MUST NOT declare triggers. wrangler.authority.jsonc is the
+// only tracked production config and the only config allowed to declare the production cron.
+// Production publication still requires the exact runtime authority flag before any public side
+// effect can occur.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -62,11 +62,12 @@ const cloudflareFiles = readAll(walk(join(ROOT, 'cloudflare')));
 const workerFiles = cloudflareFiles.filter((file) => file.path.startsWith('cloudflare/src/'));
 const productionPublisherPath = 'cloudflare/src/production-publisher.mjs';
 const publicationLedgerPath = 'cloudflare/src/publication-ledger.mjs';
+const schedulerLivenessPath = 'cloudflare/src/scheduler-liveness.mjs';
 
 const defaultConfig = readJsonc('wrangler.jsonc');
 const authorityConfig = readJsonc('wrangler.authority.jsonc');
 
-// --------------------------------------------------------------- 1. schedules
+// --------------------------------------------------------------- 1. schedules / environments
 
 const defaultDeclaresTriggers = Object.prototype.hasOwnProperty.call(
   defaultConfig.value,
@@ -75,7 +76,7 @@ const defaultDeclaresTriggers = Object.prototype.hasOwnProperty.call(
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 
 gate(
-  'default deploy preserves scheduler authority',
+  'default deploy cannot mutate scheduler authority',
   defaultDeclaresTriggers === false,
   defaultDeclaresTriggers ? 'triggers declared — destructive replacement risk' : 'triggers omitted',
 );
@@ -88,18 +89,35 @@ gate(
   JSON.stringify(authorityCrons),
 );
 
-const configIdentityMatches =
-  authorityConfig.value.name === defaultConfig.value.name &&
-  authorityConfig.value.main === defaultConfig.value.main &&
-  authorityConfig.value.d1_databases?.[0]?.database_id ===
-    defaultConfig.value.d1_databases?.[0]?.database_id &&
-  authorityConfig.value.r2_buckets?.[0]?.bucket_name ===
-    defaultConfig.value.r2_buckets?.[0]?.bucket_name;
+const previewDbId = defaultConfig.value.d1_databases?.[0]?.database_id;
+const productionDbId = authorityConfig.value.d1_databases?.[0]?.database_id;
+const environmentIdentityIsolated =
+  defaultConfig.value.name === 'xqueue-preview' &&
+  authorityConfig.value.name === 'xqueue-production' &&
+  defaultConfig.value.main === authorityConfig.value.main &&
+  previewDbId &&
+  productionDbId &&
+  previewDbId !== productionDbId &&
+  defaultConfig.value.d1_databases?.[0]?.preview_database_id === undefined &&
+  authorityConfig.value.d1_databases?.[0]?.preview_database_id === undefined;
 
 gate(
-  'authority config targets the exact production Worker/storage',
-  configIdentityMatches,
-  authorityConfig.value.name ?? 'missing',
+  'preview and production Worker/D1 identities are isolated',
+  Boolean(environmentIdentityIsolated),
+  `${defaultConfig.value.name ?? 'missing'}:${previewDbId ?? 'missing'} -> ${authorityConfig.value.name ?? 'missing'}:${productionDbId ?? 'missing'}`,
+);
+
+gate(
+  'production authority config carries no preview D1 identity',
+  !authorityConfig.raw.includes('f5f9bea9-e88c-41ab-9407-70356079a638') &&
+    !/preview_database_id/.test(authorityConfig.raw),
+  'production-only D1 binding',
+);
+
+gate(
+  'preview config carries no production D1 identity',
+  !defaultConfig.raw.includes('fc85026e-bfc8-435f-8bb0-c60e139178a3'),
+  'preview-only D1 binding',
 );
 
 // --------------------------------------------------------- 2. runtime authority
@@ -182,9 +200,15 @@ for (const { path, text } of workerFiles) {
   }
 }
 
-const ledgerWritesOutsideLedgerModule = writeTargets.filter(
-  (write) => LEDGER_TABLES.includes(write.table) && write.path !== publicationLedgerPath,
-);
+const ledgerWritesOutsideAllowedModules = writeTargets.filter((write) => {
+  if (['publication_state', 'publication_events'].includes(write.table)) {
+    return write.path !== publicationLedgerPath;
+  }
+  if (write.table === 'runtime_metadata') {
+    return ![publicationLedgerPath, schedulerLivenessPath].includes(write.path);
+  }
+  return false;
+});
 const unknownWrites = writeTargets.filter((write) => !ALLOWED_TABLES.has(write.table));
 const leaseWritesOutsideLeaseModule = writeTargets.filter(
   (write) => LEASE_TABLES.includes(write.table) &&
@@ -192,9 +216,9 @@ const leaseWritesOutsideLeaseModule = writeTargets.filter(
 );
 
 gate(
-  'publication-ledger writes are confined to one module',
-  ledgerWritesOutsideLedgerModule.length === 0,
-  ledgerWritesOutsideLedgerModule.map((write) => write.where).join(' ') || publicationLedgerPath,
+  'ledger/heartbeat writes are confined to approved modules',
+  ledgerWritesOutsideAllowedModules.length === 0,
+  ledgerWritesOutsideAllowedModules.map((write) => write.where).join(' ') || `${publicationLedgerPath}, ${schedulerLivenessPath}`,
 );
 
 gate(
