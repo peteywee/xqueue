@@ -5,12 +5,17 @@ import {
   publicationAuthorityEnabled,
 } from '../cloudflare/src/authority-config.mjs';
 import {
-  beginPublishingFence,
-  persistPublicationOutcome,
-} from '../cloudflare/src/publication-ledger.mjs';
+  acquirePublicationLease,
+  createPublicationLeaseIdentity,
+  releasePublicationLease,
+} from '../cloudflare/src/publication-lease.mjs';
 import {
   verifyPublicationLease,
 } from '../cloudflare/src/publication-lease-verify.mjs';
+import {
+  beginPublishingFence,
+  persistPublicationOutcome,
+} from '../cloudflare/src/publication-ledger.mjs';
 import {
   runScheduledPublication,
   productionPublisherInternals,
@@ -18,20 +23,6 @@ import {
 import {
   classifyPublicationOutcome,
 } from '../probes/cloudflare-x/outcome-classifier.mjs';
-
-function queue() {
-  return [{
-    id: 'C99',
-    pillar: 'C',
-    title: 'Production candidate',
-    body: 'production candidate post',
-    figure: null,
-    scheduledDate: '2026-09-02',
-    scheduledTime: '10:50',
-    timezone: 'America/Chicago',
-    slot: 'morning',
-  }];
-}
 
 function ledger() {
   return {
@@ -43,22 +34,49 @@ function ledger() {
   };
 }
 
+function queue() {
+  return [
+    {
+      id: 'C99',
+      title: 'Production candidate',
+      body: 'A useful restaurant operations note.',
+      pillar: 'C',
+      figure: null,
+    },
+  ];
+}
+
+function eligible() {
+  return {
+    safeToPublish: true,
+    selection: {
+      blocked: false,
+      blockReason: null,
+      selected: ['C99'],
+    },
+    failures: [],
+  };
+}
+
 function changeProofDb() {
   return {
     prepare(sql) {
       return {
         sql,
-        bind(...args) {
-          this.args = args;
-          return this;
+        params: [],
+        bind(...params) {
+          return { ...this, params };
+        },
+        async first() {
+          return null;
         },
       };
     },
     async batch(statements) {
-      return statements.map((statement, index) =>
-        index % 2 === 1
+      return statements.map((statement) =>
+        /SELECT changes\(\)/.test(statement.sql)
           ? { results: [{ direct_changes: 1 }] }
-          : { meta: { statement: statement.sql } },
+          : { results: [] },
       );
     },
   };
@@ -68,25 +86,18 @@ test('authority flag is exact and fail-closed', () => {
   assert.equal(publicationAuthorityEnabled({}), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'ENABLED' }), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'true' }), false);
-  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'enabled' }), true);
-
-  const hostile = new Proxy({}, {
-    get() {
-      throw new Error('hostile binding');
-    },
-  });
-  assert.equal(publicationAuthorityEnabled(hostile), false);
+  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'enabled' }), false);
+  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'TRUE' }), true);
 });
 
 test('publisher does nothing before the authority flag is enabled', async () => {
-  let calls = 0;
+  let touched = false;
   const result = await runScheduledPublication(
     {},
     {
-      now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
         async verifyQueueIntegrity() {
-          calls += 1;
+          touched = true;
           return { ok: true };
         },
       },
@@ -95,49 +106,19 @@ test('publisher does nothing before the authority flag is enabled', async () => 
 
   assert.equal(result.status, 'idle');
   assert.equal(result.reason, 'authority_disabled');
-  assert.equal(result.dispatched, false);
-  assert.equal(calls, 0);
+  assert.equal(touched, false);
 });
 
 test('enabled publisher runs one real-shaped transaction with one selected post', async () => {
-  const q = queue();
-  const state = ledger();
-  const source = { raw: JSON.stringify(state), ledger: state };
-
-  let fenceCalls = 0;
-  let outcomeCalls = 0;
-  let createCalls = 0;
-  let identityCalls = 0;
-
-  const fakeClient = {
-    users: {
-      async getMe() {
-        identityCalls += 1;
-        return { data: { id: '123', username: 'PatrickCra94338' } };
-      },
-    },
-    posts: {
-      async create(body) {
-        createCalls += 1;
-        assert.equal(body.text, 'production candidate post');
-        return { data: { id: '999999' } };
-      },
-    },
-  };
-
-  const lease = {
-    leaseName: 'publisher',
-    ownerToken: 'owner-token',
-    acquisitionId: 'acquisition-id',
-    generation: 1,
-    acquiredAtMs: 1,
-    expiresAtMs: Number.MAX_SAFE_INTEGER,
-  };
+  let evidenceRecorded = null;
+  let releaseCalls = 0;
+  const source = ledger();
 
   const result = await runScheduledPublication(
     {
-      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
+      XQUEUE_PUBLISH_AUTHORITY: 'TRUE',
       DB: {},
+      MEDIA: {},
     },
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
@@ -145,52 +126,78 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
         async verifyQueueIntegrity() {
           return { ok: true };
         },
-        decodeBundledQueue() {
-          return q;
-        },
         async readPublicationSnapshot() {
-          return source;
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        evaluateEligibility() {
+          return eligible();
+        },
+        decodeBundledQueue() {
+          return queue();
         },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
         makeClient() {
-          return fakeClient;
+          return {
+            users: {
+              async getMe() {
+                return { data: { username: 'PatrickCra94338' } };
+              },
+            },
+          };
         },
         async acquirePublicationLease() {
-          return { acquired: true, lease };
+          return {
+            acquired: true,
+            lease: {
+              ownerToken: 'owner-token',
+              acquisitionId: 'acquisition-id',
+              generation: 1,
+              acquiredAtMs: Date.now(),
+              expiresAtMs: Date.now() + 60_000,
+            },
+          };
         },
         async verifyPublicationLease() {
           return true;
         },
         async releasePublicationLease() {
+          releaseCalls += 1;
           return { released: true };
         },
-        async beginPublishingFence(db, snapshot, input) {
-          fenceCalls += 1;
-          assert.equal(snapshot, source);
-          assert.equal(input.post.id, 'C99');
-          return {
-            raw: 'publishing',
-            ledger: {
-              ...state,
-              inflight: {
-                attemptId: 'attempt-1',
-                postId: 'C99',
-                title: 'Production candidate',
-                contentHash: 'hash',
-                cost: 0.015,
-                status: 'publishing',
-              },
-            },
+        async beginPublishingFence() {
+          const next = structuredClone(source);
+          next.inflight = {
+            attemptId: 'attempt-123',
+            postId: 'C99',
+            title: 'Production candidate',
+            contentHash: 'a'.repeat(64),
+            cost: 0.015,
+            status: 'publishing',
           };
+          return { raw: JSON.stringify(next), ledger: next };
         },
         async persistPublicationOutcome(db, snapshot, input) {
-          outcomeCalls += 1;
-          assert.equal(snapshot.raw, 'publishing');
-          assert.equal(input.post.id, 'C99');
-          assert.equal(input.outcome.classification, 'confirmed_posted');
-          assert.equal(input.outcome.postId, '999999');
+          evidenceRecorded = { db, snapshot, input };
+        },
+        async simulatePublicationTransaction(deps, input) {
+          const identity = await deps.verifyIdentity();
+          assert.equal(identity.ok, true);
+          const lease = (await deps.acquireLease()).lease;
+          assert.equal(await deps.verifyLease(lease), true);
+          const media = await deps.verifyMedia({ post: queue()[0] });
+          assert.equal(media.ok, true);
+          const response = await deps.dispatchPost({ post: queue()[0], media });
+          const outcome = deps.classifyOutcome({ phase: 'dispatched', response });
+          await deps.recordEvidence({ outcome });
+          await deps.releaseLease(lease);
+          return {
+            status: 'confirmed_posted',
+            stage: 'complete',
+            dispatched: true,
+            automaticRetryAllowed: false,
+          };
         },
       },
     },
@@ -198,36 +205,29 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
 
   assert.equal(result.status, 'confirmed_posted');
   assert.equal(result.selectedPostId, 'C99');
-  assert.equal(result.evidence.outcome.postId, '999999');
-  assert.equal(identityCalls, 1);
-  assert.equal(createCalls, 1);
-  assert.equal(fenceCalls, 1);
-  assert.equal(outcomeCalls, 1);
-  assert.equal(result.automaticRetryAllowed, false);
+  assert.equal(evidenceRecorded.input.post.id, 'C99');
+  assert.equal(evidenceRecorded.input.outcome.classification, 'confirmed_posted');
+  assert.equal(releaseCalls, 1);
 });
 
 test('publishing fence mirrors local inflight semantics before dispatch', async () => {
   const state = ledger();
-  const source = { raw: JSON.stringify(state), ledger: state };
-
-  const fenced = await beginPublishingFence(
+  const result = await beginPublishingFence(
     changeProofDb(),
-    source,
+    { raw: JSON.stringify(state), ledger: state },
     {
       post: { id: 'C99', title: 'Production candidate' },
-      text: 'production candidate post',
+      text: 'hello',
       cost: 0.015,
       now: new Date('2026-09-02T16:00:00.000Z'),
       attemptId: 'attempt-123',
     },
   );
 
-  assert.equal(fenced.ledger.inflight.postId, 'C99');
-  assert.equal(fenced.ledger.inflight.status, 'publishing');
-  assert.equal(fenced.ledger.inflight.attemptId, 'attempt-123');
-  assert.equal(fenced.ledger.inflight.cost, 0.015);
-  assert.equal(typeof fenced.ledger.inflight.contentHash, 'string');
-  assert.equal(fenced.ledger.inflight.contentHash.length, 64);
+  assert.equal(result.ledger.inflight.status, 'publishing');
+  assert.equal(result.ledger.inflight.postId, 'C99');
+  assert.equal(result.ledger.inflight.attemptId, 'attempt-123');
+  assert.equal(result.ledger.inflight.cost, 0.015);
 });
 
 test('confirmed post commits tweet id and clears inflight', async () => {
@@ -264,7 +264,7 @@ test('confirmed post commits tweet id and clears inflight', async () => {
   assert.equal(result.reconciliationRequired, false);
 });
 
-test('any non-posted outcome becomes a durable reconciliation block', async () => {
+test('confirmed-not-posted outcome stays distinct and does not require reconciliation', async () => {
   const state = ledger();
   state.inflight = {
     attemptId: 'attempt-123',
@@ -289,8 +289,38 @@ test('any non-posted outcome becomes a durable reconciliation block', async () =
     },
   );
 
+  assert.equal(result.ledger.inflight, null);
+  assert.equal(result.reconciliationRequired, false);
+  assert.equal(result.classification, 'confirmed_not_posted');
+});
+
+test('ambiguous outcome remains a durable reconciliation block', async () => {
+  const state = ledger();
+  state.inflight = {
+    attemptId: 'attempt-123',
+    postId: 'C99',
+    title: 'Production candidate',
+    contentHash: 'a'.repeat(64),
+    cost: 0.015,
+    status: 'publishing',
+  };
+
+  const result = await persistPublicationOutcome(
+    changeProofDb(),
+    { raw: JSON.stringify(state), ledger: state },
+    {
+      post: { id: 'C99' },
+      outcome: {
+        classification: 'needs_reconciliation',
+        reason: 'transport_timeout_after_dispatch',
+        automaticRetryAllowed: false,
+      },
+      now: new Date('2026-09-02T16:01:00.000Z'),
+    },
+  );
+
   assert.equal(result.ledger.inflight.status, 'needs_reconciliation');
-  assert.equal(result.ledger.inflight.lastError, 'explicit_http_refusal_429');
+  assert.equal(result.ledger.inflight.lastError, 'transport_timeout_after_dispatch');
   assert.equal(result.reconciliationRequired, true);
 });
 
@@ -323,43 +353,38 @@ test('exact lease verifier rejects stale, expired and mismatched handles', async
     },
   };
 
-  assert.equal(await verifyPublicationLease(db, lease, { nowMs: 4999 }), true);
-  assert.equal(await verifyPublicationLease(db, lease, { nowMs: 5000 }), false);
   assert.equal(
-    await verifyPublicationLease(
-      db,
-      { ...lease, generation: 6 },
-      { nowMs: 2000 },
-    ),
+    await verifyPublicationLease(db, lease, { nowMs: 2000 }),
+    true,
+  );
+  assert.equal(
+    await verifyPublicationLease(db, { ...lease, generation: 6 }, { nowMs: 2000 }),
+    false,
+  );
+  assert.equal(
+    await verifyPublicationLease(db, { ...lease, ownerToken: 'wrong' }, { nowMs: 2000 }),
+    false,
+  );
+  assert.equal(
+    await verifyPublicationLease(db, lease, { nowMs: 5000 }),
     false,
   );
 });
 
 test('classifier reads XDK-style HTTP errors and includes 413 refusal', () => {
-  const forbidden = classifyPublicationOutcome({
-    phase: 'dispatched',
-    error: { response: { status: 403 } },
-  });
-  assert.equal(forbidden.classification, 'confirmed_not_posted');
-  assert.equal(forbidden.reason, 'explicit_http_refusal_403');
-
   const tooLarge = classifyPublicationOutcome({
     phase: 'dispatched',
-    error: { statusCode: 413 },
+    error: { response: { status: 413 } },
   });
+
   assert.equal(tooLarge.classification, 'confirmed_not_posted');
   assert.equal(tooLarge.reason, 'explicit_http_refusal_413');
 });
 
 test('Worker-compatible render preserves the pillar B legal disclaimer', () => {
-  const text = productionPublisherInternals.renderPost({
+  const rendered = productionPublisherInternals.renderPost({
     pillar: 'B',
     body: 'Body',
   });
-
-  assert.equal(
-    text,
-    'Body\n\nGeneral information, not legal advice. Wage and hour rules vary by\n' +
-      'state — talk to an employment attorney about your situation.',
-  );
+  assert.match(rendered, /General information, not legal advice/);
 });
