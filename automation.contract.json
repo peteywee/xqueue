@@ -132,7 +132,7 @@
     "alerts": "Blocking runtime-health and scheduler outcomes must remain observable; automated alerting may be added later without changing this contract."
   },
   "lesson_loop": {
-    "incident_record_location": "docs/incidents/",
+    "incident_record_location": "docs/incidents",
     "standard_promotion_process": "Operational findings are first corrected in XQueue, then generalized into TSAL only when reusable or sufficiently high-impact."
   }
 }
