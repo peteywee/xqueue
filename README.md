@@ -30,21 +30,39 @@ Key invariants:
 - A filesystem lock blocks concurrent live publishers.
 - State writes are atomic.
 - A publication intent is persisted before the X create call begins.
+- `confirmed_posted`, `confirmed_not_posted`, and `needs_reconciliation` remain distinct when publication outcomes are persisted.
 - An ambiguous create-post result blocks automatic retry until the owner reconciles it.
 - Production media validation blocks missing referenced figures.
-- Ordinary Cloudflare deploys do not declare scheduler state and therefore must preserve existing Cron Trigger authority.
-- Scheduler authority is expressed only by the explicit `wrangler.authority.jsonc` deployment path.
+- Ordinary Cloudflare code deployment uses only the production Worker/D1 identity and cannot mutate scheduler authority because it declares no triggers.
+- Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
+- Scheduler authority is expressed only by the explicit `wrangler.authority.jsonc` production deployment path.
+- Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
+- The independent hourly TSAL observer fails on stale/missing production scheduler liveness, opens one deduplicated GitHub incident, and closes it after recovery.
 - Production deployment is not considered fully verified until TSAL reconciles repository intent with Cloudflare control-plane and runtime evidence.
 
 ### Cloudflare deployment authority boundary
 
-`wrangler.jsonc` and `wrangler.authority.jsonc` deliberately have different authority roles even though they identify the same production Worker and storage.
+Cloudflare Workers Builds is connected to `xqueue-production`, so the default Wrangler config must identify that production Worker. Authority separation is therefore expressed by what each config is allowed to mutate, not by pretending the default build targets another Worker.
 
-- `wrangler.jsonc` is the ordinary deployment configuration. It MUST NOT contain a `triggers` property. Ordinary code deployment is not authorized to create, replace, or delete scheduler authority.
-- `wrangler.authority.jsonc` is the explicit scheduler-authority configuration. It pins exactly one cron: `*/15 * * * *`.
+- `wrangler.jsonc` targets `xqueue-production`, binds only the production D1 identity, and MUST NOT contain a `triggers` property. It is the ordinary Workers Builds/code-deploy config and preserves externally managed Cron Trigger state.
+- `wrangler.authority.jsonc` also targets `xqueue-production` and the same production D1, but is the explicit scheduler-authority surface. It pins exactly one cron: `*/15 * * * *`.
+- `wrangler.preview.jsonc` targets `xqueue-preview`, binds only the preview D1 identity, and declares no scheduler authority. Preview D1 diagnostics must explicitly select this config.
+- Neither production config may contain the preview D1 ID or `preview_database_id`; the preview config may not contain the production D1 ID.
 - An explicit empty scheduler declaration such as `"crons": []` is forbidden in the ordinary config because provider replacement semantics can turn an apparently empty value into deletion of live external state.
 
-The repository test suite enforces this distinction, while TSAL deployment evidence independently verifies the live Cloudflare state after deployment.
+The repository test suite and authority-boundary audit enforce this distinction. TSAL deployment evidence independently verifies the live Cloudflare state after production deployment.
+
+### Scheduler liveness boundary
+
+Publication authority and scheduler liveness are separate facts.
+
+- `livePublication` means the production runtime is authorized to publish if current eligibility and transaction gates permit it.
+- `schedulerAuthority` additionally requires a fresh durable scheduler heartbeat.
+- `schedulerLiveness.lastInvocationAt` is written by the actual Cloudflare scheduled handler, not inferred from configuration.
+- `schedulerLiveness.expectedNextAt` and `schedulerLiveness.staleAfterAt` make the detection window explicit.
+- If production authority is expected and the heartbeat is missing, malformed, or older than 45 minutes, `/health` returns an error and TSAL runtime evidence fails.
+
+This prevents a configured-but-dead scheduler from being represented as healthy.
 
 ## Layout
 
@@ -79,6 +97,7 @@ regeneration is portable across CI and production hosts.
 | `pnpm post:live` | explicit live publication; at most oldest due post |
 | `pnpm reconcile -- --posted <tweet-id>` | owner confirms ambiguous attempt did publish |
 | `pnpm reconcile -- --not-posted` | owner confirms ambiguous attempt did not publish |
+| `pnpm cf:preview:d1-diagnostic` | read-only preview D1 check through explicit `wrangler.preview.jsonc` |
 
 `build` flags: `--start YYYY-MM-DD`, `--slots 14:30,22:15`,
 `--days 1,2,3,4,5`, `--tz America/Chicago`.
@@ -113,6 +132,8 @@ The owner must inspect the actual X timeline and then choose exactly one:
 pnpm reconcile -- --posted <tweet-id>
 pnpm reconcile -- --not-posted
 ```
+
+A conclusively `confirmed_not_posted` result is not represented as ambiguous; it is durably recorded as such and the content returns to scheduled state under the existing scheduler policy.
 
 See `docs/RUNBOOK.md` for the production procedure and scheduler command.
 

@@ -18,8 +18,7 @@
       "binding": "DB",
       "database_name": "xqueue-production",
       "database_id": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
-      "migrations_dir": "cloudflare/migrations",
-      "preview_database_id": "f5f9bea9-e88c-41ab-9407-70356079a638"
+      "migrations_dir": "cloudflare/migrations"
     }
   ],
   "r2_buckets": [

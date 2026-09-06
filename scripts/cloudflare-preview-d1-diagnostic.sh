@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
-EXPECTED_BRANCH="cf-runtime-integration"
-DB_NAME="xqueue-production"
+CONFIG="wrangler.preview.jsonc"
+DB_NAME="xqueue-preview"
 
 fail() {
   printf '\nXQUEUE PREVIEW D1 DIAGNOSTIC: FAIL\n%s\n' "$*" >&2
@@ -15,43 +14,33 @@ fail() {
 printf '%s\n' '============================================================'
 printf '%s\n' ' XQUEUE CLOUDFLARE PREVIEW D1 DIAGNOSTIC'
 printf '%s\n' '============================================================'
-printf '%s\n' 'Read-only preflight. No migration or production authority changes occur before the final rehearsal call.'
+printf '%s\n' 'Read-only. Explicit preview config only. No production authority or D1 mutation.'
 
-[[ "$(git branch --show-current)" == "$EXPECTED_BRANCH" ]] || \
-  fail "Expected branch $EXPECTED_BRANCH; found $(git branch --show-current)."
+[[ -f "$CONFIG" ]] || fail "Missing explicit preview config: $CONFIG"
 
-git fetch --quiet origin "$EXPECTED_BRANCH"
-LOCAL_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git rev-parse "origin/$EXPECTED_BRANCH")"
-[[ "$LOCAL_SHA" == "$REMOTE_SHA" ]] || \
-  fail "Local HEAD $LOCAL_SHA does not equal origin/$EXPECTED_BRANCH $REMOTE_SHA."
-
-git diff --quiet || fail 'Tracked working-tree changes are present.'
-git diff --cached --quiet || fail 'Staged changes are present.'
+git diff --quiet -- "$CONFIG" || fail "$CONFIG has tracked working-tree changes."
+git diff --cached --quiet -- "$CONFIG" || fail "$CONFIG has staged changes."
 
 printf '\n=== AUTHORITY BOUNDARY ===\n'
-node scripts/authority-boundary-audit.mjs
+node scripts/authority-boundary-audit.mjs || fail 'Authority boundary audit failed.'
 
 printf '\n=== CLOUDFLARE IDENTITY ===\n'
 pnpm wrangler whoami || fail 'Wrangler is not authenticated to Cloudflare.'
 
 printf '\n=== PREVIEW D1 MIGRATION LEDGER — READ ONLY ===\n'
-# Deliberately do not use --json or command substitution here. If Wrangler fails,
-# the exact account/API/preview-resolution error remains visible to the operator.
 pnpm wrangler d1 execute "$DB_NAME" \
+  --config "$CONFIG" \
   --remote \
-  --preview \
   --yes \
   --command 'SELECT id,name,applied_at FROM d1_migrations ORDER BY id;' || \
-  fail 'Could not read the preview D1 migration ledger.'
+  fail 'Could not read the explicit preview D1 migration ledger.'
 
 printf '\n=== PREVIEW D1 TABLE INVENTORY — READ ONLY ===\n'
 pnpm wrangler d1 execute "$DB_NAME" \
+  --config "$CONFIG" \
   --remote \
-  --preview \
   --yes \
   --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;" || \
-  fail 'Could not read the preview D1 table inventory.'
+  fail 'Could not read the explicit preview D1 table inventory.'
 
-printf '\nRead-only preview D1 preflight passed. Starting the guarded lease rehearsal.\n'
-exec bash scripts/cloudflare-preview-lease-rehearsal.sh
+printf '\nXQUEUE PREVIEW D1 DIAGNOSTIC: PASS\n'

@@ -35,6 +35,21 @@ WHERE post_id = ?4
   AND attempt_id = ?5
 `;
 
+const UPDATE_CONFIRMED_NOT_POSTED_SQL = `
+UPDATE publication_state
+SET
+  status = 'scheduled',
+  attempt_id = NULL,
+  publishing_at = NULL,
+  updated_at = ?1,
+  last_error = ?2,
+  failed_at = NULL,
+  ledger_record_json = ?3
+WHERE post_id = ?4
+  AND status = 'publishing'
+  AND attempt_id = ?5
+`;
+
 const UPDATE_RECONCILIATION_SQL = `
 UPDATE publication_state
 SET
@@ -276,6 +291,31 @@ export async function persistPublicationOutcome(
       classification,
       reason,
     });
+  } else if (classification === 'confirmed_not_posted') {
+    const record = {
+      at,
+      attemptId: attempt.attemptId,
+      classification,
+      reason,
+      contentHash: attempt.contentHash,
+      cost: attempt.cost,
+      automaticRetryAllowed: false,
+    };
+
+    next.inflight = null;
+
+    stateStatement = db
+      .prepare(UPDATE_CONFIRMED_NOT_POSTED_SQL)
+      .bind(
+        at,
+        reason,
+        JSON.stringify(record),
+        post.id,
+        attempt.attemptId,
+      );
+
+    eventType = 'confirmed_not_posted';
+    eventDetail = JSON.stringify(record);
   } else {
     next.inflight = {
       ...next.inflight,
@@ -322,7 +362,9 @@ export async function persistPublicationOutcome(
     raw: nextRaw,
     ledger: next,
     classification,
-    reconciliationRequired: classification !== 'confirmed_posted',
+    reconciliationRequired:
+      classification !== 'confirmed_posted' &&
+      classification !== 'confirmed_not_posted',
   };
 }
 
@@ -330,6 +372,7 @@ export const publicationLedgerSql = Object.freeze({
   updateSnapshot: UPDATE_SNAPSHOT_SQL,
   updatePublishing: UPDATE_PUBLISHING_SQL,
   updatePosted: UPDATE_POSTED_SQL,
+  updateConfirmedNotPosted: UPDATE_CONFIRMED_NOT_POSTED_SQL,
   updateReconciliation: UPDATE_RECONCILIATION_SQL,
   insertEvent: INSERT_EVENT_SQL,
   directChanges: DIRECT_CHANGES_SQL,

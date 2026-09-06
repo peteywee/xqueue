@@ -13,6 +13,12 @@ function healthyPayload(overrides = {}) {
     status: 'ok',
     livePublication: true,
     schedulerAuthority: true,
+    schedulerLiveness: {
+      required: true,
+      ok: true,
+      state: 'fresh',
+      lastInvocationAt: '2026-09-06T02:45:00.000Z',
+    },
     queueIntegrity: { ok: true },
     authorityReadiness: {
       ok: true,
@@ -31,6 +37,11 @@ test('runtime health proves technical safety without conflating deployment autho
   const health = healthyPayload({
     livePublication: false,
     schedulerAuthority: false,
+    schedulerLiveness: {
+      required: false,
+      ok: true,
+      state: 'not_required',
+    },
     authorityReadiness: {
       ok: true,
       authorized: false,
@@ -64,6 +75,26 @@ test('healthy runtime creates current passing runtime evidence', () => {
   assert.equal(evidence.valid_until, '2026-09-06T04:30:00.000Z');
   assert.equal(evidence.candidate, null);
   assert.equal(evidence.details.observer_commit, 'abc123');
+  assert.equal(evidence.details.evaluation.checks.scheduler_liveness, true);
+});
+
+test('stale scheduler heartbeat makes runtime evidence fail', () => {
+  const evidence = buildRuntimeEvidence({
+    health: healthyPayload({
+      status: 'error',
+      schedulerAuthority: false,
+      schedulerLiveness: {
+        required: true,
+        ok: false,
+        state: 'stale',
+        lastInvocationAt: '2026-09-06T01:00:00.000Z',
+      },
+    }),
+    producedAt: '2026-09-06T03:00:00.000Z',
+  });
+
+  assert.equal(evidence.result, 'fail');
+  assert.ok(evidence.details.evaluation.failing.includes('scheduler_liveness'));
 });
 
 test('explicitly unhealthy runtime creates failing evidence', () => {
