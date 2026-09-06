@@ -5,11 +5,6 @@ import {
   publicationAuthorityEnabled,
 } from '../cloudflare/src/authority-config.mjs';
 import {
-  acquirePublicationLease,
-  createPublicationLeaseIdentity,
-  releasePublicationLease,
-} from '../cloudflare/src/publication-lease.mjs';
-import {
   verifyPublicationLease,
 } from '../cloudflare/src/publication-lease-verify.mjs';
 import {
@@ -86,8 +81,8 @@ test('authority flag is exact and fail-closed', () => {
   assert.equal(publicationAuthorityEnabled({}), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'ENABLED' }), false);
   assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'true' }), false);
-  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'enabled' }), false);
-  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'TRUE' }), true);
+  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'TRUE' }), false);
+  assert.equal(publicationAuthorityEnabled({ XQUEUE_PUBLISH_AUTHORITY: 'enabled' }), true);
 });
 
 test('publisher does nothing before the authority flag is enabled', async () => {
@@ -116,7 +111,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
 
   const result = await runScheduledPublication(
     {
-      XQUEUE_PUBLISH_AUTHORITY: 'TRUE',
+      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
       DB: {},
       MEDIA: {},
     },
