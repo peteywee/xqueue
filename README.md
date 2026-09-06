@@ -33,7 +33,8 @@ Key invariants:
 - `confirmed_posted`, `confirmed_not_posted`, and `needs_reconciliation` remain distinct when publication outcomes are persisted.
 - An ambiguous create-post result blocks automatic retry until the owner reconciles it.
 - Production media validation blocks missing referenced figures.
-- Default Cloudflare deployment is preview-only and cannot mutate production scheduler authority.
+- Ordinary Cloudflare code deployment uses only the production Worker/D1 identity and cannot mutate scheduler authority because it declares no triggers.
+- Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
 - Scheduler authority is expressed only by the explicit `wrangler.authority.jsonc` production deployment path.
 - Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
 - The independent hourly TSAL observer fails on stale/missing production scheduler liveness, opens one deduplicated GitHub incident, and closes it after recovery.
@@ -41,14 +42,15 @@ Key invariants:
 
 ### Cloudflare deployment authority boundary
 
-`wrangler.jsonc` and `wrangler.authority.jsonc` are structurally isolated deployment surfaces.
+Cloudflare Workers Builds is connected to `xqueue-production`, so the default Wrangler config must identify that production Worker. Authority separation is therefore expressed by what each config is allowed to mutate, not by pretending the default build targets another Worker.
 
-- `wrangler.jsonc` targets `xqueue-preview`, binds only the preview D1 identity, and MUST NOT contain a `triggers` property. Ordinary/default deploys therefore cannot replace the production Worker or its Cron Trigger state.
-- `wrangler.authority.jsonc` targets `xqueue-production`, binds only the production D1 identity, and pins exactly one production cron: `*/15 * * * *`.
-- Neither config may carry the other environment's D1 ID or a `preview_database_id` escape hatch.
-- An explicit empty scheduler declaration such as `"crons": []` is forbidden in the default config because provider replacement semantics can turn an apparently empty value into deletion of live external state.
+- `wrangler.jsonc` targets `xqueue-production`, binds only the production D1 identity, and MUST NOT contain a `triggers` property. It is the ordinary Workers Builds/code-deploy config and preserves externally managed Cron Trigger state.
+- `wrangler.authority.jsonc` also targets `xqueue-production` and the same production D1, but is the explicit scheduler-authority surface. It pins exactly one cron: `*/15 * * * *`.
+- `wrangler.preview.jsonc` targets `xqueue-preview`, binds only the preview D1 identity, and declares no scheduler authority. Preview D1 diagnostics must explicitly select this config.
+- Neither production config may contain the preview D1 ID or `preview_database_id`; the preview config may not contain the production D1 ID.
+- An explicit empty scheduler declaration such as `"crons": []` is forbidden in the ordinary config because provider replacement semantics can turn an apparently empty value into deletion of live external state.
 
-The repository test suite and authority-boundary audit enforce this distinction. TSAL deployment evidence independently verifies the live Cloudflare state after production authority deployment.
+The repository test suite and authority-boundary audit enforce this distinction. TSAL deployment evidence independently verifies the live Cloudflare state after production deployment.
 
 ### Scheduler liveness boundary
 
@@ -95,6 +97,7 @@ regeneration is portable across CI and production hosts.
 | `pnpm post:live` | explicit live publication; at most oldest due post |
 | `pnpm reconcile -- --posted <tweet-id>` | owner confirms ambiguous attempt did publish |
 | `pnpm reconcile -- --not-posted` | owner confirms ambiguous attempt did not publish |
+| `pnpm cf:preview:d1-diagnostic` | read-only preview D1 check through explicit `wrangler.preview.jsonc` |
 
 `build` flags: `--start YYYY-MM-DD`, `--slots 14:30,22:15`,
 `--days 1,2,3,4,5`, `--tz America/Chicago`.
