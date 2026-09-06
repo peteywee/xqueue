@@ -17,13 +17,13 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('default deployment is preview-only and cannot mutate scheduler authority', () => {
+test('default Workers Builds config is production identity only and preserves scheduler authority', () => {
   const config = readJsonc('wrangler.jsonc');
 
-  assert.equal(config.name, 'xqueue-preview');
+  assert.equal(config.name, 'xqueue-production');
   assert.equal(declaresSchedulerMutation(config), false);
-  assert.equal(config.d1_databases?.[0]?.database_id, PREVIEW_DB_ID);
-  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-preview');
+  assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
+  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
@@ -37,20 +37,28 @@ test('authority deployment is production-only and pins one 15-minute cron', () =
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
-test('production and preview Worker/D1 identities are structurally distinct', () => {
-  const preview = readJsonc('wrangler.jsonc');
-  const production = readJsonc('wrangler.authority.jsonc');
+test('explicit preview config is the only tracked preview D1 surface', () => {
+  const preview = readJsonc('wrangler.preview.jsonc');
 
-  assert.notEqual(preview.name, production.name);
-  assert.notEqual(
-    preview.d1_databases?.[0]?.database_id,
-    production.d1_databases?.[0]?.database_id,
-  );
-  assert.equal(preview.main, production.main);
+  assert.equal(preview.name, 'xqueue-preview');
+  assert.equal(declaresSchedulerMutation(preview), false);
+  assert.equal(preview.d1_databases?.[0]?.database_id, PREVIEW_DB_ID);
+  assert.equal(preview.d1_databases?.[0]?.database_name, 'xqueue-preview');
+  assert.equal(preview.d1_databases?.[0]?.preview_database_id, undefined);
+});
+
+test('ordinary and authority production configs identify the same production Worker/storage', () => {
+  const normal = readJsonc('wrangler.jsonc');
+  const authority = readJsonc('wrangler.authority.jsonc');
+
+  assert.equal(normal.name, authority.name);
+  assert.equal(normal.main, authority.main);
+  assert.equal(normal.d1_databases?.[0]?.database_id, authority.d1_databases?.[0]?.database_id);
+  assert.equal(normal.r2_buckets?.[0]?.bucket_name, authority.r2_buckets?.[0]?.bucket_name);
 });
 
 test('empty cron declarations are treated as destructive authority mutations', () => {
-  const omitted = { name: 'xqueue-preview' };
+  const omitted = { name: 'xqueue-production' };
   const destructiveEmpty = {
     name: 'xqueue-production',
     triggers: { crons: [] },
@@ -60,12 +68,12 @@ test('empty cron declarations are treated as destructive authority mutations', (
   assert.equal(declaresSchedulerMutation(destructiveEmpty), true);
 });
 
-test('cross-environment D1 identities cannot be reintroduced', () => {
-  const preview = readJsonc('wrangler.jsonc');
-  const production = readJsonc('wrangler.authority.jsonc');
-  const previewText = JSON.stringify(preview);
-  const productionText = JSON.stringify(production);
+test('cross-environment D1 identities cannot be reintroduced into production configs', () => {
+  const normal = JSON.stringify(readJsonc('wrangler.jsonc'));
+  const authority = JSON.stringify(readJsonc('wrangler.authority.jsonc'));
+  const preview = JSON.stringify(readJsonc('wrangler.preview.jsonc'));
 
-  assert.equal(previewText.includes(PRODUCTION_DB_ID), false);
-  assert.equal(productionText.includes(PREVIEW_DB_ID), false);
+  assert.equal(normal.includes(PREVIEW_DB_ID), false);
+  assert.equal(authority.includes(PREVIEW_DB_ID), false);
+  assert.equal(preview.includes(PRODUCTION_DB_ID), false);
 });
