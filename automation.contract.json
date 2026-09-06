@@ -78,7 +78,7 @@
   },
   "retry": {
     "dispatch": {
-      "strategy": "Do not perform an immediate blind retry of the external create operation. Known pre-request or conclusively non-executed failures may be retried only under explicit bounded policy.",
+      "strategy": "Do not retry the external create operation within the same dispatch attempt. A conclusively non-executed work item may only be reconsidered by a later scheduler invocation under the scheduler_reevaluation policy.",
       "maximum_retry_attempts": 0,
       "backoff": "No in-dispatch retry loop is permitted for the public create operation.",
       "retryable_conditions": [],
