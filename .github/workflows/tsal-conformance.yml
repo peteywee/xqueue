@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
 
 permissions:
   contents: read
@@ -162,6 +165,18 @@ jobs:
           }
           NODE
 
+      - name: Collect read-only production runtime evidence
+        if: github.event_name != 'pull_request'
+        working-directory: xqueue
+        run: |
+          node scripts/tsal-runtime-evidence.mjs \
+            --url https://xqueue-production.patrickcraven.workers.dev/health \
+            --output docs/evidence/tsal-runtime/runtime-safe.json \
+            --valid-minutes 90 \
+            --run-id '${{ github.run_id }}' \
+            --actor '${{ github.actor }}' \
+            --observer-commit '${{ github.sha }}'
+
       - name: TSAL Audit
         working-directory: xqueue
         run: |
@@ -175,4 +190,12 @@ jobs:
           path: |
             xqueue/tsal-audit.json
             xqueue/docs/evidence/tsal-candidate/*.json
+          if-no-files-found: error
+
+      - name: Upload runtime evidence
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsal-runtime-${{ github.sha }}-${{ github.run_id }}
+          path: xqueue/docs/evidence/tsal-runtime/runtime-safe.json
           if-no-files-found: error
