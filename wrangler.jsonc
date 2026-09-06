@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "xqueue-preview",
+  "name": "xqueue-production",
   "main": "cloudflare/src/worker.mjs",
   "compatibility_date": "2026-09-02",
   "observability": {
@@ -16,8 +16,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "xqueue-preview",
-      "database_id": "f5f9bea9-e88c-41ab-9407-70356079a638",
+      "database_name": "xqueue-production",
+      "database_id": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
       "migrations_dir": "cloudflare/migrations"
     }
   ],
