@@ -157,10 +157,20 @@ export async function readSchedulerLiveness(
     throw new Error('D1 binding DB is unavailable');
   }
 
-  const row = await db
+  const statement = db
     .prepare(READ_HEARTBEAT_SQL)
-    .bind(HEARTBEAT_KEY)
-    .first();
+    .bind(HEARTBEAT_KEY);
+
+  let row = null;
+  if (typeof statement.first === 'function') {
+    row = await statement.first();
+  } else if (typeof statement.all === 'function') {
+    const result = await statement.all();
+    const rows = Array.isArray(result) ? result : result?.results;
+    row = Array.isArray(rows) ? rows[0] ?? null : null;
+  } else {
+    throw new Error('D1 heartbeat query is unsupported');
+  }
 
   return evaluateSchedulerLivenessRecord(row, options);
 }
