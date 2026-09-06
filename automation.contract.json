@@ -1,0 +1,138 @@
+{
+  "schema_version": "0.1",
+  "automation": {
+    "id": "xqueue-publisher",
+    "name": "XQueue Scheduled Publisher",
+    "version": "1",
+    "owner": "Patrick / Top Shelf Service LLC",
+    "description": "Bounded, fail-closed scheduled publisher that selects and publishes eligible XQueue content according to explicit production policy."
+  },
+  "goal": {
+    "outcome": "Publish eligible XQueue content to the intended X account according to production schedule and content policy.",
+    "success_condition": "Each eligible work item is published at most once, at an allowed time, under the intended production authority, with execution state and remote outcome recorded truthfully.",
+    "correct_non_execution": "Publish nothing when no item is due, production authority is absent, prerequisites fail, state is ambiguous, backlog requires disposition, identity is wrong, concurrency authority cannot be established, or another production gate fails."
+  },
+  "trigger": {
+    "type": "schedule",
+    "description": "Production scheduler periodically invokes XQueue eligibility and publication processing.",
+    "cadence_or_condition": "The production authority configuration pins a 15-minute scheduler cadence. Whether that authority is currently deployed and active must be established from runtime or deployment evidence rather than inferred from repository configuration."
+  },
+  "source_of_truth": {
+    "description": "Authored content and explicit production scheduling policy.",
+    "location": "content/*.md and config/schedule-policy.json",
+    "owner": "Patrick / Top Shelf Service LLC",
+    "derived_artifacts_rebuildable": true
+  },
+  "work_item": {
+    "definition": "One uniquely identified queued XQueue content item eligible for publication.",
+    "identity_key": "XQueue post ID",
+    "selection_rule": "Select only work that is eligible under schedule policy, publication ledger state, runtime health, and production authority.",
+    "maximum_per_execution": 1
+  },
+  "risk": {
+    "class": "R3",
+    "rationale": "The automation performs public external side effects on a production social account and duplicate or incorrect execution may be publicly visible and difficult to fully reverse.",
+    "worst_credible_effect": "Unauthorized, duplicate, incorrectly timed, or policy-invalid public publication from the production account."
+  },
+  "authority": {
+    "executor": "XQueue production publisher running in the Cloudflare Worker runtime.",
+    "production_authority": "Explicit production scheduler authority configuration must be active before live publication is permitted.",
+    "concurrency_model": "coordinated_multi",
+    "coordination_mechanism": "Publication authority and D1-backed publication lease/fencing prevent concurrent scheduled executions from independently owning the same production publication operation.",
+    "revocation_mechanism": "Disable or remove production scheduler/publication authority configuration so scheduled invocations cannot perform live publication."
+  },
+  "policy": {
+    "source": "config/schedule-policy.json and XQueue validation rules",
+    "description": "Defines allowed schedule behavior, content constraints, deferrals, validation, and publication eligibility.",
+    "change_authority": "Patrick / repository-controlled reviewed changes"
+  },
+  "side_effects": [
+    {
+      "system": "X",
+      "operation": "Create a public X post, potentially including referenced media.",
+      "reversible": false,
+      "ambiguity_possible": true,
+      "idempotency_strategy": "Persist execution intent before the external create operation, maintain durable publication state, prevent concurrent ownership, and block blind retry when the remote result is ambiguous until reconciliation occurs.",
+      "maximum_scope": "At most one eligible publication per execution."
+    }
+  ],
+  "state": {
+    "ledger": "Production durable publication ledger; Cloudflare production state is persisted in D1 and the local publisher retains its local durable state model where applicable.",
+    "durable": true,
+    "states": [
+      "unresolved",
+      "prepared",
+      "publishing",
+      "posted",
+      "skipped",
+      "needs_reconciliation"
+    ],
+    "write_safety": "State transitions must be durable and protected against concurrent publication ownership; local state writes are atomic and Cloudflare production execution uses persisted transactional state and publication fencing.",
+    "intent_recorded_before_side_effect": true
+  },
+  "ambiguity": {
+    "possible": true,
+    "detection": "A create request may have escaped to the remote provider without a conclusive provider result being received locally.",
+    "on_unknown": "Record the operation as requiring reconciliation and block later automatic live publication that could create a duplicate.",
+    "reconciliation": "The owner verifies the actual production X account and records whether the attempted item was posted or positively verified as not posted before normal publication resumes.",
+    "automatic_retry_allowed_when_unknown": false
+  },
+  "retry": {
+    "strategy": "Do not blindly retry an ambiguous external create operation. Future scheduler invocations may reevaluate work only when the prior outcome is conclusively safe to retry.",
+    "maximum_attempts": 0,
+    "backoff": "Not applicable to ambiguous create operations; provider-specific known failures are handled by later eligible execution rather than an uncontrolled retry loop.",
+    "retryable_conditions": [],
+    "non_retryable_conditions": [
+      "Ambiguous create-post outcome",
+      "Missing production authority",
+      "Invalid production identity",
+      "Invalid or corrupted durable state",
+      "Unresolved reconciliation requirement"
+    ]
+  },
+  "backlog": {
+    "stale_definition": "Unresolved work outside the runtime grace window is stale and must not be silently flushed as normal catch-up work.",
+    "automatic_catchup_allowed": false,
+    "permitted_dispositions": [
+      "defer",
+      "skip",
+      "escalate",
+      "reconcile"
+    ]
+  },
+  "verification": {
+    "preflight": "pnpm verify and the applicable production preflight/readiness gates must pass before changing or granting production authority.",
+    "dry_run": "pnpm post:dry and non-mutating readiness/simulation paths are used before live publication where applicable.",
+    "postcondition": "The selected work item, durable publication state, and actual remote X outcome must agree after a live operation.",
+    "runtime_health": "Runtime health and scheduled execution telemetry must show valid authority, healthy state, no unresolved reconciliation blocker, and safe eligibility before mutation.",
+    "evidence": "Repository tests, docs/evidence artifacts, production runtime logs, Cloudflare invocation telemetry, and provider-side publication identifiers where applicable."
+  },
+  "recovery": {
+    "procedure": "Follow docs/RUNBOOK.md. Preserve durable state, classify the failure, reconcile ambiguous remote outcomes, disposition stale work explicitly, re-run health/preflight gates, and only then restore production authority.",
+    "fail_closed_conditions": [
+      "Ambiguous external outcome",
+      "Corrupted or unreadable durable state",
+      "Unresolved stale backlog requiring owner disposition",
+      "Unable to prove production authority",
+      "Unable to prove intended account identity",
+      "Unable to establish publication concurrency ownership"
+    ],
+    "resume_gate": "Production execution resumes only after the blocking condition is resolved and the applicable runtime-health and preflight gates pass."
+  },
+  "owner_reserved_actions": [
+    "Resolve ambiguous external publication outcomes",
+    "Approve or change stale backlog disposition",
+    "Grant, transfer, or revoke production scheduler authority",
+    "Provision or rotate production credentials",
+    "Override or change production safety policy"
+  ],
+  "observability": {
+    "logs": "Cloudflare Worker invocation logs and applicable local publisher logs.",
+    "metrics": "Runtime health, queue eligibility, posted/skipped/unresolved counts, authority state, and reconciliation state.",
+    "alerts": "Blocking runtime-health and scheduler outcomes must remain observable; automated alerting may be added later without changing this contract."
+  },
+  "lesson_loop": {
+    "incident_record_location": "docs/incidents",
+    "standard_promotion_process": "Operational findings are first corrected in XQueue, then generalized into TSAL only when reusable or sufficiently high-impact."
+  }
+}
