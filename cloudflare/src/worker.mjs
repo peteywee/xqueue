@@ -2,6 +2,10 @@ import { publicationAuthorityEnabled } from './authority-config.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
 import { runScheduledPublication } from './production-publisher.mjs';
+import {
+  readSchedulerLiveness,
+  recordScheduledInvocation,
+} from './scheduler-liveness.mjs';
 
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
@@ -57,11 +61,20 @@ export default {
         const storage = await storageHealth(env);
         const queueIntegrity = await verifyQueueIntegrity(env);
         const authorityReadiness = await evaluateAuthorityReadiness(env);
+        const schedulerLiveness = await readSchedulerLiveness(env.DB, {
+          required: authorityReadiness.authorityFlag === true,
+          now: new Date(),
+        });
 
-        const healthy = queueIntegrity.ok === true;
         const authorityActive =
           authorityReadiness.ok === true &&
           authorityReadiness.authorized === true;
+        const schedulerActive =
+          authorityActive &&
+          schedulerLiveness.ok === true;
+        const healthy =
+          queueIntegrity.ok === true &&
+          schedulerLiveness.ok === true;
 
         return json(
           {
@@ -69,7 +82,8 @@ export default {
             status: healthy ? 'ok' : 'error',
 
             livePublication: authorityActive,
-            schedulerAuthority: authorityActive,
+            schedulerAuthority: schedulerActive,
+            schedulerLiveness,
 
             queueIntegrity,
             authorityReadiness,
@@ -88,6 +102,11 @@ export default {
 
             livePublication: false,
             schedulerAuthority: false,
+            schedulerLiveness: {
+              required: true,
+              ok: false,
+              state: 'unavailable',
+            },
 
             error:
               error instanceof Error
@@ -107,6 +126,23 @@ export default {
 
   async scheduled(controller, env) {
     const scheduledTime = controller?.scheduledTime;
+    let heartbeatRecorded = false;
+
+    try {
+      await recordScheduledInvocation(env.DB, {
+        scheduledTime,
+        observedAt: new Date(),
+      });
+      heartbeatRecorded = true;
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'scheduler_heartbeat_failed',
+          scheduledTime,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
 
     if (!publicationAuthorityEnabled(env)) {
       const result = 'ignored because Cloudflare scheduling is not authorized';
@@ -115,6 +151,7 @@ export default {
         JSON.stringify({
           event: 'scheduled',
           scheduledTime,
+          heartbeatRecorded,
           livePublication: false,
           schedulerAuthority: false,
           result,
@@ -138,6 +175,7 @@ export default {
         JSON.stringify({
           event: 'scheduled',
           scheduledTime,
+          heartbeatRecorded,
           livePublication: true,
           schedulerAuthority: true,
           result,
@@ -157,6 +195,7 @@ export default {
         JSON.stringify({
           event: 'scheduled',
           scheduledTime,
+          heartbeatRecorded,
           livePublication: true,
           schedulerAuthority: true,
           result,
