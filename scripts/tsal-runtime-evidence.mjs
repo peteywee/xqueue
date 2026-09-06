@@ -16,11 +16,15 @@ function isoAfter(iso, minutes) {
 }
 
 export function evaluateRuntimeHealth(health) {
+  const authorityFlag = health?.authorityReadiness?.authorityFlag === true;
   const checks = {
     service_identity: health?.service === 'xqueue',
     service_status: health?.status === 'ok',
     queue_integrity: health?.queueIntegrity?.ok === true,
     authority_readiness: health?.authorityReadiness?.ok === true,
+    scheduler_liveness: authorityFlag
+      ? health?.schedulerLiveness?.ok === true
+      : health?.schedulerLiveness?.ok !== false,
     d1_reachable: health?.storage?.d1?.reachable === true,
     r2_reachable: health?.storage?.r2?.reachable === true,
   };
@@ -35,9 +39,10 @@ export function evaluateRuntimeHealth(health) {
     failing,
     authority: {
       authorized: health?.authorityReadiness?.authorized === true,
-      authorityFlag: health?.authorityReadiness?.authorityFlag === true,
+      authorityFlag,
       livePublication: health?.livePublication === true,
       schedulerAuthority: health?.schedulerAuthority === true,
+      schedulerLiveness: health?.schedulerLiveness ?? null,
     },
   };
 }
@@ -73,7 +78,7 @@ export function buildRuntimeEvidence({
     produced_at: producedAt,
     valid_until: isoAfter(producedAt, validityMinutes),
     claim_id: CLAIM_ID,
-    claim: 'Current XQueue production runtime is technically healthy under the read-only runtime readiness model.',
+    claim: 'Current XQueue production runtime is technically healthy and its scheduler heartbeat is current under the read-only runtime readiness model.',
     result,
     evidence_class: 'runtime',
     evidence_type: 'runtime_observation',
@@ -82,7 +87,7 @@ export function buildRuntimeEvidence({
       evaluation,
       observed_health: health,
       observer_commit: observerCommit,
-      note: 'Runtime safety is evaluated independently from whether production publication authority is currently enabled. Deployment authority requires separate deployment-class evidence.',
+      note: 'Runtime safety requires a fresh scheduler heartbeat whenever production scheduler authority is expected. Deployment authority remains a separate deployment-class claim.',
     },
     provenance: {
       producer: 'XQueue TSAL runtime evidence collector',
