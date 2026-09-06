@@ -1,6 +1,6 @@
 {
   "schema_version": "0.3",
-  "tsal_version": "0.3.1",
+  "tsal_version": "0.3.2",
   "project": {
     "id": "xqueue",
     "name": "XQueue",
@@ -38,7 +38,7 @@
   },
   "metadata": {
     "tsal_adoption": "first-reference-project",
-    "tsal_migration": "0.3-evidence-driven-conformance",
+    "tsal_migration": "0.3.2-external-state-preservation",
     "local_first": true,
     "ai_required": false,
     "backend_required": false
