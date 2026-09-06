@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   audit:
@@ -57,6 +58,8 @@ jobs:
             test/cloudflare-production-authority.test.mjs \
             test/cloudflare-publication-lease.test.mjs \
             test/cloudflare-publication-lease-d1-meta.test.mjs \
+            test/cloudflare-publication-ledger-outcomes.test.mjs \
+            test/cloudflare-scheduler-liveness.test.mjs \
             test/cloudflare-x-outcomes.test.mjs \
             test/cloudflare-x-simulation-harness.test.mjs \
             test/deployment-config-preservation.test.mjs \
@@ -82,6 +85,8 @@ jobs:
             'test/cloudflare-production-authority.test.mjs',
             'test/cloudflare-publication-lease.test.mjs',
             'test/cloudflare-publication-lease-d1-meta.test.mjs',
+            'test/cloudflare-publication-ledger-outcomes.test.mjs',
+            'test/cloudflare-scheduler-liveness.test.mjs',
             'test/cloudflare-x-outcomes.test.mjs',
             'test/cloudflare-x-simulation-harness.test.mjs',
             'test/deployment-config-preservation.test.mjs',
@@ -92,7 +97,7 @@ jobs:
             {
               slug: 'authority-enforced',
               claim_id: 'xqueue-publisher.authority.enforced',
-              claim: 'Execution authority, scheduler-preservation boundaries, and concurrent publication ownership are enforced by the candidate.',
+              claim: 'Execution authority, environment isolation, scheduler-preservation boundaries, and concurrent publication ownership are enforced by the candidate.',
               tests: [
                 'test/cloudflare-production-authority.test.mjs',
                 'test/cloudflare-publication-lease.test.mjs',
@@ -104,8 +109,9 @@ jobs:
             {
               slug: 'retry-bounded',
               claim_id: 'xqueue-publisher.retry.bounded',
-              claim: 'The candidate prevents uncontrolled or ambiguous publication retry and preserves bounded retry semantics.',
+              claim: 'The candidate prevents uncontrolled or ambiguous publication retry and preserves distinct confirmed-not-posted semantics.',
               tests: [
+                'test/cloudflare-publication-ledger-outcomes.test.mjs',
                 'test/cloudflare-x-outcomes.test.mjs',
                 'test/cloudflare-x-simulation-harness.test.mjs',
                 'test/cloudflare-production-authority.test.mjs'
@@ -114,8 +120,9 @@ jobs:
             {
               slug: 'ambiguity-fail-closed',
               claim_id: 'xqueue-publisher.ambiguity.fail_closed',
-              claim: 'Ambiguous external publication outcomes fail closed and require reconciliation before replay.',
+              claim: 'Ambiguous external publication outcomes fail closed and require reconciliation while confirmed-not-posted outcomes remain distinct.',
               tests: [
+                'test/cloudflare-publication-ledger-outcomes.test.mjs',
                 'test/cloudflare-x-outcomes.test.mjs',
                 'test/cloudflare-production-authority.test.mjs',
                 'test/hardening.test.mjs'
@@ -124,8 +131,11 @@ jobs:
             {
               slug: 'recovery-verified',
               claim_id: 'xqueue-publisher.recovery.verified',
-              claim: 'The candidate verifies both posted and not-posted reconciliation recovery paths for an ambiguous publication attempt.',
-              tests: ['test/hardening.test.mjs']
+              claim: 'The candidate verifies reconciliation recovery paths and durable scheduler-liveness detection.',
+              tests: [
+                'test/cloudflare-scheduler-liveness.test.mjs',
+                'test/hardening.test.mjs'
+              ]
             }
           ];
 
@@ -199,6 +209,33 @@ jobs:
         run: |
           node ../tsal-standard/tooling/cli.mjs audit . --json | tee tsal-audit.json
           node ../tsal-standard/tooling/cli.mjs audit .
+
+      - name: Open deduplicated scheduled conformance incident
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='[AUTO] XQueue scheduled conformance incident'
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body "The independent scheduled TSAL observer failed. Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. This issue is deduplicated and will be closed automatically after a later scheduled conformance run succeeds."
+          fi
+
+      - name: Close scheduled conformance incident on recovery
+        if: ${{ success() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='[AUTO] XQueue scheduled conformance incident'
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue close "$existing" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "Recovered on scheduled TSAL run https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          fi
 
       - name: Upload audit and candidate evidence
         if: ${{ always() }}
