@@ -1,0 +1,47 @@
+name: TSAL Conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout XQueue
+        uses: actions/checkout@v4
+        with:
+          path: xqueue
+
+      - name: Checkout exact TSAL 0.3.1
+        uses: actions/checkout@v4
+        with:
+          repository: peteywee/TSAL
+          ref: 8590ef85d33386725f36444e61699a317fcf1f1b
+          path: tsal-standard
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: TSAL Doctor
+        working-directory: xqueue
+        run: node ../tsal-standard/tooling/cli.mjs doctor .
+
+      - name: TSAL Audit
+        working-directory: xqueue
+        run: |
+          node ../tsal-standard/tooling/cli.mjs audit . --json | tee tsal-audit.json
+          node ../tsal-standard/tooling/cli.mjs audit .
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsal-audit-${{ github.sha }}
+          path: xqueue/tsal-audit.json
+          if-no-files-found: error
