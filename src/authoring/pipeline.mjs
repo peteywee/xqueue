@@ -8,6 +8,7 @@ export function runDeterministicAuthoring({
   source,
   requestedKind = 'auto',
   pillar = null,
+  figure = null,
   createdAt,
   libraryPosts = [],
   figuresAvailable = null,
@@ -28,6 +29,7 @@ export function runDeterministicAuthoring({
         unit,
         artifactKind,
         pillar: artifactKind === 'post' ? pillar : null,
+        figure: artifactKind === 'post' ? figure : null,
         createdAt,
       });
       const validation = validateArtifactForReview({
