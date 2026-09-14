@@ -186,6 +186,12 @@ export function assertArtifactCandidate(candidate) {
     enumValue(candidate.pillar, ['A', 'B', 'C', 'D'], 'pillar');
   }
 
+  object(candidate.validation, 'validation');
+  enumValue(candidate.validation.result, ['pass', 'warn', 'fail'], 'validation.result');
+  if (!Array.isArray(candidate.validation.findings)) {
+    fail('invalid_validation_findings', 'validation.findings must be an array');
+  }
+
   const expected = candidateDigest(candidate);
   if (candidate.content_digest !== expected) {
     fail('candidate_digest_mismatch', 'candidate content/provenance fields do not match content_digest');
@@ -223,7 +229,7 @@ export function assertApprovalForCandidate(candidate, approval) {
   if (approval.candidate_digest !== candidate.content_digest) {
     fail('approval_digest_mismatch', 'approval does not bind to the exact candidate digest');
   }
-  if (candidate.validation?.result === 'fail') {
+  if (!['pass', 'warn'].includes(candidate.validation.result)) {
     fail('validation_failed', 'a candidate with failing validation cannot be approved for promotion');
   }
 
