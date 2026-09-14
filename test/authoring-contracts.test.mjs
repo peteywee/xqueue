@@ -138,6 +138,17 @@ test('candidate digest binds content, artifact type, pillar, knowledge refs, and
   );
 });
 
+test('reviewable candidate without validation evidence fails closed', () => {
+  const value = candidate();
+  delete value.validation;
+  value.content_digest = candidateDigest(value);
+
+  assert.throws(
+    () => assertArtifactCandidate(value),
+    (error) => error instanceof AuthoringContractError && error.code === 'invalid_object',
+  );
+});
+
 test('approval is owner-reserved and bound to the exact candidate digest', () => {
   const value = candidate();
   assert.equal(assertApprovalForCandidate(value, approval(value)), true);
