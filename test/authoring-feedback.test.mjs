@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
 
 import { candidateDigest } from '../src/authoring/contracts.mjs';
+import {
+  createAuthenticatedOwnerApproval,
+  createOwnerApprovalPayload,
+  serializeOwnerApprovalPayload,
+} from '../src/authoring/owner-approval.mjs';
 import { planNonPostPromotion } from '../src/authoring/promotion.mjs';
 import { createApprovedContextFeedback } from '../src/authoring/context-feedback.mjs';
 
 const when = '2026-09-14T20:00:00.000Z';
+const ownerKeys = generateKeyPairSync('ed25519');
+const ownerPublicKeyPem = ownerKeys.publicKey.export({ type: 'spki', format: 'pem' });
 
 function candidate(kind = 'lesson') {
   const value = {
@@ -25,14 +33,18 @@ function candidate(kind = 'lesson') {
 }
 
 function approval(value) {
-  return {
-    approval_id: `approval-${value.artifact_kind}-1`,
-    candidate_id: value.candidate_id,
-    candidate_digest: value.content_digest,
-    decision: 'approve',
-    decided_by: 'Patrick Craven',
-    decided_at: when,
-  };
+  const payload = createOwnerApprovalPayload({ candidate: value, decision: 'approve', decidedAt: when });
+  const signatureBase64 = sign(
+    null,
+    Buffer.from(serializeOwnerApprovalPayload(payload), 'utf8'),
+    ownerKeys.privateKey,
+  ).toString('base64');
+  return createAuthenticatedOwnerApproval({
+    candidate: value,
+    payload,
+    signatureBase64,
+    publicKeyPem: ownerPublicKeyPem,
+  });
 }
 
 function unit() {
@@ -50,12 +62,22 @@ function unit() {
 
 test('blog and lesson promotions go to separate non-X artifact domains', () => {
   const lesson = candidate('lesson');
-  const lessonPlan = planNonPostPromotion({ candidate: lesson, approval: approval(lesson), promotedAt: when });
+  const lessonPlan = planNonPostPromotion({
+    candidate: lesson,
+    approval: approval(lesson),
+    ownerPublicKeyPem,
+    promotedAt: when,
+  });
   assert.equal(lessonPlan.status, 'ready');
   assert.match(lessonPlan.destination, /^authoring\/approved\/lessons\//);
 
   const blog = candidate('blog');
-  const blogPlan = planNonPostPromotion({ candidate: blog, approval: approval(blog), promotedAt: when });
+  const blogPlan = planNonPostPromotion({
+    candidate: blog,
+    approval: approval(blog),
+    ownerPublicKeyPem,
+    promotedAt: when,
+  });
   assert.equal(blogPlan.status, 'ready');
   assert.match(blogPlan.destination, /^authoring\/approved\/blogs\//);
   assert.notEqual(blogPlan.destination, lessonPlan.destination);
@@ -63,10 +85,17 @@ test('blog and lesson promotions go to separate non-X artifact domains', () => {
 
 test('non-post promotion is idempotent for exact candidate and destination', () => {
   const value = candidate('lesson');
-  const first = planNonPostPromotion({ candidate: value, approval: approval(value), promotedAt: when });
+  const signed = approval(value);
+  const first = planNonPostPromotion({
+    candidate: value,
+    approval: signed,
+    ownerPublicKeyPem,
+    promotedAt: when,
+  });
   const second = planNonPostPromotion({
     candidate: value,
-    approval: approval(value),
+    approval: signed,
+    ownerPublicKeyPem,
     priorPromotions: [first.promotion],
     promotedAt: when,
   });
@@ -77,7 +106,12 @@ test('non-post promotion is idempotent for exact candidate and destination', () 
 test('Context Engine feedback can only be derived from an approved promoted candidate', () => {
   const value = candidate('lesson');
   const approved = approval(value);
-  const plan = planNonPostPromotion({ candidate: value, approval: approved, promotedAt: when });
+  const plan = planNonPostPromotion({
+    candidate: value,
+    approval: approved,
+    ownerPublicKeyPem,
+    promotedAt: when,
+  });
   const feedback = createApprovedContextFeedback({
     candidate: value,
     approval: approved,
@@ -96,7 +130,12 @@ test('Context Engine feedback can only be derived from an approved promoted cand
 test('feedback refuses promotion records for a different candidate', () => {
   const value = candidate('lesson');
   const approved = approval(value);
-  const plan = planNonPostPromotion({ candidate: value, approval: approved, promotedAt: when });
+  const plan = planNonPostPromotion({
+    candidate: value,
+    approval: approved,
+    ownerPublicKeyPem,
+    promotedAt: when,
+  });
   assert.throws(
     () => createApprovedContextFeedback({
       candidate: value,
