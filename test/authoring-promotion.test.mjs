@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
 
 import { candidateDigest, digestText } from '../src/authoring/contracts.mjs';
+import {
+  createAuthenticatedOwnerApproval,
+  createOwnerApprovalPayload,
+  serializeOwnerApprovalPayload,
+} from '../src/authoring/owner-approval.mjs';
 import {
   applyPostPromotionToMarkdown,
   planPostPromotion,
@@ -9,6 +15,8 @@ import {
 } from '../src/authoring/promotion.mjs';
 
 const when = '2026-09-14T16:00:00.000Z';
+const ownerKeys = generateKeyPairSync('ed25519');
+const ownerPublicKeyPem = ownerKeys.publicKey.export({ type: 'spki', format: 'pem' });
 
 function candidate(overrides = {}) {
   const value = {
@@ -28,16 +36,10 @@ function candidate(overrides = {}) {
   return value;
 }
 
-function approval(value, overrides = {}) {
-  return {
-    approval_id: 'approval-promote-1',
-    candidate_id: value.candidate_id,
-    candidate_digest: value.content_digest,
-    decision: 'approve',
-    decided_by: 'Patrick Craven',
-    decided_at: when,
-    ...overrides,
-  };
+function approval(value) {
+  const payload = createOwnerApprovalPayload({ candidate: value, decision: 'approve', decidedAt: when });
+  const signatureBase64 = sign(null, Buffer.from(serializeOwnerApprovalPayload(payload), 'utf8'), ownerKeys.privateKey).toString('base64');
+  return createAuthenticatedOwnerApproval({ candidate: value, payload, signatureBase64, publicKeyPem: ownerPublicKeyPem });
 }
 
 const existing = [
@@ -50,6 +52,7 @@ test('promotion allocates the next deterministic post id without writing content
   const plan = planPostPromotion({
     candidate: value,
     approval: approval(value),
+    ownerPublicKeyPem,
     existingPosts: existing,
     promotedAt: when,
   });
@@ -62,15 +65,18 @@ test('promotion allocates the next deterministic post id without writing content
 
 test('promotion is idempotent when the exact candidate was already promoted to the same destination', () => {
   const value = candidate();
+  const signed = approval(value);
   const first = planPostPromotion({
     candidate: value,
-    approval: approval(value),
+    approval: signed,
+    ownerPublicKeyPem,
     existingPosts: existing,
     promotedAt: when,
   });
   const second = planPostPromotion({
     candidate: value,
-    approval: approval(value),
+    approval: signed,
+    ownerPublicKeyPem,
     existingPosts: existing,
     priorPromotions: [first.promotion],
     promotedAt: when,
@@ -88,7 +94,7 @@ test('editing after approval invalidates promotion authority', () => {
   edited.content_digest = candidateDigest(edited);
 
   assert.throws(
-    () => planPostPromotion({ candidate: edited, approval: oldApproval, existingPosts: existing, promotedAt: when }),
+    () => planPostPromotion({ candidate: edited, approval: oldApproval, ownerPublicKeyPem, existingPosts: existing, promotedAt: when }),
     (error) => error?.code === 'approval_digest_mismatch',
   );
 });
@@ -96,7 +102,7 @@ test('editing after approval invalidates promotion authority', () => {
 test('post promotion refuses non-post artifacts', () => {
   const value = candidate({ artifact_kind: 'blog', pillar: null });
   assert.throws(
-    () => planPostPromotion({ candidate: value, approval: approval(value), existingPosts: existing, promotedAt: when }),
+    () => planPostPromotion({ candidate: value, approval: approval(value), ownerPublicKeyPem, existingPosts: existing, promotedAt: when }),
     (error) => error?.code === 'post_candidate_required',
   );
 });
@@ -106,6 +112,7 @@ test('pure markdown application refuses post-id collisions', () => {
   const plan = planPostPromotion({
     candidate: value,
     approval: approval(value),
+    ownerPublicKeyPem,
     existingPosts: existing,
     promotedAt: when,
   });
@@ -119,16 +126,35 @@ test('pure markdown application refuses post-id collisions', () => {
   );
 });
 
-test('wrong digest cannot authorize promotion', () => {
+test('wrong digest cannot authorize promotion even when an approval object is present', () => {
   const value = candidate();
+  const signed = approval(value);
+  const tampered = { ...signed, candidate_digest: digestText('wrong') };
   assert.throws(
     () => planPostPromotion({
       candidate: value,
-      approval: approval(value, { candidate_digest: digestText('wrong') }),
+      approval: tampered,
+      ownerPublicKeyPem,
       existingPosts: existing,
       promotedAt: when,
     }),
     (error) => error?.code === 'approval_digest_mismatch',
+  );
+});
+
+test('unsigned owner-looking object cannot authorize promotion', () => {
+  const value = candidate();
+  const unsigned = {
+    approval_id: 'fake',
+    candidate_id: value.candidate_id,
+    candidate_digest: value.content_digest,
+    decision: 'approve',
+    decided_by: 'Patrick Craven',
+    decided_at: when,
+  };
+  assert.throws(
+    () => planPostPromotion({ candidate: value, approval: unsigned, ownerPublicKeyPem, existingPosts: existing, promotedAt: when }),
+    (error) => error?.code === 'owner_signature_required',
   );
 });
 
