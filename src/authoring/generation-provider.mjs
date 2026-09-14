@@ -6,6 +6,7 @@ import {
   digestObject,
 } from './contracts.mjs';
 import { createArtifactPlan } from './planner.mjs';
+import { getPromptContract, promptContractDigest } from './prompt-contract.mjs';
 
 const FORBIDDEN_OUTPUT_KEYS = new Set([
   'approval',
@@ -73,12 +74,19 @@ export async function generateBoundedCandidates(provider, {
   positiveInt(maxOutputCharsPerCandidate, 'maxOutputCharsPerCandidate', 100, 50000);
   positiveInt(timeoutMs, 'timeoutMs', 10, 120000);
 
+  const promptContract = getPromptContract(promptVersion);
+  if (!promptContract.outputs.includes(artifactKind)) {
+    throw new AuthoringContractError('prompt_output_not_allowed', `${artifactKind} is not allowed by prompt contract ${promptVersion}`);
+  }
+  const promptDigest = promptContractDigest(promptVersion);
+
   const input = {
     unit,
     artifact_kind: artifactKind,
     pillar: artifactKind === 'post' ? pillar : null,
     candidate_count: candidateCount,
     prompt_version: promptVersion,
+    prompt_contract_digest: promptDigest,
   };
   const serialized = JSON.stringify(input);
   if (serialized.length > maxInputChars) {
@@ -94,6 +102,7 @@ export async function generateBoundedCandidates(provider, {
     const raw = await Promise.race([
       Promise.resolve(provider.generate(Object.freeze({
         ...input,
+        prompt_contract: promptContract,
         constraints: Object.freeze({
           maxCandidates: candidateCount,
           maxOutputCharsPerCandidate,
