@@ -12,6 +12,11 @@ const TARGETS = Object.freeze({
   D: 'content/50-pillar-d.md',
 });
 
+const NON_POST_ROOTS = Object.freeze({
+  blog: 'authoring/approved/blogs',
+  lesson: 'authoring/approved/lessons',
+});
+
 function nextPostId(pillar, existingPosts) {
   const seqs = existingPosts
     .filter((post) => post.pillar === pillar)
@@ -93,6 +98,41 @@ export function planPostPromotion({
     postId,
     markdown: renderPostMarkdown({ postId, title: candidate.title, body: candidate.body }),
     promotion,
+  });
+}
+
+export function planNonPostPromotion({ candidate, approval, priorPromotions = [], promotedAt }) {
+  assertArtifactCandidate(candidate);
+  assertApprovalForCandidate(candidate, approval);
+  if (!['blog', 'lesson'].includes(candidate.artifact_kind)) {
+    throw new AuthoringContractError('non_post_candidate_required', 'non-post promotion accepts only blog or lesson candidates');
+  }
+  if (!Array.isArray(priorPromotions)) {
+    throw new AuthoringContractError('invalid_promotion_context', 'priorPromotions must be an array');
+  }
+
+  const root = NON_POST_ROOTS[candidate.artifact_kind];
+  const suffix = candidate.content_digest.replace('sha256:', '').slice(0, 16);
+  const artifactRef = `${candidate.artifact_kind}:${suffix}`;
+  const destination = `${root}/${suffix}.json`;
+  const duplicate = priorPromotions.find((record) =>
+    record?.candidate_digest === candidate.content_digest && record?.destination === destination);
+
+  if (duplicate) {
+    return Object.freeze({ status: 'already_promoted', destination, artifactRef: duplicate.artifact_ref, promotion: duplicate, bundle: null });
+  }
+
+  const promotion = createPromotionRecord({ candidate, approval, destination, promotedAt, artifactRef });
+  return Object.freeze({
+    status: 'ready',
+    destination,
+    artifactRef,
+    promotion,
+    bundle: Object.freeze({
+      candidate,
+      approval,
+      promotion,
+    }),
   });
 }
 
