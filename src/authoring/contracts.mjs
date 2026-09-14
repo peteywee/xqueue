@@ -115,8 +115,11 @@ export function candidateDigest(candidate) {
     title: candidate.title,
     body: candidate.body,
     pillar: candidate.pillar ?? null,
+    figure: candidate.figure ?? null,
     knowledge_unit_refs: candidate.knowledge_unit_refs,
     source_refs: candidate.source_refs,
+    created_at: candidate.created_at,
+    generator: candidate.generator ?? null,
   });
 }
 
@@ -184,6 +187,16 @@ export function assertArtifactCandidate(candidate) {
 
   if (candidate.artifact_kind === 'post') {
     enumValue(candidate.pillar, ['A', 'B', 'C', 'D'], 'pillar');
+  }
+  if (candidate.figure != null && (!Number.isInteger(candidate.figure) || candidate.figure < 1)) {
+    fail('invalid_figure', 'figure must be null or a positive integer');
+  }
+  if (candidate.generator != null) {
+    object(candidate.generator, 'generator');
+    string(candidate.generator.provider, 'generator.provider');
+    string(candidate.generator.model, 'generator.model');
+    string(candidate.generator.prompt_version, 'generator.prompt_version');
+    digest(candidate.generator.input_digest, 'generator.input_digest');
   }
 
   object(candidate.validation, 'validation');
