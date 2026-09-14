@@ -5,6 +5,7 @@ import {
   assertKnowledgeUnit,
   assertSourceRecord,
 } from './contracts.mjs';
+import { assessEvidenceRisk } from './evidence-risk.mjs';
 
 function summarize(findings) {
   const errors = findings.filter((finding) => finding.level === 'error').length;
@@ -57,6 +58,8 @@ export function validateArtifactForReview({
   libraryPosts = [],
   figuresAvailable = null,
   premium = true,
+  reviewedAt = candidate?.created_at,
+  currentFactMaxAgeDays = 30,
 }) {
   assertArtifactCandidate(candidate);
   if (!Array.isArray(knowledgeUnits) || !Array.isArray(sourceRecords) || !Array.isArray(libraryPosts)) {
@@ -64,6 +67,13 @@ export function validateArtifactForReview({
   }
 
   const findings = validateReferences(candidate, knowledgeUnits, sourceRecords);
+  findings.push(...assessEvidenceRisk({
+    candidate,
+    knowledgeUnits,
+    sourceRecords,
+    now: reviewedAt,
+    currentFactMaxAgeDays,
+  }));
 
   if (candidate.artifact_kind === 'post') {
     const draftPost = {
