@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xqueue.local/schemas/promotion.schema.json",
+  "title": "XQueue Author Promotion Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "promotion_id",
+    "candidate_id",
+    "candidate_digest",
+    "approval_id",
+    "destination",
+    "artifact_ref",
+    "promoted_at"
+  ],
+  "properties": {
+    "promotion_id": { "type": "string", "minLength": 1 },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "candidate_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "approval_id": { "type": "string", "minLength": 1 },
+    "destination": { "type": "string", "minLength": 1 },
+    "artifact_ref": { "type": "string", "minLength": 1 },
+    "promoted_at": { "type": "string", "format": "date-time" }
+  }
+}

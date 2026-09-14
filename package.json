@@ -37,7 +37,14 @@
     "skip": "node src/cli.mjs skip",
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
-    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/finalize-xqueue-1.1.0.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/tsal-runtime-evidence.mjs scripts/tsal-deployment-evidence.mjs cloudflare/src/scheduler-liveness.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
+    "author:distill": "node scripts/authoring-cli.mjs distill",
+    "author:generate": "node scripts/authoring-cli.mjs generate",
+    "author:review": "node scripts/authoring-cli.mjs review",
+    "author:approval-payload": "node scripts/owner-approval-cli.mjs payload",
+    "author:approve": "node scripts/owner-approval-cli.mjs approve",
+    "author:promotion-plan": "node scripts/owner-approval-cli.mjs promotion-plan",
+    "verify:authoring": "node --test test/authoring-*.test.mjs",
+    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/finalize-xqueue-1.1.0.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/tsal-runtime-evidence.mjs scripts/tsal-deployment-evidence.mjs cloudflare/src/scheduler-liveness.mjs scripts/authoring-cli.mjs scripts/owner-approval-cli.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",

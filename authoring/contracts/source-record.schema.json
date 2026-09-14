@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xqueue.local/schemas/source-record.schema.json",
+  "title": "XQueue Author Source Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_id", "source_type", "trust_class", "locator", "observed_at", "content_digest"],
+  "properties": {
+    "source_id": { "type": "string", "minLength": 1 },
+    "source_type": {
+      "enum": ["owner_input", "conversation", "github", "document", "context_engine", "generated_content"]
+    },
+    "trust_class": {
+      "enum": ["owner_attested", "authoritative_reference", "evidence", "generated", "unverified"]
+    },
+    "locator": { "type": "string", "minLength": 1 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "project": { "type": ["string", "null"] },
+    "sensitivity": {
+      "enum": ["public", "internal", "sensitive", "restricted"]
+    },
+    "generator": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 }
+      }
+    },
+    "metadata": { "type": "object" }
+  }
+}
