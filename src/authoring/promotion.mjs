@@ -1,9 +1,9 @@
 import {
   AuthoringContractError,
-  assertApprovalForCandidate,
   assertArtifactCandidate,
   digestObject,
 } from './contracts.mjs';
+import { assertAuthenticatedOwnerApprovalForCandidate } from './owner-approval.mjs';
 
 const TARGETS = Object.freeze({
   A: 'content/20-pillar-a.md',
@@ -26,8 +26,8 @@ function nextPostId(pillar, existingPosts) {
   return `${pillar}${next}`;
 }
 
-export function createPromotionRecord({ candidate, approval, destination, promotedAt, artifactRef }) {
-  assertApprovalForCandidate(candidate, approval);
+export function createPromotionRecord({ candidate, approval, ownerPublicKeyPem, destination, promotedAt, artifactRef }) {
+  assertAuthenticatedOwnerApprovalForCandidate(candidate, approval, ownerPublicKeyPem);
   if (typeof destination !== 'string' || !destination.trim()) {
     throw new AuthoringContractError('destination_required', 'promotion destination is required');
   }
@@ -56,12 +56,13 @@ export function renderPostMarkdown({ postId, title, body }) {
 export function planPostPromotion({
   candidate,
   approval,
+  ownerPublicKeyPem,
   existingPosts,
   priorPromotions = [],
   promotedAt,
 }) {
   assertArtifactCandidate(candidate);
-  assertApprovalForCandidate(candidate, approval);
+  assertAuthenticatedOwnerApprovalForCandidate(candidate, approval, ownerPublicKeyPem);
   if (candidate.artifact_kind !== 'post') {
     throw new AuthoringContractError('post_candidate_required', 'post promotion accepts only post candidates');
   }
@@ -87,6 +88,7 @@ export function planPostPromotion({
   const promotion = createPromotionRecord({
     candidate,
     approval,
+    ownerPublicKeyPem,
     destination: targetPath,
     promotedAt,
     artifactRef: postId,
@@ -101,9 +103,9 @@ export function planPostPromotion({
   });
 }
 
-export function planNonPostPromotion({ candidate, approval, priorPromotions = [], promotedAt }) {
+export function planNonPostPromotion({ candidate, approval, ownerPublicKeyPem, priorPromotions = [], promotedAt }) {
   assertArtifactCandidate(candidate);
-  assertApprovalForCandidate(candidate, approval);
+  assertAuthenticatedOwnerApprovalForCandidate(candidate, approval, ownerPublicKeyPem);
   if (!['blog', 'lesson'].includes(candidate.artifact_kind)) {
     throw new AuthoringContractError('non_post_candidate_required', 'non-post promotion accepts only blog or lesson candidates');
   }
@@ -122,7 +124,7 @@ export function planNonPostPromotion({ candidate, approval, priorPromotions = []
     return Object.freeze({ status: 'already_promoted', destination, artifactRef: duplicate.artifact_ref, promotion: duplicate, bundle: null });
   }
 
-  const promotion = createPromotionRecord({ candidate, approval, destination, promotedAt, artifactRef });
+  const promotion = createPromotionRecord({ candidate, approval, ownerPublicKeyPem, destination, promotedAt, artifactRef });
   return Object.freeze({
     status: 'ready',
     destination,
