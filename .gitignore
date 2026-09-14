@@ -9,6 +9,9 @@ state.json
 post.log
 .xqueue-publish.lock
 
+# Local authoring workspace — generated drafts, reviews, approvals, promotion plans
+.xqueue-author/
+
 # Figures are binary and large; keep them local
 media/*
 !media/.gitkeep
