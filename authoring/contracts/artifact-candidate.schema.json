@@ -4,7 +4,7 @@
   "title": "XQueue Author Artifact Candidate",
   "type": "object",
   "additionalProperties": false,
-  "required": ["candidate_id", "artifact_kind", "status", "title", "body", "knowledge_unit_refs", "source_refs", "content_digest", "created_at"],
+  "required": ["candidate_id", "artifact_kind", "status", "title", "body", "knowledge_unit_refs", "source_refs", "content_digest", "created_at", "validation"],
   "properties": {
     "candidate_id": { "type": "string", "minLength": 1 },
     "artifact_kind": { "enum": ["post", "blog", "lesson"] },
