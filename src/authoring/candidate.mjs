@@ -48,6 +48,7 @@ export function createDeterministicCandidate({
   unit,
   artifactKind,
   pillar = null,
+  figure = null,
   createdAt,
   candidateId = null,
 }) {
@@ -62,12 +63,13 @@ export function createDeterministicCandidate({
 
   const body = artifactKind === 'post' ? unit.summary : artifactKind === 'blog' ? blogBody(unit) : lessonBody(unit);
   const value = {
-    candidate_id: candidateId || `candidate:${digestObject({ unit: unit.knowledge_unit_id, artifactKind, pillar }).slice(-16)}`,
+    candidate_id: candidateId || `candidate:${digestObject({ unit: unit.knowledge_unit_id, artifactKind, pillar, figure }).slice(-16)}`,
     artifact_kind: artifactKind,
     status: 'draft',
     title: titleFrom(unit),
     body,
     pillar: artifactKind === 'post' ? pillar : null,
+    figure: artifactKind === 'post' ? figure : null,
     knowledge_unit_refs: [unit.knowledge_unit_id],
     source_refs: [...unit.source_refs],
     created_at: createdAt,
