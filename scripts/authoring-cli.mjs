@@ -4,7 +4,8 @@ import { basename, join, resolve } from 'node:path';
 import { loadLibrary } from '../src/parse.mjs';
 import { runDeterministicAuthoring } from '../src/authoring/pipeline.mjs';
 import { createOwnerReviewPacket } from '../src/authoring/review.mjs';
-import { planNonPostPromotion, planPostPromotion } from '../src/authoring/promotion.mjs';
+import { planNonPostPromotion } from '../src/authoring/promotion.mjs';
+import { planStateBoundPostPromotion } from '../src/authoring/promotion-state.mjs';
 import {
   createExplicitOwnerApproval,
   readAuthoringJson,
@@ -13,6 +14,13 @@ import {
   savePromotionPlan,
   saveReviewPacket,
 } from '../src/authoring/workspace.mjs';
+
+const POST_TARGETS = Object.freeze({
+  A: 'content/20-pillar-a.md',
+  B: 'content/30-pillar-b.md',
+  C: 'content/40-pillar-c.md',
+  D: 'content/50-pillar-d.md',
+});
 
 function usage(message = null) {
   if (message) console.error(`ERROR: ${message}`);
@@ -35,7 +43,7 @@ Distill options:
   --pillar <A|B|C|D>            required for post
   --workspace <path>            defaults to .xqueue-author
 
-Promotion-plan never writes content/*.md. It writes a plan into the local workspace only.
+Promotion-plan never writes content/*.md. Post plans are bound to the exact target Markdown digest that existed when the plan was created.
 `);
   process.exitCode = 2;
 }
@@ -149,11 +157,32 @@ async function promotionPlan(flags) {
   const approval = await readAuthoringJson(resolve(requireFlag(flags, 'approval')));
   const promotedAt = flags['promoted-at'] || new Date().toISOString();
   const libraryPosts = loadLibrary(join(process.cwd(), 'content'));
-  const plan = candidate.artifact_kind === 'post'
-    ? planPostPromotion({ candidate, approval, existingPosts: libraryPosts, promotedAt })
-    : planNonPostPromotion({ candidate, approval, promotedAt });
+
+  let plan;
+  if (candidate.artifact_kind === 'post') {
+    const targetPath = POST_TARGETS[candidate.pillar];
+    if (!targetPath) throw new Error(`no post target configured for pillar ${candidate.pillar}`);
+    const targetMarkdown = await readFile(join(process.cwd(), targetPath), 'utf8');
+    plan = planStateBoundPostPromotion({
+      candidate,
+      approval,
+      existingPosts: libraryPosts,
+      targetMarkdown,
+      promotedAt,
+    });
+  } else {
+    plan = planNonPostPromotion({ candidate, approval, promotedAt });
+  }
+
   const path = await savePromotionPlan(plan, { root: flags.workspace });
-  console.log(JSON.stringify({ status: 'planned', path, promotion_status: plan.status, destination: plan.targetPath || plan.destination, artifact_ref: plan.postId || plan.artifactRef }, null, 2));
+  console.log(JSON.stringify({
+    status: 'planned',
+    path,
+    promotion_status: plan.status,
+    destination: plan.targetPath || plan.destination,
+    artifact_ref: plan.postId || plan.artifactRef,
+    target_base_digest: plan.targetBaseDigest ?? null,
+  }, null, 2));
 }
 
 const [command, ...tokens] = process.argv.slice(2);
