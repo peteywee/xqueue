@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xqueue.local/schemas/approval.schema.json",
+  "title": "XQueue Author Exact Candidate Approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["approval_id", "candidate_id", "candidate_digest", "decision", "decided_by", "decided_at"],
+  "properties": {
+    "approval_id": { "type": "string", "minLength": 1 },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "candidate_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "decision": { "enum": ["approve", "reject"] },
+    "decided_by": { "const": "Patrick Craven" },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "attestations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "notes": { "type": ["string", "null"] }
+  }
+}

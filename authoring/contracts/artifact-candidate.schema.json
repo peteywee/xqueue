@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xqueue.local/schemas/artifact-candidate.schema.json",
+  "title": "XQueue Author Artifact Candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate_id", "artifact_kind", "status", "title", "body", "knowledge_unit_refs", "source_refs", "content_digest", "created_at"],
+  "properties": {
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "artifact_kind": { "enum": ["post", "blog", "lesson"] },
+    "status": { "enum": ["draft", "reviewable", "rejected", "approved", "promoted"] },
+    "title": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "pillar": { "type": ["string", "null"], "enum": ["A", "B", "C", "D", null] },
+    "knowledge_unit_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "generator": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["provider", "model", "prompt_version", "input_digest"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "input_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "findings"],
+      "properties": {
+        "result": { "enum": ["pass", "warn", "fail"] },
+        "findings": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}
