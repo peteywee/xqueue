@@ -6,6 +6,7 @@ import { assessEvidenceRisk } from '../src/authoring/evidence-risk.mjs';
 import { buildStyleProfile, evaluateCandidateStyle } from '../src/authoring/style-profile.mjs';
 import { analyzeAngleReuse } from '../src/authoring/angle-analysis.mjs';
 import { createOwnerReviewPacket } from '../src/authoring/review.mjs';
+import { validateArtifactForReview } from '../src/authoring/authoring-validator.mjs';
 
 const reviewedAt = '2026-09-14T18:00:00.000Z';
 
@@ -63,6 +64,20 @@ test('stale current-factual evidence blocks reviewability', () => {
     currentFactMaxAgeDays: 30,
   });
   assert.ok(findings.some((finding) => finding.rule === 'current-fact-stale' && finding.level === 'error'));
+});
+
+test('authoring validator includes evidence risk in the reviewability decision', () => {
+  const value = candidate({ status: 'draft', validation: { result: 'fail', findings: [{ level: 'error', rule: 'not-yet-validated' }] } });
+  const validation = validateArtifactForReview({
+    candidate: value,
+    knowledgeUnits: [unit({ claim_class: 'current_factual' })],
+    sourceRecords: [source({ observed_at: '2026-01-01T00:00:00.000Z' })],
+    libraryPosts: [],
+    reviewedAt,
+    currentFactMaxAgeDays: 30,
+  });
+  assert.equal(validation.result, 'fail');
+  assert.ok(validation.findings.some((finding) => finding.rule === 'current-fact-stale'));
 });
 
 test('generated assertions require independent support', () => {
