@@ -4,6 +4,7 @@ import { applyPostPromotionToMarkdown, planPostPromotion } from './promotion.mjs
 export function planStateBoundPostPromotion({
   candidate,
   approval,
+  ownerPublicKeyPem,
   existingPosts,
   targetMarkdown,
   priorPromotions = [],
@@ -15,6 +16,7 @@ export function planStateBoundPostPromotion({
   const core = planPostPromotion({
     candidate,
     approval,
+    ownerPublicKeyPem,
     existingPosts,
     priorPromotions,
     promotedAt,

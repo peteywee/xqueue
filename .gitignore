@@ -1,6 +1,12 @@
 # Credentials — never commit
 .env
 
+# Owner signing authority — public verification key may be committed, private material may not
+signing-private*.pem
+*owner-approval-private*.pem
+authoring/owner/*private*.pem
+authoring/owner/*.key
+
 # Generated/runtime state
 queue.json
 # Media manifest binds required figures to real local bytes; regenerate it locally.

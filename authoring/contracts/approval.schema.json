@@ -4,7 +4,7 @@
   "title": "XQueue Author Exact Candidate Approval",
   "type": "object",
   "additionalProperties": false,
-  "required": ["approval_id", "candidate_id", "candidate_digest", "decision", "decided_by", "decided_at"],
+  "required": ["approval_id", "candidate_id", "candidate_digest", "decision", "decided_by", "decided_at", "owner_proof"],
   "properties": {
     "approval_id": { "type": "string", "minLength": 1 },
     "candidate_id": { "type": "string", "minLength": 1 },
@@ -12,6 +12,17 @@
     "decision": { "enum": ["approve", "reject"] },
     "decided_by": { "const": "Patrick Craven" },
     "decided_at": { "type": "string", "format": "date-time" },
+    "owner_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "public_key_fingerprint", "payload_digest", "signature_base64"],
+      "properties": {
+        "type": { "const": "ed25519-detached" },
+        "public_key_fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "payload_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "signature_base64": { "type": "string", "minLength": 80 }
+      }
+    },
     "attestations": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }

@@ -4,8 +4,6 @@ import { dirname, join, resolve } from 'node:path';
 import {
   AuthoringContractError,
   assertApproval,
-  assertApprovalForCandidate,
-  assertArtifactCandidate,
   digestObject,
 } from './contracts.mjs';
 
@@ -51,38 +49,18 @@ export async function saveReviewPacket(packet, { root = DEFAULT_AUTHORING_ROOT }
   return path;
 }
 
-export function createExplicitOwnerApproval({
-  candidate,
-  exactDigest,
-  decision,
-  decidedAt,
-  attestations = [],
-  notes = null,
-}) {
-  assertArtifactCandidate(candidate);
-  if (exactDigest !== candidate.content_digest) {
-    throw new AuthoringContractError('explicit_digest_mismatch', 'supplied exact digest does not match the candidate under review');
-  }
-  if (!['approve', 'reject'].includes(decision)) {
-    throw new AuthoringContractError('explicit_owner_decision_required', 'decision must be approve or reject');
-  }
-  const approval = {
-    approval_id: `approval:${digestObject({ candidate: candidate.content_digest, decision, decidedAt }).slice(-20)}`,
-    candidate_id: candidate.candidate_id,
-    candidate_digest: candidate.content_digest,
-    decision,
-    decided_by: 'Patrick Craven',
-    decided_at: decidedAt,
-    attestations,
-    notes,
-  };
-  assertApproval(approval);
-  if (decision === 'approve') assertApprovalForCandidate(candidate, approval);
-  return Object.freeze(approval);
+export function createExplicitOwnerApproval() {
+  throw new AuthoringContractError(
+    'owner_signature_required',
+    'unsigned approval construction is disabled; prepare an owner payload and import a detached Ed25519 signature',
+  );
 }
 
 export async function saveApproval(approval, { root = DEFAULT_AUTHORING_ROOT } = {}) {
   assertApproval(approval);
+  if (!approval?.owner_proof || approval.owner_proof.type !== 'ed25519-detached') {
+    throw new AuthoringContractError('owner_signature_required', 'saved authoritative approval requires detached owner signature proof');
+  }
   const path = join(resolveAuthoringRoot(root), 'approvals', `${safeName(approval.approval_id)}.json`);
   await writeJsonAtomic(path, approval);
   return path;
