@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { candidateDigest, digestText } from '../src/authoring/contracts.mjs';
+import {
+  createAuthenticatedOwnerApproval,
+  createOwnerApprovalPayload,
+  serializeOwnerApprovalPayload,
+} from '../src/authoring/owner-approval.mjs';
 import {
   createExplicitOwnerApproval,
   readAuthoringJson,
@@ -15,6 +21,8 @@ import {
 } from '../src/authoring/workspace.mjs';
 
 const when = '2026-09-14T21:00:00.000Z';
+const ownerKeys = generateKeyPairSync('ed25519');
+const ownerPublicKeyPem = ownerKeys.publicKey.export({ type: 'spki', format: 'pem' });
 
 function candidate() {
   const value = {
@@ -31,6 +39,12 @@ function candidate() {
   };
   value.content_digest = candidateDigest(value);
   return value;
+}
+
+function signedApproval(value, decision = 'approve') {
+  const payload = createOwnerApprovalPayload({ candidate: value, decision, decidedAt: when });
+  const signatureBase64 = sign(null, Buffer.from(serializeOwnerApprovalPayload(payload), 'utf8'), ownerKeys.privateKey).toString('base64');
+  return createAuthenticatedOwnerApproval({ candidate: value, payload, signatureBase64, publicKeyPem: ownerPublicKeyPem });
 }
 
 function run(value) {
@@ -60,7 +74,7 @@ function run(value) {
   };
 }
 
-test('local workspace persists run, review, approval, and promotion plan outside authoritative content', async () => {
+test('local workspace persists run, review, signed approval, and promotion plan outside authoritative content', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xqueue-author-test-'));
   try {
     const value = candidate();
@@ -75,12 +89,7 @@ test('local workspace persists run, review, approval, and promotion plan outside
     }, { root });
     assert.match(reviewPath, /reviews/);
 
-    const approval = createExplicitOwnerApproval({
-      candidate: value,
-      exactDigest: value.content_digest,
-      decision: 'approve',
-      decidedAt: when,
-    });
+    const approval = signedApproval(value);
     const approvalPath = await saveApproval(approval, { root });
     assert.match(approvalPath, /approvals/);
 
@@ -93,50 +102,50 @@ test('local workspace persists run, review, approval, and promotion plan outside
     assert.match(promotionPath, /promotion-plans/);
 
     const serialized = await readFile(approvalPath, 'utf8');
+    assert.match(serialized, /ed25519-detached/);
     assert.match(serialized, new RegExp(value.content_digest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('owner approval requires the exact candidate digest to be typed/supplied', () => {
-  const value = candidate();
+test('legacy unsigned approval constructor is disabled', () => {
   assert.throws(
-    () => createExplicitOwnerApproval({
-      candidate: value,
-      exactDigest: digestText('different'),
-      decision: 'approve',
-      decidedAt: when,
-    }),
-    (error) => error?.code === 'explicit_digest_mismatch',
+    () => createExplicitOwnerApproval(),
+    (error) => error?.code === 'owner_signature_required',
   );
 });
 
-test('failing candidate validation cannot be approved through workspace helper', () => {
-  const value = candidate();
-  value.status = 'draft';
-  value.validation = { result: 'fail', findings: [{ level: 'error', rule: 'blocked' }] };
-  value.content_digest = candidateDigest(value);
-
-  assert.throws(
-    () => createExplicitOwnerApproval({
-      candidate: value,
-      exactDigest: value.content_digest,
-      decision: 'approve',
-      decidedAt: when,
-    }),
-    (error) => error?.code === 'candidate_not_reviewable',
-  );
+test('workspace refuses to persist owner-looking unsigned approval', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xqueue-author-test-'));
+  try {
+    const value = candidate();
+    await assert.rejects(
+      saveApproval({
+        approval_id: 'fake',
+        candidate_id: value.candidate_id,
+        candidate_digest: value.content_digest,
+        decision: 'approve',
+        decided_by: 'Patrick Craven',
+        decided_at: when,
+      }, { root }),
+      (error) => error?.code === 'owner_signature_required',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-test('reject decision may be recorded for a reviewable candidate but grants no promotion authority', () => {
-  const value = candidate();
-  const rejection = createExplicitOwnerApproval({
-    candidate: value,
-    exactDigest: value.content_digest,
-    decision: 'reject',
-    decidedAt: when,
-  });
-  assert.equal(rejection.decision, 'reject');
-  assert.equal(rejection.decided_by, 'Patrick Craven');
+test('signed rejection may be persisted but grants no promotion decision', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xqueue-author-test-'));
+  try {
+    const value = candidate();
+    const rejection = signedApproval(value, 'reject');
+    assert.equal(rejection.decision, 'reject');
+    assert.equal(rejection.decided_by, 'Patrick Craven');
+    const path = await saveApproval(rejection, { root });
+    assert.match(path, /approvals/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
