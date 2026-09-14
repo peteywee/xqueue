@@ -1,5 +1,6 @@
 import {
   AuthoringContractError,
+  assertArtifactCandidate,
   assertKnowledgeUnit,
   candidateDigest,
   digestObject,
@@ -142,6 +143,7 @@ export async function generateBoundedCandidates(provider, {
         },
       };
       value.content_digest = candidateDigest(value);
+      assertArtifactCandidate(value);
       return Object.freeze(value);
     });
   } catch (error) {
