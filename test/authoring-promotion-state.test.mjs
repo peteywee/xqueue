@@ -1,13 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
 
 import { candidateDigest } from '../src/authoring/contracts.mjs';
+import {
+  createAuthenticatedOwnerApproval,
+  createOwnerApprovalPayload,
+  serializeOwnerApprovalPayload,
+} from '../src/authoring/owner-approval.mjs';
 import {
   applyStateBoundPostPromotion,
   planStateBoundPostPromotion,
 } from '../src/authoring/promotion-state.mjs';
 
 const when = '2026-09-14T17:00:00.000Z';
+const ownerKeys = generateKeyPairSync('ed25519');
+const ownerPublicKeyPem = ownerKeys.publicKey.export({ type: 'spki', format: 'pem' });
 
 function candidate() {
   const value = {
@@ -28,14 +36,9 @@ function candidate() {
 }
 
 function approval(value) {
-  return {
-    approval_id: 'approval-state-1',
-    candidate_id: value.candidate_id,
-    candidate_digest: value.content_digest,
-    decision: 'approve',
-    decided_by: 'Patrick Craven',
-    decided_at: when,
-  };
+  const payload = createOwnerApprovalPayload({ candidate: value, decision: 'approve', decidedAt: when });
+  const signatureBase64 = sign(null, Buffer.from(serializeOwnerApprovalPayload(payload), 'utf8'), ownerKeys.privateKey).toString('base64');
+  return createAuthenticatedOwnerApproval({ candidate: value, payload, signatureBase64, publicKeyPem: ownerPublicKeyPem });
 }
 
 const existing = [
@@ -50,6 +53,7 @@ test('state-bound promotion records the exact target markdown digest', () => {
   const plan = planStateBoundPostPromotion({
     candidate: value,
     approval: approval(value),
+    ownerPublicKeyPem,
     existingPosts: existing,
     targetMarkdown: target,
     promotedAt: when,
@@ -65,6 +69,7 @@ test('state-bound promotion applies only when target content is unchanged', () =
   const plan = planStateBoundPostPromotion({
     candidate: value,
     approval: approval(value),
+    ownerPublicKeyPem,
     existingPosts: existing,
     targetMarkdown: target,
     promotedAt: when,
@@ -79,6 +84,7 @@ test('state-bound promotion fails closed when target changes after planning', ()
   const plan = planStateBoundPostPromotion({
     candidate: value,
     approval: approval(value),
+    ownerPublicKeyPem,
     existingPosts: existing,
     targetMarkdown: target,
     promotedAt: when,
@@ -90,18 +96,21 @@ test('state-bound promotion fails closed when target changes after planning', ()
   );
 });
 
-test('already-promoted exact candidate remains idempotent without requiring target state', () => {
+test('already-promoted exact candidate remains idempotent but still requires valid owner proof', () => {
   const value = candidate();
+  const signed = approval(value);
   const first = planStateBoundPostPromotion({
     candidate: value,
-    approval: approval(value),
+    approval: signed,
+    ownerPublicKeyPem,
     existingPosts: existing,
     targetMarkdown: target,
     promotedAt: when,
   });
   const second = planStateBoundPostPromotion({
     candidate: value,
-    approval: approval(value),
+    approval: signed,
+    ownerPublicKeyPem,
     existingPosts: existing,
     targetMarkdown: `${target}\nLater harmless change.\n`,
     priorPromotions: [first.promotion],
