@@ -38,6 +38,7 @@
     "unskip": "node src/cli.mjs unskip",
     "reconcile": "node src/cli.mjs reconcile",
     "author:distill": "node scripts/authoring-cli.mjs distill",
+    "author:generate": "node scripts/authoring-cli.mjs generate",
     "author:review": "node scripts/authoring-cli.mjs review",
     "author:approve": "node scripts/authoring-cli.mjs approve",
     "author:promotion-plan": "node scripts/authoring-cli.mjs promotion-plan",
