@@ -1,0 +1,62 @@
+name: Security Wrangler Sharp Fix
+
+on:
+  push:
+    branches:
+      - security/wrangler-sharp-0354
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@v4
+        with:
+          ref: security/wrangler-sharp-0354
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Regenerate supported dependency chain
+        run: pnpm add -D wrangler@4.131.0 --save-exact --lockfile-only
+
+      - name: Prove vulnerable Sharp is gone from the resolved lockfile
+        shell: bash
+        run: |
+          if grep -q '^  sharp@0\.35\.2:' pnpm-lock.yaml; then
+            echo 'FAIL: vulnerable sharp@0.35.2 remains in pnpm-lock.yaml'
+            exit 1
+          fi
+          if ! grep -q '^  sharp@0\.35\.4:' pnpm-lock.yaml; then
+            echo 'FAIL: expected sharp@0.35.4 is absent from pnpm-lock.yaml'
+            exit 1
+          fi
+          grep -nE '^  (wrangler@4\.131\.0|miniflare@5\.|sharp@0\.35\.4):' pnpm-lock.yaml
+
+      - name: Remove one-shot workflow and commit dependency-only repair
+        shell: bash
+        run: |
+          rm -f .github/workflows/security-wrangler-sharp-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json pnpm-lock.yaml .github/workflows/security-wrangler-sharp-fix.yml
+          if git diff --cached --quiet; then
+            echo 'FAIL: dependency repair produced no changes'
+            exit 1
+          fi
+          git commit -m 'fix(security): update Wrangler chain for sharp 0.35.4'
+          git push origin HEAD:security/wrangler-sharp-0354
