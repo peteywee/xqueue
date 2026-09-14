@@ -1,9 +1,9 @@
 name: Security Wrangler Sharp Fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - security/wrangler-sharp-0354
+      - main
 
 permissions:
   contents: write
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout exact branch
+      - name: Checkout security branch
         uses: actions/checkout@v4
         with:
           ref: security/wrangler-sharp-0354
