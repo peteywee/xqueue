@@ -97,3 +97,16 @@ export async function savePromotionPlan(plan, { root = DEFAULT_AUTHORING_ROOT } 
   await writeJsonAtomic(path, plan);
   return path;
 }
+
+export async function saveTelemetryEvent(event, { root = DEFAULT_AUTHORING_ROOT } = {}) {
+  if (!event?.event_id || event?.event_type !== 'authoring_generation') {
+    throw new AuthoringContractError('invalid_telemetry_event', 'generation telemetry requires event_id and authoring_generation event_type');
+  }
+  const serialized = JSON.stringify(event);
+  if (/"title"\s*:|"body"\s*:|"source_refs"\s*:|"locator"\s*:/.test(serialized)) {
+    throw new AuthoringContractError('telemetry_contains_content', 'generation telemetry must not contain source or draft content fields');
+  }
+  const path = join(resolveAuthoringRoot(root), 'telemetry', `${safeName(event.event_id)}.json`);
+  await writeJsonAtomic(path, event);
+  return path;
+}
