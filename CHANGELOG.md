@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.0 — 2026-09-15
+
+Feature release adding the bounded XQueue Author pipeline while preserving the deterministic publication runtime and owner-reserved promotion authority.
+
+### XQueue Author
+
+- Added versioned contracts and deterministic authoring flow from source material through knowledge-unit distillation, candidate generation, validation, review, and promotion planning.
+- Added provider-neutral bounded generation with an OpenAI adapter, prompt/version provenance, timeout/count/output budgets, and CI-safe operation without production model credentials.
+- Added provenance, freshness, sensitivity, unsupported-claim, similarity, voice, and evidence-risk controls, plus privacy-safe generation telemetry.
+- Added read-only Context Source ingestion and approved-only feedback contracts without creating a second scheduler, publication ledger, or direct draft-to-publish path.
+- Added post, blog, and lesson promotion planning, including state-bound post promotion that refuses stale authoritative targets.
+
+### Owner approval hardening
+
+- Replaced owner-looking approval strings with detached Ed25519 owner authentication.
+- Added a committed public verification trust root while keeping the encrypted production private signing key outside GitHub, CI, agents, repository state, and `.xqueue-author/`.
+- Promotion re-verifies the exact signed approval payload before granting authority; repository/workspace access plus candidate digest is insufficient to manufacture owner approval.
+- Added adversarial coverage for unsigned approvals, wrong keys, forged signatures, altered candidates, altered decisions/timestamps, and noncanonical payload bytes.
+
+### Security and dependency hygiene
+
+- Upgraded Wrangler to `4.131.0`, moving the Miniflare dependency graph to `sharp >= 0.35.4` and resolving the transitive Sharp security advisory tracked in #78.
+- Retained production/preview authority separation, scheduler integrity controls, exact-candidate verification, and TSAL runtime/deployment evidence collection.
+
+### Runtime boundary
+
+This release does not introduce new scheduler behavior, D1 migrations, publication-ledger semantics, X publication behavior, or authoritative `content/*.md` changes. The immutable `1.1.0` tag/history remains unchanged.
+
 ## 1.1.0 — 2026-09-06
 
 Final engineering closeout release for the production-governed XQueue baseline.
