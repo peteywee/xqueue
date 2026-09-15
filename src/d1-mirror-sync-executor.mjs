@@ -51,7 +51,9 @@ function validatePlan(plan) {
     typeof plan.authority?.transitionId !== 'string' ||
     plan.authority.transitionId.length === 0 ||
     typeof plan.authority?.candidateSha !== 'string' ||
-    !SHA40_RE.test(plan.authority.candidateSha)
+    !SHA40_RE.test(plan.authority.candidateSha) ||
+    typeof plan.authority?.deploymentId !== 'string' ||
+    plan.authority.deploymentId.trim().length === 0
   ) {
     return 'invalid_plan_authority';
   }
@@ -125,7 +127,8 @@ function authorityMatchesPlan(authority, plan) {
     authority.owner === plan.authority.owner &&
     authority.generation === plan.authority.generation &&
     authority.transitionId === plan.authority.transitionId &&
-    authority.candidateSha === plan.authority.candidateSha.toLowerCase();
+    authority.candidateSha === plan.authority.candidateSha.toLowerCase() &&
+    authority.deploymentId === plan.authority.deploymentId;
 }
 
 async function readAndVerifyAuthority(transport, plan, phase) {
@@ -221,6 +224,7 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
       env: plan.env,
       key: plan.targetKey,
       authorityGeneration: plan.authority.generation,
+      authorityDeploymentId: plan.authority.deploymentId,
       hash: plan.expectedReadback.hash,
       counts: plan.expectedReadback.counts,
       writeAttempted: false,
@@ -303,6 +307,7 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
     env: plan.env,
     key: plan.targetKey,
     authorityGeneration: plan.authority.generation,
+    authorityDeploymentId: plan.authority.deploymentId,
     hash: readback.inspected.hash,
     counts: readback.inspected.counts,
     writeAttempted: true,
