@@ -112,17 +112,23 @@ test('preview diagnostic fails closed on remote read failure and does not contin
 });
 
 test('preview diagnostic cannot be retargeted through its public API', async () => {
-  let calls = 0;
-  const runProcess = async () => {
-    calls += 1;
-    return result([]);
+  const calls = [];
+  const responses = [result([]), result([]), result([])];
+  const runProcess = async (invocation) => {
+    calls.push(invocation);
+    return responses.shift();
   };
 
-  const promise = runPreviewMirrorDiagnostic({
+  await runPreviewMirrorDiagnostic({
     runProcess,
     env: 'production',
   });
 
-  await promise;
-  assert.equal(calls, 3);
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    assert.equal(call.args[3], 'xqueue-preview');
+    assert.equal(call.args[5], 'wrangler.preview.jsonc');
+    assert.notEqual(call.args[3], 'xqueue-production');
+    assert.notEqual(call.args[5], 'wrangler.jsonc');
+  }
 });
