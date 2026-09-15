@@ -53,7 +53,7 @@ function canonicalMirror() {
   }, null, 2)}\n`;
 }
 
-test('preview diagnostic performs only three pinned SELECT calls', async () => {
+test('preview diagnostic performs only three pinned SELECT calls for valid local authority', async () => {
   const calls = [];
   const responses = [
     result([authorityState()]),
@@ -70,6 +70,8 @@ test('preview diagnostic performs only three pinned SELECT calls', async () => {
   assert.equal(diagnostic.ok, true);
   assert.equal(diagnostic.mode, 'read_only_preview_diagnostic');
   assert.equal(diagnostic.env, 'preview');
+  assert.equal(diagnostic.authority.allowed, true);
+  assert.equal(diagnostic.authority.owner, 'local-systemd');
   assert.equal(diagnostic.mirror.exists, true);
   assert.equal(diagnostic.mirror.valid, true);
   assert.deepEqual(diagnostic.mirror.counts, {
@@ -93,6 +95,23 @@ test('preview diagnostic performs only three pinned SELECT calls', async () => {
   }
 });
 
+test('preview diagnostic fails closed when authority tables are empty and does not read mirror', async () => {
+  const calls = [];
+  const responses = [result([]), result([])];
+  const runProcess = async (invocation) => {
+    calls.push(invocation);
+    return responses.shift();
+  };
+
+  await assert.rejects(
+    () => runPreviewMirrorDiagnostic({ runProcess }),
+    /preview mirror authority refused: authority_state_missing_or_invalid/,
+  );
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].args.at(-1), /FROM authority_state/);
+  assert.match(calls[1].args.at(-1), /FROM authority_events/);
+});
+
 test('preview diagnostic fails closed on remote read failure and does not continue', async () => {
   const calls = [];
   const runProcess = async (invocation) => {
@@ -113,7 +132,11 @@ test('preview diagnostic fails closed on remote read failure and does not contin
 
 test('preview diagnostic cannot be retargeted through its public API', async () => {
   const calls = [];
-  const responses = [result([]), result([]), result([])];
+  const responses = [
+    result([authorityState()]),
+    result([authorityEvent()]),
+    result([]),
+  ];
   const runProcess = async (invocation) => {
     calls.push(invocation);
     return responses.shift();
