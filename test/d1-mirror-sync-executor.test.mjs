@@ -119,7 +119,8 @@ function makeTransport({
         currentState.owner === request.authority.owner &&
         currentState.generation === request.authority.generation &&
         currentState.transition_id === request.authority.transitionId &&
-        currentState.candidate_sha.toLowerCase() === request.authority.candidateSha;
+        currentState.candidate_sha.toLowerCase() === request.authority.candidateSha &&
+        currentState.deployment_id === request.authority.deploymentId;
 
       if (!expectedMatches || !authorityMatches) {
         return { applied: false };
@@ -133,12 +134,14 @@ function makeTransport({
           generation: 21,
           transition_id: 'transition-21',
           previous_owner: 'local-systemd',
+          deployment_id: 'cloudflare@21',
         });
         currentEvent = authorityEvent({
           generation: 21,
           transition_id: 'transition-21',
           previous_owner: 'local-systemd',
           next_owner: 'cloudflare',
+          deployment_id: 'cloudflare@21',
         });
       }
 
@@ -179,9 +182,11 @@ test('confirmed sync uses exact CAS precondition and verifies readback', async (
   assert.equal(call.authority.generation, 20);
   assert.equal(call.authority.transitionId, 'transition-20');
   assert.equal(call.authority.candidateSha, candidateSha);
+  assert.equal(call.authority.deploymentId, 'local-systemd@20');
   assert.equal(transport.mirror, compiled.write.value);
   assert.equal(result.hash, compiled.expectedReadback.hash);
   assert.deepEqual(result.counts, compiled.expectedReadback.counts);
+  assert.equal(result.authorityDeploymentId, 'local-systemd@20');
 });
 
 test('confirmed no-op revalidates authority and mirror without writing', async () => {
@@ -196,6 +201,7 @@ test('confirmed no-op revalidates authority and mirror without writing', async (
   assert.equal(result.ok, true);
   assert.equal(result.status, 'confirmed_noop');
   assert.equal(result.writeAttempted, false);
+  assert.equal(result.authorityDeploymentId, 'local-systemd@20');
   assert.equal(transport.writeAttempts, 0);
 });
 
@@ -228,12 +234,27 @@ test('same-owner authority generation change refuses as stale plan', async () =>
       generation: 21,
       transition_id: 'transition-21',
       previous_owner: 'local-systemd',
+      deployment_id: 'local-systemd@21',
     }),
     event: authorityEvent({
       generation: 21,
       transition_id: 'transition-21',
       previous_owner: 'local-systemd',
+      deployment_id: 'local-systemd@21',
     }),
+  });
+
+  const result = await executeD1MirrorSyncPlan({ plan: plan(), transport });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'authority_changed_since_plan');
+  assert.equal(transport.writeAttempts, 0);
+});
+
+test('same-generation deployment identity change refuses as stale plan', async () => {
+  const transport = makeTransport({
+    state: authorityState({ deployment_id: 'local-systemd@replacement' }),
+    event: authorityEvent({ deployment_id: 'local-systemd@replacement' }),
   });
 
   const result = await executeD1MirrorSyncPlan({ plan: plan(), transport });
@@ -332,6 +353,21 @@ test('tampered target key is refused', async () => {
     status: 'refused',
     reason: 'invalid_plan_target',
   });
+  assert.equal(transport.writeAttempts, 0);
+});
+
+test('tampered deployment identity is refused before transport use', async () => {
+  const base = plan();
+  const compiled = {
+    ...base,
+    authority: { ...base.authority, deploymentId: '' },
+  };
+  const transport = makeTransport();
+
+  const result = await executeD1MirrorSyncPlan({ plan: compiled, transport });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'invalid_plan_authority');
   assert.equal(transport.writeAttempts, 0);
 });
 

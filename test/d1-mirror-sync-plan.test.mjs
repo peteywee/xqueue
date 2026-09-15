@@ -97,11 +97,8 @@ test('malformed local state refuses before any plan exists', () => {
 
 test('prepared inflight publication refuses mirror sync', () => {
   const result = compile({
-    localState: localState({
-      inflight: { postId: 'A4', status: 'prepared' },
-    }),
+    localState: localState({ inflight: { postId: 'A4', status: 'prepared' } }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'local_state_inflight');
   assert.equal(result.postId, 'A4');
@@ -110,22 +107,16 @@ test('prepared inflight publication refuses mirror sync', () => {
 
 test('publishing inflight publication refuses mirror sync', () => {
   const result = compile({
-    localState: localState({
-      inflight: { postId: 'A4', status: 'publishing' },
-    }),
+    localState: localState({ inflight: { postId: 'A4', status: 'publishing' } }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'local_state_inflight');
 });
 
 test('needs_reconciliation gets a distinct refusal', () => {
   const result = compile({
-    localState: localState({
-      inflight: { postId: 'A4', status: 'needs_reconciliation' },
-    }),
+    localState: localState({ inflight: { postId: 'A4', status: 'needs_reconciliation' } }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'local_state_needs_reconciliation');
 });
@@ -135,7 +126,6 @@ test('Cloudflare authority refuses even with a valid local ledger', () => {
     authorityState: authorityState({ owner: 'cloudflare' }),
     latestAuthorityEvent: authorityEvent({ next_owner: 'cloudflare' }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_owned_by_cloudflare');
 });
@@ -145,7 +135,6 @@ test('none authority refuses mirror sync', () => {
     authorityState: authorityState({ owner: 'none' }),
     latestAuthorityEvent: authorityEvent({ next_owner: 'none' }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_unowned');
 });
@@ -155,16 +144,23 @@ test('transitioning authority refuses mirror sync', () => {
     authorityState: authorityState({ transition_state: 'transitioning' }),
     latestAuthorityEvent: authorityEvent({ transition_state: 'transitioning' }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_transition_unresolved');
+});
+
+test('local authority without deployment identity cannot produce a plan', () => {
+  const result = compile({
+    authorityState: authorityState({ deployment_id: null }),
+    latestAuthorityEvent: authorityEvent({ deployment_id: null }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'authority_local_deployment_missing');
 });
 
 test('missing mirror compiles a bounded replacement plan', () => {
   const state = localState();
   const expectedText = normalizedCanonical(state);
   const expectedHash = sha256(expectedText);
-
   const result = compile({ currentMirrorText: null });
 
   assert.equal(result.ok, true);
@@ -184,24 +180,39 @@ test('missing mirror compiles a bounded replacement plan', () => {
   });
   assert.equal(result.authority.owner, 'local-systemd');
   assert.equal(result.authority.generation, 12);
+  assert.equal(result.authority.deploymentId, 'local-systemd@12');
 });
 
-test('same normalized mirror is an idempotent no-op despite formatting differences', () => {
+test('semantically equal but non-canonical mirror compiles a canonical replacement', () => {
   const state = localState();
   const compactMirror = JSON.stringify(state);
+  const canonicalMirror = normalizedCanonical(state);
   const result = compile({ currentMirrorText: compactMirror });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.operation, 'replace_mirror');
+  assert.equal(result.before.valid, true);
+  assert.equal(result.before.hash, result.local.hash);
+  assert.notEqual(result.before.rawHash, result.local.hash);
+  assert.equal(result.write.value, canonicalMirror);
+  assert.deepEqual(result.before.counts, result.local.counts);
+});
+
+test('exact canonical mirror is an idempotent no-op', () => {
+  const state = localState();
+  const canonicalMirror = normalizedCanonical(state);
+  const result = compile({ currentMirrorText: canonicalMirror });
 
   assert.equal(result.ok, true);
   assert.equal(result.operation, 'no_op');
   assert.equal(result.write, null);
   assert.equal(result.before.valid, true);
+  assert.equal(result.before.rawHash, result.local.hash);
   assert.equal(result.before.hash, result.local.hash);
-  assert.deepEqual(result.before.counts, result.local.counts);
 });
 
 test('malformed current mirror is replaced rather than treated as authoritative', () => {
   const result = compile({ currentMirrorText: '{broken-json' });
-
   assert.equal(result.ok, true);
   assert.equal(result.operation, 'replace_mirror');
   assert.equal(result.before.exists, true);
@@ -216,7 +227,6 @@ test('different valid mirror compiles replacement with before/after evidence', (
     skipped: {},
     spend: 0.03,
   });
-
   const result = compile({ currentMirrorText: JSON.stringify(oldMirror) });
 
   assert.equal(result.ok, true);
@@ -233,7 +243,6 @@ test('stale authority generation prevents a plan even when mirror is identical',
     authorityState: authorityState({ generation: 11 }),
     latestAuthorityEvent: authorityEvent({ generation: 12 }),
   });
-
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_generation_mismatch');
 });

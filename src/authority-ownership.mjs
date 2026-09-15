@@ -181,6 +181,10 @@ export function evaluateMirrorSyncAuthority({ state, latestEvent } = {}) {
     };
   }
 
+  if (!isNonEmptyString(state.deployment_id)) {
+    return { allowed: false, reason: 'authority_local_deployment_missing' };
+  }
+
   return {
     allowed: true,
     reason: null,
@@ -188,5 +192,6 @@ export function evaluateMirrorSyncAuthority({ state, latestEvent } = {}) {
     generation: state.generation,
     transitionId: state.transition_id,
     candidateSha: state.candidate_sha.toLowerCase(),
+    deploymentId: state.deployment_id,
   };
 }
