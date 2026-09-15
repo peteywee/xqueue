@@ -160,6 +160,16 @@ test('transitioning authority refuses mirror sync', () => {
   assert.equal(result.reason, 'authority_transition_unresolved');
 });
 
+test('local authority without deployment identity cannot produce a plan', () => {
+  const result = compile({
+    authorityState: authorityState({ deployment_id: null }),
+    latestAuthorityEvent: authorityEvent({ deployment_id: null }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'authority_local_deployment_missing');
+});
+
 test('missing mirror compiles a bounded replacement plan', () => {
   const state = localState();
   const expectedText = normalizedCanonical(state);
@@ -184,6 +194,7 @@ test('missing mirror compiles a bounded replacement plan', () => {
   });
   assert.equal(result.authority.owner, 'local-systemd');
   assert.equal(result.authority.generation, 12);
+  assert.equal(result.authority.deploymentId, 'local-systemd@12');
 });
 
 test('same normalized mirror is an idempotent no-op despite formatting differences', () => {
