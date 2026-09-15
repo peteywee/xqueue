@@ -47,6 +47,12 @@ function normalizeProcessResult(result) {
   };
 }
 
+function processFailureDetail(result) {
+  const stderr = result.stderr.trim();
+  const stdout = result.stdout.trim();
+  return [stderr, stdout].filter((value) => value.length > 0).join('\n');
+}
+
 function parseWranglerJson(stdout) {
   let parsed;
   try {
@@ -117,7 +123,7 @@ async function executeSql({ env, sql, runProcess }) {
   const processResult = normalizeProcessResult(await runProcess(invocation));
 
   if (processResult.exitCode !== 0) {
-    const detail = processResult.stderr.trim();
+    const detail = processFailureDetail(processResult);
     throw new Error(
       detail.length > 0
         ? `Wrangler D1 command failed: ${detail}`

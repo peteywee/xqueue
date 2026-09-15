@@ -60,10 +60,16 @@ function normalizeProcessResult(result, label) {
   };
 }
 
+function processFailureDetail(result) {
+  const stderr = result.stderr.trim();
+  const stdout = result.stdout.trim();
+  return [stderr, stdout].filter((value) => value.length > 0).join('\n');
+}
+
 async function runChecked(runProcess, invocation, label) {
   const result = normalizeProcessResult(await runProcess(invocation), label);
   if (result.exitCode !== 0) {
-    const detail = result.stderr.trim();
+    const detail = processFailureDetail(result);
     throw new Error(
       detail.length > 0
         ? `${label} failed: ${detail}`
@@ -194,7 +200,8 @@ function canonicalEventAt(now) {
 }
 
 function assertConfirmation(argv) {
-  if (!Array.isArray(argv) || argv.length !== 1 || argv[0] !== CONFIRMATION_ARG) {
+  const normalized = Array.isArray(argv) && argv[0] === '--' ? argv.slice(1) : argv;
+  if (!Array.isArray(normalized) || normalized.length !== 1 || normalized[0] !== CONFIRMATION_ARG) {
     throw new Error(
       `explicit confirmation required: ${CONFIRMATION_ARG}`,
     );
