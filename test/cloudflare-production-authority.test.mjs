@@ -29,18 +29,16 @@ function ledger() {
 }
 
 function queue() {
-  return [
-    {
-      id: 'C99',
-      pillar: 'C',
-      title: 'Production candidate',
-      body: 'One exactly selected production-shaped post.',
-      figure: null,
-      date: '2026-09-02',
-      time: '11:00',
-      timezone: 'America/Chicago',
-    },
-  ];
+  return [{
+    id: 'C99',
+    pillar: 'C',
+    title: 'Production candidate',
+    body: 'One exactly selected production-shaped post.',
+    figure: null,
+    date: '2026-09-02',
+    time: '11:00',
+    timezone: 'America/Chicago',
+  }];
 }
 
 function eligible() {
@@ -66,23 +64,42 @@ function eligible() {
   };
 }
 
-function prepared(sql, params = []) {
+function prepared(sql, params = [], onFirst = null) {
   return {
     sql,
     params,
     bind(...next) {
-      return prepared(sql, next);
+      return prepared(sql, next, onFirst);
+    },
+    async first() {
+      if (typeof onFirst !== 'function') {
+        throw new Error('unexpected first() call in proof DB');
+      }
+      return onFirst({ sql, params });
     },
   };
 }
 
-function changeProofDb() {
+function changeProofDb({
+  stateStatus = 'scheduled',
+  stateAttemptId = null,
+  stateGeneration = 1,
+} = {}) {
   const operations = [];
 
   return {
     operations,
     prepare(sql) {
-      return prepared(sql);
+      return prepared(sql, [], ({ sql: cursorSql }) => {
+        if (/FROM publication_state/.test(cursorSql)) {
+          return {
+            status: stateStatus,
+            attempt_id: stateAttemptId,
+            generation: stateGeneration,
+          };
+        }
+        throw new Error('unexpected first() query in proof DB');
+      });
     },
     async batch(statements) {
       operations.push(...statements);
@@ -95,6 +112,14 @@ function changeProofDb() {
         { success: true, results: [{ direct_changes: 1 }] },
       ];
     },
+  };
+}
+
+function publishingSnapshot(state) {
+  return {
+    raw: JSON.stringify(state),
+    ledger: state,
+    publicationStateGeneration: 2,
   };
 }
 
@@ -123,17 +148,14 @@ test('authority flag is exact and fail-closed', () => {
 
 test('publisher does nothing before the authority flag is enabled', async () => {
   let touched = false;
-  const result = await runScheduledPublication(
-    {},
-    {
-      dependencies: {
-        async verifyQueueIntegrity() {
-          touched = true;
-          return { ok: true };
-        },
+  const result = await runScheduledPublication({}, {
+    dependencies: {
+      async verifyQueueIntegrity() {
+        touched = true;
+        return { ok: true };
       },
     },
-  );
+  });
 
   assert.equal(result.status, 'idle');
   assert.equal(result.reason, 'authority_disabled');
@@ -154,24 +176,16 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
-        async verifyQueueIntegrity() {
-          return { ok: true };
-        },
+        async verifyQueueIntegrity() { return { ok: true }; },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
         },
-        evaluateEligibility() {
-          return eligible();
-        },
-        decodeBundledQueue() {
-          return queue();
-        },
+        evaluateEligibility() { return eligible(); },
+        decodeBundledQueue() { return queue(); },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
-        makeClient() {
-          return mockXClient();
-        },
+        makeClient() { return mockXClient(); },
         async acquirePublicationLease() {
           return {
             acquired: true,
@@ -184,9 +198,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
             },
           };
         },
-        async verifyPublicationLease() {
-          return true;
-        },
+        async verifyPublicationLease() { return true; },
         async releasePublicationLease() {
           releaseCalls += 1;
           return { released: true };
@@ -201,7 +213,11 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
             cost: 0.015,
             status: 'publishing',
           };
-          return { raw: JSON.stringify(next), ledger: next };
+          return {
+            raw: JSON.stringify(next),
+            ledger: next,
+            publicationStateGeneration: 2,
+          };
         },
         async persistPublicationOutcome(db, snapshot, input) {
           evidenceRecorded = { db, snapshot, input };
@@ -235,7 +251,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
   assert.equal(releaseCalls, 1);
 });
 
-test('publishing fence mirrors local inflight semantics before dispatch', async () => {
+test('publishing fence mirrors local inflight semantics and advances state generation before dispatch', async () => {
   const state = ledger();
   const result = await beginPublishingFence(
     changeProofDb(),
@@ -253,9 +269,10 @@ test('publishing fence mirrors local inflight semantics before dispatch', async 
   assert.equal(result.ledger.inflight.postId, 'C99');
   assert.equal(result.ledger.inflight.attemptId, 'attempt-123');
   assert.equal(result.ledger.inflight.cost, 0.015);
+  assert.equal(result.publicationStateGeneration, 2);
 });
 
-test('confirmed post commits tweet id and clears inflight', async () => {
+test('confirmed post commits tweet id, clears inflight and advances generation', async () => {
   const state = ledger();
   state.inflight = {
     attemptId: 'attempt-123',
@@ -270,7 +287,7 @@ test('confirmed post commits tweet id and clears inflight', async () => {
 
   const result = await persistPublicationOutcome(
     changeProofDb(),
-    { raw: JSON.stringify(state), ledger: state },
+    publishingSnapshot(state),
     {
       post: { id: 'C99' },
       outcome: {
@@ -286,10 +303,11 @@ test('confirmed post commits tweet id and clears inflight', async () => {
   assert.equal(result.ledger.posted.C99.tweetId, '999999');
   assert.equal(result.ledger.posted.C99.attemptId, 'attempt-123');
   assert.equal(result.ledger.spend, 0.015);
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.reconciliationRequired, false);
 });
 
-test('confirmed-not-posted outcome stays distinct and does not require reconciliation', async () => {
+test('confirmed-not-posted outcome stays distinct and advances generation', async () => {
   const state = ledger();
   state.inflight = {
     attemptId: 'attempt-123',
@@ -302,7 +320,7 @@ test('confirmed-not-posted outcome stays distinct and does not require reconcili
 
   const result = await persistPublicationOutcome(
     changeProofDb(),
-    { raw: JSON.stringify(state), ledger: state },
+    publishingSnapshot(state),
     {
       post: { id: 'C99' },
       outcome: {
@@ -315,10 +333,11 @@ test('confirmed-not-posted outcome stays distinct and does not require reconcili
   );
 
   assert.equal(result.ledger.inflight, null);
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.reconciliationRequired, false);
 });
 
-test('ambiguous outcome remains a durable reconciliation block', async () => {
+test('ambiguous outcome remains a durable reconciliation block and advances generation', async () => {
   const state = ledger();
   state.inflight = {
     attemptId: 'attempt-123',
@@ -331,7 +350,7 @@ test('ambiguous outcome remains a durable reconciliation block', async () => {
 
   const result = await persistPublicationOutcome(
     changeProofDb(),
-    { raw: JSON.stringify(state), ledger: state },
+    publishingSnapshot(state),
     {
       post: { id: 'C99' },
       outcome: {
@@ -345,6 +364,7 @@ test('ambiguous outcome remains a durable reconciliation block', async () => {
 
   assert.equal(result.ledger.inflight.status, 'needs_reconciliation');
   assert.equal(result.ledger.inflight.lastError, 'ambiguous_timeout');
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.reconciliationRequired, true);
 });
 
@@ -370,9 +390,7 @@ test('exact lease verifier rejects stale, expired and mismatched handles', async
   const db = {
     prepare() {
       return {
-        async first() {
-          return row;
-        },
+        async first() { return row; },
       };
     },
   };
@@ -392,11 +410,7 @@ test('exact lease verifier rejects stale, expired and mismatched handles', async
 test('classifier reads XDK-style HTTP errors and includes 413 refusal', () => {
   const classification = classifyPublicationOutcome({
     phase: 'dispatched',
-    error: {
-      response: {
-        status: 413,
-      },
-    },
+    error: { response: { status: 413 } },
   });
 
   assert.equal(classification.classification, 'confirmed_not_posted');
@@ -417,9 +431,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
-        async verifyQueueIntegrity() {
-          return { ok: true };
-        },
+        async verifyQueueIntegrity() { return { ok: true }; },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
         },
@@ -430,18 +442,12 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
           };
         },
         decodeBundledQueue() {
-          return [{
-            ...queue()[0],
-            id: 'B99',
-            pillar: 'B',
-          }];
+          return [{ ...queue()[0], id: 'B99', pillar: 'B' }];
         },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
-        makeClient() {
-          return mockXClient();
-        },
+        makeClient() { return mockXClient(); },
         async acquirePublicationLease() {
           return {
             acquired: true,
@@ -454,12 +460,8 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
             },
           };
         },
-        async verifyPublicationLease() {
-          return true;
-        },
-        async releasePublicationLease() {
-          return { released: true };
-        },
+        async verifyPublicationLease() { return true; },
+        async releasePublicationLease() { return { released: true }; },
         async beginPublishingFence(db, snapshot, input) {
           renderedText = input.text;
           const next = structuredClone(source);
@@ -471,23 +473,20 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
             cost: input.cost,
             status: 'publishing',
           };
-          return { raw: JSON.stringify(next), ledger: next };
+          return {
+            raw: JSON.stringify(next),
+            ledger: next,
+            publicationStateGeneration: 2,
+          };
         },
         async persistPublicationOutcome() {},
         async simulatePublicationTransaction(deps) {
           await deps.verifyIdentity();
           const lease = (await deps.acquireLease()).lease;
           await deps.verifyLease(lease);
-          const media = await deps.verifyMedia({ post: {
-            ...queue()[0],
-            id: 'B99',
-            pillar: 'B',
-          } });
-          const response = await deps.dispatchPost({ post: {
-            ...queue()[0],
-            id: 'B99',
-            pillar: 'B',
-          }, media });
+          const selected = { ...queue()[0], id: 'B99', pillar: 'B' };
+          const media = await deps.verifyMedia({ post: selected });
+          const response = await deps.dispatchPost({ post: selected, media });
           const outcome = deps.classifyOutcome({ phase: 'dispatched', response });
           await deps.recordEvidence({ outcome });
           await deps.releaseLease(lease);
