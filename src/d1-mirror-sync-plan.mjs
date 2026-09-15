@@ -6,7 +6,7 @@ import { normalizeState } from './state-store.mjs';
 const TARGET_KEY = 'state.snapshot_json';
 const ENVIRONMENTS = new Set(['production', 'preview']);
 
-function sha256(text) {
+export function sha256Text(text) {
   return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
 }
 
@@ -30,10 +30,11 @@ function invalid(reason, extra = {}) {
   };
 }
 
-function decodeMirror(text) {
+export function inspectD1MirrorText(text) {
   if (text === null || text === undefined) {
     return {
       exists: false,
+      rawHash: null,
       valid: false,
       reason: 'mirror_missing',
       normalized: null,
@@ -46,6 +47,7 @@ function decodeMirror(text) {
   if (typeof text !== 'string' || text.length === 0) {
     return {
       exists: true,
+      rawHash: typeof text === 'string' ? sha256Text(text) : null,
       valid: false,
       reason: 'mirror_invalid_text',
       normalized: null,
@@ -55,22 +57,26 @@ function decodeMirror(text) {
     };
   }
 
+  const rawHash = sha256Text(text);
+
   try {
     const parsed = JSON.parse(text);
     const normalized = normalizeState(parsed);
     const canonicalText = canonicalState(normalized);
     return {
       exists: true,
+      rawHash,
       valid: true,
       reason: null,
       normalized,
       canonicalText,
-      hash: sha256(canonicalText),
+      hash: sha256Text(canonicalText),
       counts: counts(normalized),
     };
   } catch {
     return {
       exists: true,
+      rawHash,
       valid: false,
       reason: 'mirror_invalid_state',
       normalized: null,
@@ -121,8 +127,8 @@ export function compileD1MirrorSyncPlan({
   }
 
   const canonicalText = canonicalState(normalizedLocal);
-  const localHash = sha256(canonicalText);
-  const before = decodeMirror(currentMirrorText);
+  const localHash = sha256Text(canonicalText);
+  const before = inspectD1MirrorText(currentMirrorText);
   const afterCounts = counts(normalizedLocal);
   const noOp = before.valid === true && before.hash === localHash;
 
@@ -144,6 +150,7 @@ export function compileD1MirrorSyncPlan({
     },
     before: {
       exists: before.exists,
+      rawHash: before.rawHash,
       valid: before.valid,
       reason: before.reason,
       hash: before.hash,
