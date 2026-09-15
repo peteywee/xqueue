@@ -143,6 +143,7 @@ export function compileD1MirrorSyncPlan({
       generation: authority.generation,
       transitionId: authority.transitionId,
       candidateSha: authority.candidateSha,
+      deploymentId: authority.deploymentId,
     },
     local: {
       hash: localHash,
