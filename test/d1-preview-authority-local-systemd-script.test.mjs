@@ -7,7 +7,8 @@ const candidateSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const seedSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const eventAt = '2026-09-15T19:00:00.000Z';
 const seedAt = '2026-09-15T17:36:48.169Z';
-const deploymentId = 'local-systemd:xqueue.service:preview';
+const unitHash = 'f'.repeat(64);
+const deploymentId = `systemd-user:xqueue.service:sha256:${unitHash}`;
 const transitionId = `preview-none-to-local-${candidateSha}`;
 const confirm = '--confirm-preview-local-systemd-authority';
 const mirror = '{"version":1,"posted":{},"skipped":{},"spend":0,"inflight":null}';
@@ -49,15 +50,17 @@ function createRunner({ branch = 'hardening/issue-59-d1-mirror-activation', stat
 }
 
 const fixedNow = () => new Date(eventAt);
+const systemdIdentity = async () => ({ unit: 'xqueue.service', fragmentPath: '/home/patrick/.config/systemd/user/xqueue.service', unitHash, deploymentId });
 
 test('wrapper performs only preview authority transition and proves mirror/production unchanged', async () => {
   const { calls, runProcess } = createRunner();
-  const result = await runPreviewLocalSystemdAuthorityTransition({ argv: [confirm], runProcess, now: fixedNow, envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId } });
+  const result = await runPreviewLocalSystemdAuthorityTransition({ argv: [confirm], runProcess, now: fixedNow, envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId }, deriveDeploymentIdentity: systemdIdentity });
   assert.equal(result.ok, true);
   assert.equal(result.owner, 'local-systemd');
   assert.equal(result.generation, 2);
   assert.equal(result.candidateSha, candidateSha);
   assert.equal(result.deploymentId, deploymentId);
+  assert.equal(result.systemdUnitHash, unitHash);
   assert.equal(result.mirrorUnchanged, true);
   assert.equal(result.productionAuthoritySchemaAbsent, true);
   const writes = calls.filter((call) => call.command === 'pnpm' && /\bINSERT INTO authority_events\b/.test(call.args.at(-1)));
@@ -85,4 +88,19 @@ test('wrong branch, dirty tree, and extra args fail before D1 mutation', async (
   const extra = createRunner();
   await assert.rejects(() => runPreviewLocalSystemdAuthorityTransition({ argv: [confirm, '--env=production'], runProcess: extra.runProcess, now: fixedNow, envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId } }), /explicit confirmation required/);
   assert.equal(extra.calls.length, 0);
+});
+
+test('explicit deployment id must match the loaded systemd unit identity before D1 access', async () => {
+  const fake = createRunner();
+  await assert.rejects(
+    () => runPreviewLocalSystemdAuthorityTransition({
+      argv: [confirm],
+      runProcess: fake.runProcess,
+      now: fixedNow,
+      envVars: { XQUEUE_DEPLOYMENT_ID: 'operator-invented-id' },
+      deriveDeploymentIdentity: systemdIdentity,
+    }),
+    /does not match the loaded xqueue\.service identity/,
+  );
+  assert.equal(fake.calls.some((call) => call.command === 'pnpm'), false);
 });

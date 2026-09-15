@@ -9,6 +9,7 @@ import { compileD1MirrorSyncPlan } from '../src/d1-mirror-sync-plan.mjs';
 import { executeD1MirrorSyncPlan } from '../src/d1-mirror-sync-executor.mjs';
 import { createWranglerD1MirrorTransport } from '../src/d1-mirror-wrangler-transport.mjs';
 import { readState } from '../src/state-store.mjs';
+import { deriveSystemdDeploymentIdentity } from '../src/systemd-deployment-identity.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STATE = join(ROOT, 'state.json');
@@ -41,12 +42,10 @@ function normalizeProcessResult(result, label) {
   if (!result || typeof result !== 'object') {
     throw new Error(`${label} returned no structured process result`);
   }
-
   const exitCode = result.exitCode ?? result.code;
   if (!Number.isSafeInteger(exitCode)) {
     throw new Error(`${label} process result must include an integer exitCode`);
   }
-
   return {
     exitCode,
     stdout: typeof result.stdout === 'string' ? result.stdout : '',
@@ -70,12 +69,7 @@ async function runChecked(runProcess, invocation, label) {
 }
 
 function fail(reason, extra = {}) {
-  return {
-    ok: false,
-    status: 'refused',
-    reason,
-    ...extra,
-  };
+  return { ok: false, status: 'refused', reason, ...extra };
 }
 
 function normalizedArgs(argv) {
@@ -85,31 +79,20 @@ function normalizedArgs(argv) {
 
 function parseEnvironment(argv) {
   const args = normalizedArgs(argv);
-
-  if (args.length === 2 && args[0] === '--env' && ENVIRONMENTS.has(args[1])) {
-    return args[1];
-  }
-
+  if (args.length === 2 && args[0] === '--env' && ENVIRONMENTS.has(args[1])) return args[1];
   if (args.length === 1 && args[0].startsWith('--env=')) {
     const env = args[0].slice('--env='.length);
     if (ENVIRONMENTS.has(env)) return env;
   }
-
   throw new Error('explicit environment required: --env preview|production');
 }
 
 async function gitValue(runProcess, args, label) {
-  return (await runChecked(
-    runProcess,
-    { command: 'git', args },
-    label,
-  )).trim();
+  return (await runChecked(runProcess, { command: 'git', args }, label)).trim();
 }
 
 function readRequiredLocalState() {
-  if (!existsSync(STATE)) {
-    throw new Error('state.json is missing');
-  }
+  if (!existsSync(STATE)) throw new Error('state.json is missing');
   return readState(STATE);
 }
 
@@ -124,46 +107,24 @@ export async function runD1MirrorSync({
   readLocalState = readRequiredLocalState,
   transportFactory = createWranglerD1MirrorTransport,
   envVars = process.env,
+  deriveDeploymentIdentity = deriveSystemdDeploymentIdentity,
 } = {}) {
-  if (typeof runProcess !== 'function') {
-    throw new TypeError('runProcess must be a function');
-  }
-  if (typeof readLocalState !== 'function') {
-    throw new TypeError('readLocalState must be a function');
-  }
-  if (typeof transportFactory !== 'function') {
-    throw new TypeError('transportFactory must be a function');
-  }
+  if (typeof runProcess !== 'function') throw new TypeError('runProcess must be a function');
+  if (typeof readLocalState !== 'function') throw new TypeError('readLocalState must be a function');
+  if (typeof transportFactory !== 'function') throw new TypeError('transportFactory must be a function');
+  if (typeof deriveDeploymentIdentity !== 'function') throw new TypeError('deriveDeploymentIdentity must be a function');
 
   const env = parseEnvironment(argv);
-
   if (env === 'production' && !PRODUCTION_SYNC_ACTIVATED) {
-    return fail('production_sync_not_activated', {
-      env,
-      writeAttempted: false,
-    });
+    return fail('production_sync_not_activated', { env, writeAttempted: false });
   }
 
-  const candidateSha = await gitValue(
-    runProcess,
-    ['rev-parse', 'HEAD'],
-    'git head check',
-  );
-  if (!SHA40_RE.test(candidateSha)) {
-    return fail('git_head_invalid', { env, writeAttempted: false });
-  }
+  const candidateSha = await gitValue(runProcess, ['rev-parse', 'HEAD'], 'git head check');
+  if (!SHA40_RE.test(candidateSha)) return fail('git_head_invalid', { env, writeAttempted: false });
 
-  const treeStatus = await gitValue(
-    runProcess,
-    ['status', '--porcelain', '--untracked-files=all'],
-    'git worktree check',
-  );
+  const treeStatus = await gitValue(runProcess, ['status', '--porcelain', '--untracked-files=all'], 'git worktree check');
   if (treeStatus.length !== 0) {
-    return fail('worktree_not_clean', {
-      env,
-      candidateSha: candidateSha.toLowerCase(),
-      writeAttempted: false,
-    });
+    return fail('worktree_not_clean', { env, candidateSha: candidateSha.toLowerCase(), writeAttempted: false });
   }
 
   let localState;
@@ -179,7 +140,6 @@ export async function runD1MirrorSync({
   }
 
   const transport = transportFactory({ runProcess });
-
   let authoritySnapshot;
   try {
     authoritySnapshot = await transport.readAuthority({ env });
@@ -199,7 +159,6 @@ export async function runD1MirrorSync({
     latestAuthorityEvent: authoritySnapshot?.latestEvent,
     currentMirrorText: null,
   });
-
   if (!authorityGate.ok) {
     return fail(authorityGate.reason, {
       env,
@@ -218,8 +177,8 @@ export async function runD1MirrorSync({
     });
   }
 
-  const localDeploymentId = deploymentIdentity(envVars);
-  if (localDeploymentId.length === 0) {
+  const explicitDeploymentId = deploymentIdentity(envVars);
+  if (explicitDeploymentId.length === 0) {
     return fail('local_deployment_identity_missing', {
       env,
       candidateSha: candidateSha.toLowerCase(),
@@ -228,22 +187,46 @@ export async function runD1MirrorSync({
     });
   }
 
-  if (localDeploymentId !== authorityGate.authority.deploymentId) {
+  if (explicitDeploymentId !== authorityGate.authority.deploymentId) {
     return fail('local_deployment_identity_mismatch', {
       env,
       candidateSha: candidateSha.toLowerCase(),
       authorityDeploymentId: authorityGate.authority.deploymentId,
-      localDeploymentId,
+      localDeploymentId: explicitDeploymentId,
+      writeAttempted: false,
+    });
+  }
+
+  let liveSystemdIdentity;
+  try {
+    liveSystemdIdentity = await deriveDeploymentIdentity({ runProcess });
+  } catch (error) {
+    return fail('systemd_deployment_identity_unavailable', {
+      env,
+      candidateSha: candidateSha.toLowerCase(),
+      detail: error instanceof Error ? error.message : String(error),
+      writeAttempted: false,
+    });
+  }
+
+  if (
+    !liveSystemdIdentity ||
+    typeof liveSystemdIdentity.deploymentId !== 'string' ||
+    liveSystemdIdentity.deploymentId !== explicitDeploymentId
+  ) {
+    return fail('systemd_deployment_identity_mismatch', {
+      env,
+      candidateSha: candidateSha.toLowerCase(),
+      authorityDeploymentId: authorityGate.authority.deploymentId,
+      localDeploymentId: explicitDeploymentId,
+      liveSystemdDeploymentId: liveSystemdIdentity?.deploymentId ?? null,
       writeAttempted: false,
     });
   }
 
   let currentMirrorText;
   try {
-    currentMirrorText = await transport.readMirror({
-      env,
-      key: authorityGate.targetKey,
-    });
+    currentMirrorText = await transport.readMirror({ env, key: authorityGate.targetKey });
   } catch (error) {
     return fail('mirror_read_failed_before', {
       env,
@@ -260,7 +243,6 @@ export async function runD1MirrorSync({
     latestAuthorityEvent: authoritySnapshot?.latestEvent,
     currentMirrorText,
   });
-
   if (!plan.ok) {
     return fail(plan.reason, {
       env,
@@ -270,14 +252,12 @@ export async function runD1MirrorSync({
     });
   }
 
-  const result = await executeD1MirrorSyncPlan({
-    plan,
-    transport,
-  });
-
+  const result = await executeD1MirrorSyncPlan({ plan, transport });
   return {
     ...result,
     candidateSha: candidateSha.toLowerCase(),
+    systemdUnit: liveSystemdIdentity.unit ?? null,
+    systemdUnitHash: liveSystemdIdentity.unitHash ?? null,
     planOperation: plan.operation,
     before: plan.before,
     local: plan.local,
@@ -291,9 +271,7 @@ function isDirectExecution() {
 
 if (isDirectExecution()) {
   try {
-    const result = await runD1MirrorSync({
-      argv: process.argv.slice(2),
-    });
+    const result = await runD1MirrorSync({ argv: process.argv.slice(2) });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (!result.ok) process.exitCode = 1;
   } catch (error) {

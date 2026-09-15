@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { evaluateMirrorSyncAuthority } from '../src/authority-ownership.mjs';
+import { deriveSystemdDeploymentIdentity } from '../src/systemd-deployment-identity.mjs';
 import { executePreviewNoneToLocalSystemdTransition } from '../src/d1-preview-authority-transition.mjs';
 import { compileWranglerD1Invocation, createWranglerD1MirrorTransport } from '../src/d1-mirror-wrangler-transport.mjs';
 
@@ -102,11 +103,12 @@ function assertExactLocalAuthority({ authority, candidateSha, deploymentId, tran
   }
 }
 
-export async function runPreviewLocalSystemdAuthorityTransition({ argv = [], runProcess = actualProcessRunner, now = () => new Date(), envVars = process.env } = {}) {
+export async function runPreviewLocalSystemdAuthorityTransition({ argv = [], runProcess = actualProcessRunner, now = () => new Date(), envVars = process.env, deriveDeploymentIdentity = deriveSystemdDeploymentIdentity } = {}) {
   if (typeof runProcess !== 'function') throw new TypeError('runProcess must be a function');
+  if (typeof deriveDeploymentIdentity !== 'function') throw new TypeError('deriveDeploymentIdentity must be a function');
   assertConfirmation(argv);
-  const deploymentId = deploymentIdentity(envVars);
-  if (deploymentId.length === 0) throw new Error('XQUEUE_DEPLOYMENT_ID is required');
+  const explicitDeploymentId = deploymentIdentity(envVars);
+  if (explicitDeploymentId.length === 0) throw new Error('XQUEUE_DEPLOYMENT_ID is required');
 
   const branch = await gitValue(runProcess, ['branch', '--show-current'], 'git branch check');
   if (branch !== EXPECTED_BRANCH) throw new Error(`preview authority transition requires branch ${EXPECTED_BRANCH}`);
@@ -114,6 +116,15 @@ export async function runPreviewLocalSystemdAuthorityTransition({ argv = [], run
   if (!/^[0-9a-f]{40}$/i.test(candidateSha)) throw new Error('git HEAD is not a 40-hex commit SHA');
   const treeStatus = await gitValue(runProcess, ['status', '--porcelain', '--untracked-files=all'], 'git worktree check');
   if (treeStatus.length !== 0) throw new Error('preview authority transition requires a clean worktree');
+
+  const liveSystemdIdentity = await deriveDeploymentIdentity({ runProcess });
+  if (!liveSystemdIdentity || typeof liveSystemdIdentity.deploymentId !== 'string' || liveSystemdIdentity.deploymentId.length === 0) {
+    throw new Error('live systemd deployment identity is unavailable');
+  }
+  if (explicitDeploymentId !== liveSystemdIdentity.deploymentId) {
+    throw new Error('XQUEUE_DEPLOYMENT_ID does not match the loaded xqueue.service identity');
+  }
+  const deploymentId = liveSystemdIdentity.deploymentId;
 
   const eventAt = canonicalEventAt(now);
   const transitionId = `preview-none-to-local-${candidateSha.toLowerCase()}`;
@@ -135,7 +146,7 @@ export async function runPreviewLocalSystemdAuthorityTransition({ argv = [], run
   const productionSchemaAfter = await readAuthoritySchema({ env: PRODUCTION_ENV, runProcess });
   assertProductionSchemaAbsent(productionSchemaAfter);
 
-  return { ok: true, status: 'confirmed_local_systemd', env: PREVIEW_ENV, owner: 'local-systemd', generation: 2, candidateSha: candidateSha.toLowerCase(), deploymentId, transitionId, eventAt, mirrorUnchanged: true, productionAuthoritySchemaAbsent: true };
+  return { ok: true, status: 'confirmed_local_systemd', env: PREVIEW_ENV, owner: 'local-systemd', generation: 2, candidateSha: candidateSha.toLowerCase(), deploymentId, systemdUnit: liveSystemdIdentity.unit ?? null, systemdUnitHash: liveSystemdIdentity.unitHash ?? null, transitionId, eventAt, mirrorUnchanged: true, productionAuthoritySchemaAbsent: true };
 }
 
 function isDirectExecution() {

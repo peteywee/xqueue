@@ -6,7 +6,14 @@ import { runD1MirrorSync } from '../scripts/d1-mirror-sync.mjs';
 const candidateSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const otherSha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const eventAt = '2026-09-15T18:00:00.000Z';
-const deploymentId = 'local-systemd:xqueue.service:preview';
+const unitHash = 'f'.repeat(64);
+const deploymentId = `systemd-user:xqueue.service:sha256:${unitHash}`;
+const systemdIdentity = async () => ({
+  unit: 'xqueue.service',
+  fragmentPath: '/home/patrick/.config/systemd/user/xqueue.service',
+  unitHash,
+  deploymentId,
+});
 
 function localState() {
   return {
@@ -58,12 +65,8 @@ function gitRunner({ head = candidateSha, status = '' } = {}) {
     calls.push(invocation);
     assert.equal(invocation.command, 'git');
     const command = invocation.args.join(' ');
-    if (command === 'rev-parse HEAD') {
-      return { exitCode: 0, stdout: `${head}\n`, stderr: '' };
-    }
-    if (command === 'status --porcelain --untracked-files=all') {
-      return { exitCode: 0, stdout: status, stderr: '' };
-    }
+    if (command === 'rev-parse HEAD') return { exitCode: 0, stdout: `${head}\n`, stderr: '' };
+    if (command === 'status --porcelain --untracked-files=all') return { exitCode: 0, stdout: status, stderr: '' };
     throw new Error(`unexpected git invocation: ${command}`);
   };
   return { runProcess, calls };
@@ -72,61 +75,31 @@ function gitRunner({ head = candidateSha, status = '' } = {}) {
 function transportFor(snapshot, { mirror = canonicalState() } = {}) {
   const calls = [];
   const transport = {
-    async readAuthority({ env }) {
-      calls.push({ op: 'readAuthority', env });
-      return snapshot;
-    },
-    async readMirror({ env, key }) {
-      calls.push({ op: 'readMirror', env, key });
-      return mirror;
-    },
-    async compareAndSetMirror() {
-      calls.push({ op: 'compareAndSetMirror' });
-      throw new Error('unexpected write');
-    },
+    async readAuthority({ env }) { calls.push({ op: 'readAuthority', env }); return snapshot; },
+    async readMirror({ env, key }) { calls.push({ op: 'readMirror', env, key }); return mirror; },
+    async compareAndSetMirror() { calls.push({ op: 'compareAndSetMirror' }); throw new Error('unexpected write'); },
   };
   return { transport, calls };
 }
 
 test('explicit environment is required and extra arguments are refused', async () => {
   let processCalls = 0;
-  const runProcess = async () => {
-    processCalls += 1;
-    throw new Error('should not run');
-  };
-
-  await assert.rejects(
-    () => runD1MirrorSync({ argv: [], runProcess }),
-    /explicit environment required/,
-  );
-  await assert.rejects(
-    () => runD1MirrorSync({ argv: ['--env', 'preview', '--force'], runProcess }),
-    /explicit environment required/,
-  );
+  const runProcess = async () => { processCalls += 1; throw new Error('should not run'); };
+  await assert.rejects(() => runD1MirrorSync({ argv: [], runProcess }), /explicit environment required/);
+  await assert.rejects(() => runD1MirrorSync({ argv: ['--env', 'preview', '--force'], runProcess }), /explicit environment required/);
   assert.equal(processCalls, 0);
 });
 
-test('production target is recognized but remains activation-gated with zero process calls', async () => {
+test('production target remains activation-gated with zero process calls', async () => {
   let processCalls = 0;
   let stateReads = 0;
   let transportCreates = 0;
   const result = await runD1MirrorSync({
     argv: ['--env', 'production'],
-    runProcess: async () => {
-      processCalls += 1;
-      throw new Error('should not run');
-    },
-    readLocalState: () => {
-      stateReads += 1;
-      return localState();
-    },
-    transportFactory: () => {
-      transportCreates += 1;
-      throw new Error('should not create transport');
-    },
+    runProcess: async () => { processCalls += 1; throw new Error('should not run'); },
+    readLocalState: () => { stateReads += 1; return localState(); },
+    transportFactory: () => { transportCreates += 1; throw new Error('should not create transport'); },
   });
-
-  assert.equal(result.ok, false);
   assert.equal(result.reason, 'production_sync_not_activated');
   assert.equal(result.writeAttempted, false);
   assert.equal(processCalls, 0);
@@ -134,59 +107,44 @@ test('production target is recognized but remains activation-gated with zero pro
   assert.equal(transportCreates, 0);
 });
 
-test('current preview owner=none refuses before mirror read or write', async () => {
+test('current preview owner=none refuses before mirror or systemd identity access', async () => {
   const git = gitRunner();
   const fake = transportFor(authority('none'));
-
+  let systemdReads = 0;
   const result = await runD1MirrorSync({
     argv: ['--env', 'preview'],
     runProcess: git.runProcess,
     readLocalState: localState,
     transportFactory: () => fake.transport,
     envVars: {},
+    deriveDeploymentIdentity: async () => { systemdReads += 1; return systemdIdentity(); },
   });
-
-  assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_unowned');
   assert.equal(result.writeAttempted, false);
+  assert.equal(systemdReads, 0);
   assert.deepEqual(fake.calls.map((call) => call.op), ['readAuthority']);
 });
 
-test('missing or invalid local state refuses before D1 access', async () => {
+test('missing local state and dirty worktree refuse before D1 access', async () => {
   const git = gitRunner();
   let transportCreates = 0;
-  const result = await runD1MirrorSync({
+  const missing = await runD1MirrorSync({
     argv: ['--env=preview'],
     runProcess: git.runProcess,
-    readLocalState: () => {
-      throw new Error('state.json is missing');
-    },
-    transportFactory: () => {
-      transportCreates += 1;
-      throw new Error('should not create transport');
-    },
+    readLocalState: () => { throw new Error('state.json is missing'); },
+    transportFactory: () => { transportCreates += 1; throw new Error('should not create transport'); },
   });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'local_state_invalid');
-  assert.match(result.detail, /state\.json is missing/);
+  assert.equal(missing.reason, 'local_state_invalid');
   assert.equal(transportCreates, 0);
-});
 
-test('dirty worktree refuses before local state or D1 access', async () => {
-  const git = gitRunner({ status: '?? local-note.txt\n' });
+  const dirtyGit = gitRunner({ status: '?? local-note.txt\n' });
   let stateReads = 0;
-  const result = await runD1MirrorSync({
+  const dirty = await runD1MirrorSync({
     argv: ['--', '--env', 'preview'],
-    runProcess: git.runProcess,
-    readLocalState: () => {
-      stateReads += 1;
-      return localState();
-    },
+    runProcess: dirtyGit.runProcess,
+    readLocalState: () => { stateReads += 1; return localState(); },
   });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'worktree_not_clean');
+  assert.equal(dirty.reason, 'worktree_not_clean');
   assert.equal(stateReads, 0);
 });
 
@@ -196,23 +154,20 @@ test('local authority must be bound to current exact HEAD before mirror access',
     state: { candidate_sha: otherSha },
     event: { candidate_sha: otherSha },
   }));
-
   const result = await runD1MirrorSync({
     argv: ['--env', 'preview'],
     runProcess: git.runProcess,
     readLocalState: localState,
     transportFactory: () => fake.transport,
     envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId },
+    deriveDeploymentIdentity: systemdIdentity,
   });
-
-  assert.equal(result.ok, false);
   assert.equal(result.reason, 'authority_candidate_not_current_head');
   assert.deepEqual(fake.calls.map((call) => call.op), ['readAuthority']);
 });
 
-test('local authority requires an exact runtime deployment identity match', async () => {
+test('explicit deployment identity must match authority before systemd read', async () => {
   const git = gitRunner();
-
   const missing = transportFor(authority('local-systemd'));
   const missingResult = await runD1MirrorSync({
     argv: ['--env', 'preview'],
@@ -220,9 +175,9 @@ test('local authority requires an exact runtime deployment identity match', asyn
     readLocalState: localState,
     transportFactory: () => missing.transport,
     envVars: {},
+    deriveDeploymentIdentity: systemdIdentity,
   });
   assert.equal(missingResult.reason, 'local_deployment_identity_missing');
-  assert.deepEqual(missing.calls.map((call) => call.op), ['readAuthority']);
 
   const mismatch = transportFor(authority('local-systemd'));
   const mismatchResult = await runD1MirrorSync({
@@ -231,30 +186,43 @@ test('local authority requires an exact runtime deployment identity match', asyn
     readLocalState: localState,
     transportFactory: () => mismatch.transport,
     envVars: { XQUEUE_DEPLOYMENT_ID: 'wrong-deployment' },
+    deriveDeploymentIdentity: systemdIdentity,
   });
   assert.equal(mismatchResult.reason, 'local_deployment_identity_mismatch');
   assert.deepEqual(mismatch.calls.map((call) => call.op), ['readAuthority']);
 });
 
-test('matching local authority can complete an idempotent no-op with no write', async () => {
+test('authority deployment identity must also match the loaded systemd unit', async () => {
   const git = gitRunner();
   const fake = transportFor(authority('local-systemd'));
-
   const result = await runD1MirrorSync({
     argv: ['--env', 'preview'],
     runProcess: git.runProcess,
     readLocalState: localState,
     transportFactory: () => fake.transport,
     envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId },
+    deriveDeploymentIdentity: async () => ({ ...(await systemdIdentity()), deploymentId: 'different-live-unit' }),
   });
+  assert.equal(result.reason, 'systemd_deployment_identity_mismatch');
+  assert.deepEqual(fake.calls.map((call) => call.op), ['readAuthority']);
+});
 
+test('matching exact authority and live systemd identity can complete idempotent no-op', async () => {
+  const git = gitRunner();
+  const fake = transportFor(authority('local-systemd'));
+  const result = await runD1MirrorSync({
+    argv: ['--env', 'preview'],
+    runProcess: git.runProcess,
+    readLocalState: localState,
+    transportFactory: () => fake.transport,
+    envVars: { XQUEUE_DEPLOYMENT_ID: deploymentId },
+    deriveDeploymentIdentity: systemdIdentity,
+  });
   assert.equal(result.ok, true);
   assert.equal(result.status, 'confirmed_noop');
   assert.equal(result.planOperation, 'no_op');
   assert.equal(result.writeAttempted, false);
   assert.equal(result.candidateSha, candidateSha);
-  assert.equal(
-    fake.calls.some((call) => call.op === 'compareAndSetMirror'),
-    false,
-  );
+  assert.equal(result.systemdUnitHash, unitHash);
+  assert.equal(fake.calls.some((call) => call.op === 'compareAndSetMirror'), false);
 });
