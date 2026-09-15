@@ -53,6 +53,7 @@ function publishingSnapshot() {
   return {
     raw: JSON.stringify(ledger),
     ledger,
+    publicationStateGeneration: 2,
   };
 }
 
@@ -77,14 +78,19 @@ test('confirmed_not_posted remains distinct and returns content to scheduled sta
 
   assert.equal(result.classification, 'confirmed_not_posted');
   assert.equal(result.reconciliationRequired, false);
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.ledger.inflight, null);
   assert.match(captured[2].sql, /status = 'scheduled'/);
+  assert.match(captured[2].sql, /generation = generation \+ 1/);
+  assert.match(captured[2].sql, /generation = \?6/);
+  assert.match(captured[2].sql, /changes\(\) = 1/);
   assert.match(captured[2].sql, /attempt_id = NULL/);
   assert.equal(captured[4].params[1], 'confirmed_not_posted');
 
   const detail = JSON.parse(captured[4].params[3]);
   assert.equal(detail.classification, 'confirmed_not_posted');
   assert.equal(detail.automaticRetryAllowed, false);
+  assert.equal(detail.stateGeneration, 3);
 });
 
 test('ambiguous outcome remains needs_reconciliation and retains inflight evidence', async () => {
@@ -107,9 +113,12 @@ test('ambiguous outcome remains needs_reconciliation and retains inflight eviden
   );
 
   assert.equal(result.reconciliationRequired, true);
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.ledger.inflight.status, 'needs_reconciliation');
   assert.match(captured[2].sql, /status = 'needs_reconciliation'/);
+  assert.match(captured[2].sql, /generation = generation \+ 1/);
   assert.equal(captured[4].params[1], 'needs_reconciliation');
+  assert.equal(JSON.parse(captured[4].params[3]).stateGeneration, 3);
 });
 
 test('unknown classifier output fails closed to reconciliation', async () => {
@@ -129,5 +138,6 @@ test('unknown classifier output fails closed to reconciliation', async () => {
   );
 
   assert.equal(result.reconciliationRequired, true);
+  assert.equal(result.publicationStateGeneration, 3);
   assert.equal(result.ledger.inflight.status, 'needs_reconciliation');
 });
