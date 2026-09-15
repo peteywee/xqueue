@@ -10,12 +10,7 @@ const SHA40_RE = /^[0-9a-f]{40}$/i;
 const SHA64_RE = /^[0-9a-f]{64}$/i;
 
 function fail(status, reason, extra = {}) {
-  return {
-    ok: false,
-    status,
-    reason,
-    ...extra,
-  };
+  return { ok: false, status, reason, ...extra };
 }
 
 function validCounts(value) {
@@ -26,23 +21,17 @@ function validCounts(value) {
 }
 
 function sameCounts(left, right) {
-  return validCounts(left) &&
-    validCounts(right) &&
+  return validCounts(left) && validCounts(right) &&
     left.posted === right.posted &&
     left.skipped === right.skipped &&
     left.inflight === right.inflight;
 }
 
 function validatePlan(plan) {
-  if (!plan || typeof plan !== 'object' || plan.ok !== true) {
-    return 'invalid_plan';
-  }
-
+  if (!plan || typeof plan !== 'object' || plan.ok !== true) return 'invalid_plan';
   if (!ENVIRONMENTS.has(plan.env)) return 'invalid_plan_environment';
   if (plan.targetKey !== TARGET_KEY) return 'invalid_plan_target';
-  if (!['no_op', 'replace_mirror'].includes(plan.operation)) {
-    return 'invalid_plan_operation';
-  }
+  if (!['no_op', 'replace_mirror'].includes(plan.operation)) return 'invalid_plan_operation';
 
   if (
     plan.authority?.owner !== 'local-systemd' ||
@@ -54,17 +43,13 @@ function validatePlan(plan) {
     !SHA40_RE.test(plan.authority.candidateSha) ||
     typeof plan.authority?.deploymentId !== 'string' ||
     plan.authority.deploymentId.trim().length === 0
-  ) {
-    return 'invalid_plan_authority';
-  }
+  ) return 'invalid_plan_authority';
 
   if (
     typeof plan.local?.hash !== 'string' ||
     !SHA64_RE.test(plan.local.hash) ||
     !validCounts(plan.local.counts)
-  ) {
-    return 'invalid_plan_local_evidence';
-  }
+  ) return 'invalid_plan_local_evidence';
 
   if (
     typeof plan.expectedReadback?.hash !== 'string' ||
@@ -72,14 +57,9 @@ function validatePlan(plan) {
     !validCounts(plan.expectedReadback.counts) ||
     plan.expectedReadback.hash !== plan.local.hash ||
     !sameCounts(plan.expectedReadback.counts, plan.local.counts)
-  ) {
-    return 'invalid_plan_readback_evidence';
-  }
+  ) return 'invalid_plan_readback_evidence';
 
-  if (typeof plan.before?.exists !== 'boolean') {
-    return 'invalid_plan_before_evidence';
-  }
-
+  if (typeof plan.before?.exists !== 'boolean') return 'invalid_plan_before_evidence';
   if (plan.before.exists) {
     if (typeof plan.before.rawHash !== 'string' || !SHA64_RE.test(plan.before.rawHash)) {
       return 'invalid_plan_before_evidence';
@@ -90,23 +70,20 @@ function validatePlan(plan) {
 
   if (plan.operation === 'no_op') {
     if (plan.write !== null) return 'invalid_noop_write';
+    if (!plan.before.exists || plan.before.rawHash !== plan.local.hash) {
+      return 'invalid_noop_before_evidence';
+    }
   } else {
-    if (
-      !plan.write ||
-      plan.write.key !== TARGET_KEY ||
-      typeof plan.write.value !== 'string'
-    ) {
+    if (!plan.write || plan.write.key !== TARGET_KEY || typeof plan.write.value !== 'string') {
       return 'invalid_plan_write';
     }
-
     const writeEvidence = inspectD1MirrorText(plan.write.value);
     if (
       writeEvidence.valid !== true ||
       writeEvidence.hash !== plan.local.hash ||
+      writeEvidence.rawHash !== plan.local.hash ||
       !sameCounts(writeEvidence.counts, plan.local.counts)
-    ) {
-      return 'invalid_plan_write_evidence';
-    }
+    ) return 'invalid_plan_write_evidence';
   }
 
   return null;
@@ -116,9 +93,7 @@ function validateTransport(transport, operation) {
   if (!transport || typeof transport !== 'object') return false;
   if (typeof transport.readAuthority !== 'function') return false;
   if (typeof transport.readMirror !== 'function') return false;
-  if (operation === 'replace_mirror' && typeof transport.compareAndSetMirror !== 'function') {
-    return false;
-  }
+  if (operation === 'replace_mirror' && typeof transport.compareAndSetMirror !== 'function') return false;
   return true;
 }
 
@@ -143,27 +118,15 @@ async function readAndVerifyAuthority(transport, plan, phase) {
     state: snapshot?.state,
     latestEvent: snapshot?.latestEvent,
   });
-
-  if (!authority.allowed) {
-    return fail('refused', authority.reason, { phase, authority });
-  }
-
+  if (!authority.allowed) return fail('refused', authority.reason, { phase, authority });
   if (!authorityMatchesPlan(authority, plan)) {
-    return fail('refused', 'authority_changed_since_plan', {
-      phase,
-      authority,
-    });
+    return fail('refused', 'authority_changed_since_plan', { phase, authority });
   }
-
   return { ok: true, authority };
 }
 
 function rawMirrorEvidence(value) {
-  const inspected = inspectD1MirrorText(value);
-  return {
-    value,
-    inspected,
-  };
+  return { value, inspected: inspectD1MirrorText(value) };
 }
 
 function matchesPlannedBefore(current, planned) {
@@ -172,33 +135,37 @@ function matchesPlannedBefore(current, planned) {
   return current.inspected.rawHash === planned.rawHash;
 }
 
-function readbackMatchesPlan(readback, plan) {
+function semanticReadbackMatches(readback, plan) {
   return readback.inspected.valid === true &&
     readback.inspected.hash === plan.expectedReadback.hash &&
     sameCounts(readback.inspected.counts, plan.expectedReadback.counts);
 }
 
+function readbackMatchesPlan(readback, plan) {
+  if (!semanticReadbackMatches(readback, plan)) return false;
+  if (plan.operation === 'replace_mirror') {
+    return typeof plan.write?.value === 'string' && readback.value === plan.write.value;
+  }
+  if (plan.operation === 'no_op') {
+    return matchesPlannedBefore(readback, plan.before) &&
+      readback.inspected.rawHash === plan.local.hash;
+  }
+  return false;
+}
+
 export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
   const planError = validatePlan(plan);
   if (planError) return fail('refused', planError);
-
   if (!validateTransport(transport, plan.operation)) {
     return fail('refused', 'invalid_injected_transport');
   }
 
-  const beforeAuthority = await readAndVerifyAuthority(
-    transport,
-    plan,
-    'before',
-  );
+  const beforeAuthority = await readAndVerifyAuthority(transport, plan, 'before');
   if (!beforeAuthority.ok) return beforeAuthority;
 
   let currentValue;
   try {
-    currentValue = await transport.readMirror({
-      env: plan.env,
-      key: plan.targetKey,
-    });
+    currentValue = await transport.readMirror({ env: plan.env, key: plan.targetKey });
   } catch {
     return fail('refused', 'mirror_read_failed_before');
   }
@@ -206,17 +173,9 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
   const current = rawMirrorEvidence(currentValue);
 
   if (plan.operation === 'no_op') {
-    if (!readbackMatchesPlan(current, plan)) {
-      return fail('refused', 'noop_plan_stale');
-    }
-
-    const afterAuthority = await readAndVerifyAuthority(
-      transport,
-      plan,
-      'after',
-    );
+    if (!readbackMatchesPlan(current, plan)) return fail('refused', 'noop_plan_stale');
+    const afterAuthority = await readAndVerifyAuthority(transport, plan, 'after');
     if (!afterAuthority.ok) return afterAuthority;
-
     return {
       ok: true,
       status: 'confirmed_noop',
@@ -242,7 +201,6 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
 
   let writeResult = null;
   let writeReportedError = false;
-
   try {
     writeResult = await transport.compareAndSetMirror({
       env: plan.env,
@@ -261,10 +219,7 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
 
   let readbackValue;
   try {
-    readbackValue = await transport.readMirror({
-      env: plan.env,
-      key: plan.targetKey,
-    });
+    readbackValue = await transport.readMirror({ env: plan.env, key: plan.targetKey });
   } catch {
     return fail('indeterminate', 'readback_unavailable_after_write', {
       writeReportedError,
@@ -273,28 +228,26 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
   }
 
   const readback = rawMirrorEvidence(readbackValue);
-
   if (!readbackMatchesPlan(readback, plan)) {
     return fail('indeterminate', 'readback_mismatch_after_write', {
       writeReportedError,
       writeResult,
       expectedHash: plan.expectedReadback.hash,
+      expectedRawHash: sha256Text(plan.write.value),
       actualHash: readback.inspected.hash,
+      actualRawHash: readback.inspected.rawHash,
       readbackValid: readback.inspected.valid,
     });
   }
 
-  const afterAuthority = await readAndVerifyAuthority(
-    transport,
-    plan,
-    'after',
-  );
+  const afterAuthority = await readAndVerifyAuthority(transport, plan, 'after');
   if (!afterAuthority.ok) {
     return fail('indeterminate', 'authority_changed_during_sync', {
       authorityFailure: afterAuthority,
       writeReportedError,
       writeResult,
       readbackHash: readback.inspected.hash,
+      readbackRawHash: readback.inspected.rawHash,
     });
   }
 
@@ -309,6 +262,7 @@ export async function executeD1MirrorSyncPlan({ plan, transport } = {}) {
     authorityGeneration: plan.authority.generation,
     authorityDeploymentId: plan.authority.deploymentId,
     hash: readback.inspected.hash,
+    rawHash: readback.inspected.rawHash,
     counts: readback.inspected.counts,
     writeAttempted: true,
     writeReportedError,

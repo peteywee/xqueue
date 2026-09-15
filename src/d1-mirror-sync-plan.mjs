@@ -23,11 +23,7 @@ function counts(state) {
 }
 
 function invalid(reason, extra = {}) {
-  return {
-    ok: false,
-    reason,
-    ...extra,
-  };
+  return { ok: false, reason, ...extra };
 }
 
 export function inspectD1MirrorText(text) {
@@ -94,9 +90,7 @@ export function compileD1MirrorSyncPlan({
   latestAuthorityEvent,
   currentMirrorText = null,
 } = {}) {
-  if (!ENVIRONMENTS.has(env)) {
-    return invalid('explicit_environment_required');
-  }
+  if (!ENVIRONMENTS.has(env)) return invalid('explicit_environment_required');
 
   let normalizedLocal;
   try {
@@ -121,16 +115,17 @@ export function compileD1MirrorSyncPlan({
     state: authorityState,
     latestEvent: latestAuthorityEvent,
   });
-
-  if (!authority.allowed) {
-    return invalid(authority.reason, { authority });
-  }
+  if (!authority.allowed) return invalid(authority.reason, { authority });
 
   const canonicalText = canonicalState(normalizedLocal);
   const localHash = sha256Text(canonicalText);
   const before = inspectD1MirrorText(currentMirrorText);
   const afterCounts = counts(normalizedLocal);
-  const noOp = before.valid === true && before.hash === localHash;
+
+  // A no-op requires exact canonical bytes, not merely semantically equivalent JSON.
+  // This keeps the mirror converged to one deterministic representation and makes
+  // exact readback evidence meaningful.
+  const noOp = before.valid === true && currentMirrorText === canonicalText;
 
   return {
     ok: true,
