@@ -28,6 +28,7 @@
     "cf:preview:d1-diagnostic": "bash scripts/cloudflare-preview-d1-diagnostic.sh",
     "cf:preview:mirror-diagnostic": "node scripts/d1-mirror-preview-diagnostic.mjs",
     "cf:preview:authority-bootstrap": "node scripts/d1-preview-authority-bootstrap.mjs",
+    "sync:d1-mirror": "node scripts/d1-mirror-sync.mjs",
     "runtime:health": "node src/cli.mjs runtime-health",
     "tsal:runtime-evidence": "node scripts/tsal-runtime-evidence.mjs",
     "tsal:deployment-evidence": "node scripts/tsal-deployment-evidence.mjs",
@@ -46,7 +47,7 @@
     "author:approve": "node scripts/owner-approval-cli.mjs approve",
     "author:promotion-plan": "node scripts/owner-approval-cli.mjs promotion-plan",
     "verify:authoring": "node --test test/authoring-*.test.mjs",
-    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/finalize-xqueue-1.1.0.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/d1-mirror-preview-diagnostic.mjs scripts/d1-preview-authority-bootstrap.mjs scripts/tsal-runtime-evidence.mjs scripts/tsal-deployment-evidence.mjs cloudflare/src/scheduler-liveness.mjs scripts/authoring-cli.mjs scripts/owner-approval-cli.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
+    "verify": "bash -n scripts/production-preflight.sh scripts/cloudflare-preview-d1-diagnostic.sh scripts/finalize-xqueue-1.1.0.sh deploy/install-systemd-user.sh deploy/systemd/check-runtime.sh && node --check scripts/build-production-queue.mjs scripts/build-cloudflare-media-manifest.mjs scripts/d1-mirror-preview-diagnostic.mjs scripts/d1-preview-authority-bootstrap.mjs scripts/d1-mirror-sync.mjs scripts/tsal-runtime-evidence.mjs scripts/tsal-deployment-evidence.mjs cloudflare/src/scheduler-liveness.mjs scripts/authoring-cli.mjs scripts/owner-approval-cli.mjs && pnpm test && pnpm validate && node scripts/xqueue-health.mjs --repair && node scripts/xqueue-health.mjs && node scripts/authority-boundary-audit.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
