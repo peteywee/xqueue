@@ -131,7 +131,7 @@ export function compileMirrorCompareAndSetSql({
   assertSqlText(nextValue, 'nextValue');
 
   const nextEvidence = inspectD1MirrorText(nextValue);
-  if (!nextEvidence.valid) {
+  if (!nextEvidence.valid || nextEvidence.canonicalText !== nextValue) {
     throw new TypeError('nextValue must be a valid normalized XQueue state snapshot');
   }
 
