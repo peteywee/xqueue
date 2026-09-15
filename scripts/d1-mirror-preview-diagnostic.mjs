@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { evaluateMirrorSyncAuthority } from '../src/authority-ownership.mjs';
 import { createWranglerD1MirrorTransport } from '../src/d1-mirror-wrangler-transport.mjs';
 import { inspectD1MirrorText } from '../src/d1-mirror-sync-plan.mjs';
 
@@ -38,6 +39,15 @@ export async function runPreviewMirrorDiagnostic({ runProcess = actualProcessRun
 
   const transport = createWranglerD1MirrorTransport({ runProcess });
   const authority = await transport.readAuthority({ env: PREVIEW_ENV });
+  const authorityEvaluation = evaluateMirrorSyncAuthority({
+    state: authority.state,
+    latestEvent: authority.latestEvent,
+  });
+
+  if (!authorityEvaluation.allowed) {
+    throw new Error(`preview mirror authority refused: ${authorityEvaluation.reason}`);
+  }
+
   const mirrorValue = await transport.readMirror({
     env: PREVIEW_ENV,
     key: TARGET_KEY,
@@ -48,7 +58,7 @@ export async function runPreviewMirrorDiagnostic({ runProcess = actualProcessRun
     ok: true,
     mode: 'read_only_preview_diagnostic',
     env: PREVIEW_ENV,
-    authority,
+    authority: authorityEvaluation,
     mirror: {
       exists: mirror.exists,
       rawHash: mirror.rawHash,
