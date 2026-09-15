@@ -49,6 +49,7 @@ test('stable local-systemd ownership authorizes mirror sync', () => {
     generation: 7,
     transitionId: 'authority-transition-7',
     candidateSha,
+    deploymentId: 'local-systemd@candidate-7',
   });
 });
 
@@ -77,6 +78,15 @@ test('transitioning ownership refuses mirror sync', () => {
   });
   assert.equal(result.allowed, false);
   assert.equal(result.reason, 'authority_transition_unresolved');
+});
+
+test('stable local authority without deployment identity refuses mirror sync', () => {
+  const result = evaluateMirrorSyncAuthority({
+    state: state({ deployment_id: null }),
+    latestEvent: event({ deployment_id: null }),
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, 'authority_local_deployment_missing');
 });
 
 test('unknown owner fails structural validation', () => {
