@@ -13,6 +13,9 @@ export const BASE_MIGRATIONS = Object.freeze([
 ]);
 
 export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';
+export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
+  '0007_continuous_queue_intake.sql',
+]);
 
 export function sha256Json(value) {
   return createHash('sha256')
@@ -130,23 +133,37 @@ export function assertMigrationLedger(names, { shadowMayExist = true } = {}) {
     throw new Error('preview migration ledger contains duplicate names');
   }
 
-  const withoutShadow = names.filter((name) => name !== SHADOW_MIGRATION);
-  if (JSON.stringify(withoutShadow) !== JSON.stringify(expectedBase)) {
+  const base = names.slice(0, expectedBase.length);
+  if (JSON.stringify(base) !== JSON.stringify(expectedBase)) {
     throw new Error(
       `preview migration ledger is not the exact 0001-0005 baseline: ${JSON.stringify(names)}`,
     );
   }
 
-  const hasShadow = names.includes(SHADOW_MIGRATION);
+  const tail = names.slice(expectedBase.length);
+  const validTails = [
+    [],
+    [SHADOW_MIGRATION],
+    [SHADOW_MIGRATION, ...KNOWN_POST_SHADOW_MIGRATIONS],
+  ];
+
+  if (!validTails.some((expected) => JSON.stringify(tail) === JSON.stringify(expected))) {
+    throw new Error(
+      `preview migration ledger has an unknown or reordered tail: ${JSON.stringify(names)}`,
+    );
+  }
+
+  const hasShadow = tail.includes(SHADOW_MIGRATION);
   if (!shadowMayExist && hasShadow) {
     throw new Error('shadow migration is already applied unexpectedly');
   }
 
-  if (hasShadow && names.at(-1) !== SHADOW_MIGRATION) {
-    throw new Error('shadow migration is not the latest preview migration');
-  }
-
-  return Object.freeze({ hasShadow });
+  return Object.freeze({
+    hasShadow,
+    postShadowMigrations: tail.filter((name) =>
+      KNOWN_POST_SHADOW_MIGRATIONS.includes(name),
+    ),
+  });
 }
 
 export function classifyShadowCounts(row, expected = 180) {

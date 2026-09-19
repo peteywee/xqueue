@@ -16,6 +16,7 @@ const SHARED = [
   '0003_publication_lease.sql',
   '0005_publication_state_generation.sql',
   '0006_continuous_queue_shadow.sql',
+  '0007_continuous_queue_intake.sql',
 ];
 
 test('default production config uses the production-safe migration lane', () => {

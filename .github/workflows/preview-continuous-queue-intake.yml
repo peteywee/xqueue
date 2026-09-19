@@ -1,0 +1,106 @@
+name: Preview Continuous Queue Intake Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preview-continuous-queue-intake.yml'
+      - 'cloudflare/migrations/0007_continuous_queue_intake.sql'
+      - 'scripts/continuous-queue-intake.mjs'
+      - 'src/continuous-queue-intake.mjs'
+      - 'test/continuous-queue-intake.test.mjs'
+      - 'test/continuous-queue-intake-schema.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-continuous-queue-intake
+  cancel-in-progress: false
+
+jobs:
+  prove-preview-intake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove intake guards and migration semantics
+        run: |
+          node --test \
+            test/continuous-queue-intake.test.mjs \
+            test/continuous-queue-intake-schema.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/d1-preview-shadow-proof.test.mjs
+
+      - name: Apply preview-only intake schema
+        run: pnpm preview:intake:migrate
+
+      - name: Snapshot preview intake state before dry run
+        run: |
+          pnpm wrangler d1 execute xqueue-preview \
+            --config wrangler.preview.jsonc \
+            --remote --yes --json \
+            --command "SELECT generation,resolved_at,pending_operation_id,last_completed_operation_id,(SELECT COUNT(*) FROM queue_content) AS content_count,(SELECT COUNT(*) FROM queue_assignments WHERE status='active') AS active_assignment_count,(SELECT COUNT(*) FROM queue_intake_operations) AS intake_operation_count FROM queue_intake_frontier WHERE singleton_id=1;" \
+            > /tmp/xqueue-intake-before.json
+
+          node -e "const fs=require('fs'); const d=JSON.parse(fs.readFileSync('/tmp/xqueue-intake-before.json','utf8')); const r=d?.[0]?.results?.[0]; if(!r) throw new Error('missing frontier row'); if(r.pending_operation_id!==null) throw new Error('preview intake frontier is already pending'); console.log(JSON.stringify(r,null,2));"
+
+      - name: Prove single-item dry run without mutation
+        run: |
+          cat > /tmp/xqueue-intake-proof.json <<'JSON'
+          {
+            "content_id": "CQ-PREVIEW-DRY-RUN-PROOF",
+            "pillar": "A",
+            "title": "Preview dry-run proof",
+            "body": "This is a preview-only dry-run fixture for the governed XQueue intake path. It must never be written by this workflow.",
+            "source_ref": "github-actions:#89"
+          }
+          JSON
+
+          pnpm queue:add -- --file /tmp/xqueue-intake-proof.json \
+            > /tmp/xqueue-preview-intake-plan.json
+
+          cat /tmp/xqueue-preview-intake-plan.json
+
+      - name: Prove dry run left preview unchanged
+        run: |
+          pnpm wrangler d1 execute xqueue-preview \
+            --config wrangler.preview.jsonc \
+            --remote --yes --json \
+            --command "SELECT generation,resolved_at,pending_operation_id,last_completed_operation_id,(SELECT COUNT(*) FROM queue_content) AS content_count,(SELECT COUNT(*) FROM queue_assignments WHERE status='active') AS active_assignment_count,(SELECT COUNT(*) FROM queue_intake_operations) AS intake_operation_count FROM queue_intake_frontier WHERE singleton_id=1;" \
+            > /tmp/xqueue-intake-after.json
+
+          node -e "const fs=require('fs'); const rows=p=>JSON.parse(fs.readFileSync(p,'utf8'))?.[0]?.results; const a=rows('/tmp/xqueue-intake-before.json'); const b=rows('/tmp/xqueue-intake-after.json'); if(JSON.stringify(a)!==JSON.stringify(b)) throw new Error('preview dry run mutated intake state'); console.log('PREVIEW INTAKE DRY RUN: UNCHANGED');"
+
+      - name: Upload preview intake evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-intake-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            /tmp/xqueue-intake-before.json
+            /tmp/xqueue-preview-intake-plan.json
+            /tmp/xqueue-intake-after.json
+          if-no-files-found: error

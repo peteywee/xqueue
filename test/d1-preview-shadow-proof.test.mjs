@@ -118,12 +118,24 @@ test('all Wrangler D1 mutation/read argv are hard-pinned to preview target', () 
 test('migration ledger accepts only exact 0001-0005 baseline with optional terminal 0006', () => {
   assert.deepEqual(
     assertMigrationLedger([...BASE_MIGRATIONS]),
-    { hasShadow: false },
+    { hasShadow: false, postShadowMigrations: [] },
   );
 
   assert.deepEqual(
     assertMigrationLedger([...BASE_MIGRATIONS, SHADOW_MIGRATION]),
-    { hasShadow: true },
+    { hasShadow: true, postShadowMigrations: [] },
+  );
+
+  assert.deepEqual(
+    assertMigrationLedger([
+      ...BASE_MIGRATIONS,
+      SHADOW_MIGRATION,
+      '0007_continuous_queue_intake.sql',
+    ]),
+    {
+      hasShadow: true,
+      postShadowMigrations: ['0007_continuous_queue_intake.sql'],
+    },
   );
 
   assert.throws(
@@ -135,7 +147,7 @@ test('migration ledger accepts only exact 0001-0005 baseline with optional termi
       ...BASE_MIGRATIONS,
       '9999_unknown.sql',
     ]),
-    /exact 0001-0005 baseline/,
+    /exact 0001-0005 baseline|unknown or reordered tail/,
   );
   assert.throws(
     () => assertMigrationLedger([
@@ -143,7 +155,7 @@ test('migration ledger accepts only exact 0001-0005 baseline with optional termi
       SHADOW_MIGRATION,
       '0007_bad.sql',
     ]),
-    /exact 0001-0005 baseline|latest/,
+    /exact 0001-0005 baseline|unknown or reordered tail/,
   );
 });
 
