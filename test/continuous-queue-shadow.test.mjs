@@ -44,7 +44,7 @@ test('production shadow maps all 180 posts one-to-one with exact digest and UTC 
   const { policy, queue } = productionQueue();
   const model = buildContinuousQueueShadow(queue, {
     policyVersion: policy.version,
-    targetAccount: 'PatrickCra94338',
+    targetAccount: 'x-primary',
   });
 
   assert.equal(model.count, 180);
@@ -52,7 +52,7 @@ test('production shadow maps all 180 posts one-to-one with exact digest and UTC 
   assert.equal(model.revisions.length, 180);
   assert.equal(model.assignments.length, 180);
   assert.equal(model.policy_version, policy.version);
-  assert.equal(model.target_account, 'PatrickCra94338');
+  assert.equal(model.target_account, 'x-primary');
 
   const contentById = new Map(model.content.map((row) => [row.content_id, row]));
   const revisionById = new Map(model.revisions.map((row) => [row.content_id, row]));
@@ -174,7 +174,7 @@ test('shadow builder fails closed on duplicate ids, duplicate slots, missing UTC
   const { policy, queue } = productionQueue();
   const options = {
     policyVersion: policy.version,
-    targetAccount: 'PatrickCra94338',
+    targetAccount: 'x-primary',
   };
 
   const duplicateId = queue.map((post) => ({ ...post }));
