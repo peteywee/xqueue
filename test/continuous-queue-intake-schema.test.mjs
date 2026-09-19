@@ -54,6 +54,7 @@ test('0007 creates durable frontier and generated intake SQL appends without mov
   );
 
   db.exec(text('cloudflare/migrations/0007_continuous_queue_intake.sql'));
+  db.exec(text('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
 
   const [frontier] = rows(db, 'SELECT * FROM queue_intake_frontier;');
   assert.equal(frontier.generation, 1);
