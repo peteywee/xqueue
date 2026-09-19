@@ -1,85 +1,54 @@
-const FORMATTERS = new Map();
+import { resolveUniqueWallClock } from './schedule-slot.mjs';
 
-function formatter(timeZone) {
-  let f = FORMATTERS.get(timeZone);
-
-  if (!f) {
-    f = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-    });
-
-    FORMATTERS.set(timeZone, f);
+function committedInstant(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('scheduledAt must be a canonical UTC ISO instant');
   }
 
-  return f;
-}
-
-function partsAt(date, timeZone) {
-  const parts = {};
-
-  for (const part of formatter(timeZone).formatToParts(date)) {
-    if (part.type !== 'literal') {
-      parts[part.type] = Number(part.value);
-    }
+  const epochMs = Date.parse(value);
+  if (!Number.isFinite(epochMs)) {
+    throw new Error('scheduledAt must be a canonical UTC ISO instant');
   }
 
-  return parts;
+  const canonical = new Date(epochMs).toISOString();
+  if (canonical !== value) {
+    throw new Error('scheduledAt must be canonical ISO-8601 UTC with milliseconds');
+  }
+
+  return new Date(epochMs);
 }
 
+/**
+ * Return the exact committed publication instant.
+ *
+ * New assignments persist scheduledAt when they are created. The wall-clock
+ * fallback is retained only so older generated/test fixtures can be read during
+ * migration; it uses the strict unique resolver and therefore rejects DST gaps
+ * and ambiguous repeated hours instead of guessing.
+ */
 export function scheduledAt({
+  scheduledAt: persistedScheduledAt,
   scheduledDate,
   scheduledTime,
   timezone,
+  utcOffsetMinutes = null,
 }) {
+  if (persistedScheduledAt !== undefined && persistedScheduledAt !== null) {
+    return committedInstant(persistedScheduledAt);
+  }
+
   if (!scheduledDate || !scheduledTime || !timezone) {
     throw new Error(
-      'scheduledDate, scheduledTime and timezone are required'
+      'scheduledDate, scheduledTime and timezone are required',
     );
   }
 
-  const [year, month, day] =
-    scheduledDate.split('-').map(Number);
-
-  const [hour, minute] =
-    scheduledTime.split(':').map(Number);
-
-  const target =
-    Date.UTC(year, month - 1, day, hour, minute, 0);
-
-  let guess = target;
-
-  // Convert the desired wall-clock time in q.timezone to UTC.
-  // Multiple passes correctly resolve normal DST offset changes.
-  for (let i = 0; i < 4; i++) {
-    const p = partsAt(new Date(guess), timezone);
-
-    const represented =
-      Date.UTC(
-        p.year,
-        p.month - 1,
-        p.day,
-        p.hour,
-        p.minute,
-        p.second,
-      );
-
-    const delta = target - represented;
-
-    if (delta === 0) {
-      return new Date(guess);
-    }
-
-    guess += delta;
-  }
-
-  return new Date(guess);
+  return resolveUniqueWallClock({
+    scheduledDate,
+    scheduledTime,
+    timezone,
+    utcOffsetMinutes,
+  });
 }
 
 export function isDue(post, now = new Date()) {

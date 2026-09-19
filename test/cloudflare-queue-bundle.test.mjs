@@ -111,7 +111,7 @@ test('computed sha256 equals the declared and the canonical literal', async () =
   assert.equal(DECLARED_QUEUE_SHA256, CANONICAL_SHA256);
 });
 
-test('canonical text is byte-identical to a live regeneration from content + policy', () => {
+test('live regeneration preserves the exact legacy canonical queue projection', () => {
   const policy = JSON.parse(
     readFileSync(join(ROOT, 'config', 'schedule-policy.json'), 'utf8'),
   );
@@ -124,11 +124,25 @@ test('canonical text is byte-identical to a live regeneration from content + pol
     deferToEnd: policy.deferToEnd ?? [],
   });
 
-  const live = `${JSON.stringify(queue, null, 2)}\n`;
+  // #52 adds committed UTC evidence without activating a changed production
+  // bundle in this PR. Removing only scheduledAt must reproduce the exact
+  // currently-authoritative canonical bytes, proving IDs/content/local slots
+  // did not move.
+  const legacyProjection = queue.map(({ scheduledAt, ...post }) => post);
+  const liveLegacy = `${JSON.stringify(legacyProjection, null, 2)}\n`;
 
-  assert.equal(live.length, CANONICAL_QUEUE_JSON.length);
-  assert.equal(live, CANONICAL_QUEUE_JSON);
-  assert.equal(Buffer.byteLength(live, 'utf8'), 160385);
+  assert.equal(liveLegacy.length, CANONICAL_QUEUE_JSON.length);
+  assert.equal(liveLegacy, CANONICAL_QUEUE_JSON);
+
+  // Separately prove every newly generated assignment carries a canonical
+  // committed UTC instant. The production bundle activation is a later,
+  // explicit step because adding this field changes canonical queue bytes.
+  for (const post of queue) {
+    assert.equal(typeof post.scheduledAt, 'string', `${post.id}: scheduledAt missing`);
+    const epochMs = Date.parse(post.scheduledAt);
+    assert.equal(Number.isFinite(epochMs), true, `${post.id}: scheduledAt invalid`);
+    assert.equal(new Date(epochMs).toISOString(), post.scheduledAt);
+  }
 });
 
 test('deferred tail is exactly the seven policy-deferred posts with their exact schedules', async () => {

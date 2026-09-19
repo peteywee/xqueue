@@ -35,6 +35,7 @@ export const STRUCTURAL_FAILURES = Object.freeze([
   'invalid_now',
   'invalid_max_publications',
   'unknown_timezone',
+  'invalid_scheduled_assignment',
 ]);
 
 /**
@@ -104,54 +105,144 @@ function partsAt(epochMs, timeZone) {
   return parts;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+
+function parseWallClock(scheduledDate, scheduledTime) {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(scheduledDate ?? ''));
+  const timeMatch = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(scheduledTime ?? ''));
+
+  if (!dateMatch || !timeMatch) {
+    throw new Error('scheduledDate/scheduledTime must be strict YYYY-MM-DD and HH:MM');
+  }
+
+  const year = Number(dateMatch[1]);
+  const month = Number(dateMatch[2]);
+  const day = Number(dateMatch[3]);
+  const hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const wallEpochMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const roundTrip = new Date(wallEpochMs);
+
+  if (
+    roundTrip.getUTCFullYear() !== year ||
+    roundTrip.getUTCMonth() !== month - 1 ||
+    roundTrip.getUTCDate() !== day ||
+    roundTrip.getUTCHours() !== hour ||
+    roundTrip.getUTCMinutes() !== minute
+  ) {
+    throw new Error('scheduledDate/scheduledTime is not a real calendar wall clock');
+  }
+
+  return { year, month, day, hour, minute, wallEpochMs };
+}
+
+function wallEpochAt(epochMs, timeZone) {
+  const p = partsAt(epochMs, timeZone);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+}
+
+function matchesWallClock(epochMs, timeZone, target) {
+  const p = partsAt(epochMs, timeZone);
+  return (
+    p.year === target.year &&
+    p.month === target.month &&
+    p.day === target.day &&
+    p.hour === target.hour &&
+    p.minute === target.minute &&
+    p.second === 0
+  );
+}
+
+function candidateOffsets(targetWallMs, timeZone) {
+  const offsets = new Set();
+
+  for (let deltaHours = -48; deltaHours <= 48; deltaHours += 6) {
+    const probe = targetWallMs + deltaHours * HOUR_MS;
+    offsets.add(wallEpochAt(probe, timeZone) - probe);
+  }
+
+  return offsets;
+}
+
+function committedInstantMs(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('scheduledAt must be a canonical UTC ISO instant');
+  }
+
+  const epochMs = Date.parse(value);
+  if (!Number.isFinite(epochMs) || new Date(epochMs).toISOString() !== value) {
+    throw new Error('scheduledAt must be canonical ISO-8601 UTC with milliseconds');
+  }
+
+  return epochMs;
+}
+
 /**
- * Resolve a wall-clock (scheduledDate + scheduledTime, read in `timezone`) to a
- * UTC instant, expressed as epoch milliseconds.
+ * Return the exact committed publication instant as epoch milliseconds.
  *
- * Independent re-implementation of src/post-time.mjs scheduledAt(): same
- * hourCycle 'h23' Intl formatter, same up-to-four iterative correction passes,
- * therefore the same resolution of nonexistent (spring-forward gap) and
- * ambiguous (fall-back repeated hour) wall clocks.
- *
- * Throws (like the local helper) when a required field is missing, and
- * RangeError when the zone is unknown. evaluateEligibility catches both.
+ * New queue assignments carry scheduledAt. Wall-clock resolution remains only
+ * as a migration compatibility path for older fixtures/bundles and is strict:
+ * nonexistent and ambiguous local times are rejected instead of normalized.
  */
-export function resolveScheduledAt({ scheduledDate, scheduledTime, timezone }) {
+export function resolveScheduledAt({
+  scheduledAt,
+  scheduledDate,
+  scheduledTime,
+  timezone,
+  utcOffsetMinutes = null,
+}) {
+  if (scheduledAt !== undefined && scheduledAt !== null) {
+    return committedInstantMs(scheduledAt);
+  }
+
   if (!scheduledDate || !scheduledTime || !timezone) {
     throw new Error(
       'scheduledDate, scheduledTime and timezone are required',
     );
   }
 
-  const [year, month, day] = String(scheduledDate).split('-').map(Number);
-  const [hour, minute] = String(scheduledTime).split(':').map(Number);
+  const target = parseWallClock(scheduledDate, scheduledTime);
+  const matches = [];
 
-  const target = Date.UTC(year, month - 1, day, hour, minute, 0);
-
-  let guess = target;
-
-  for (let pass = 0; pass < 4; pass += 1) {
-    const parts = partsAt(guess, timezone);
-
-    const represented = Date.UTC(
-      parts.year,
-      parts.month - 1,
-      parts.day,
-      parts.hour,
-      parts.minute,
-      parts.second,
-    );
-
-    const delta = target - represented;
-
-    if (delta === 0) {
-      return guess;
-    }
-
-    guess += delta;
+  for (const offsetMs of candidateOffsets(target.wallEpochMs, timezone)) {
+    const candidate = target.wallEpochMs - offsetMs;
+    if (matchesWallClock(candidate, timezone, target)) matches.push(candidate);
   }
 
-  return guess;
+  const uniqueMatches = [...new Set(matches)].sort((a, b) => a - b);
+
+  if (uniqueMatches.length === 0) {
+    throw new Error(
+      `nonexistent local wall-clock time: ${scheduledDate} ${scheduledTime} ${timezone}`,
+    );
+  }
+
+  if (utcOffsetMinutes !== null) {
+    if (!Number.isInteger(utcOffsetMinutes)) {
+      throw new Error('utcOffsetMinutes must be an integer when provided');
+    }
+
+    const selected = uniqueMatches.filter(
+      (epochMs) => (target.wallEpochMs - epochMs) / MINUTE_MS === utcOffsetMinutes,
+    );
+
+    if (selected.length !== 1) {
+      throw new Error(
+        `utcOffsetMinutes does not uniquely disambiguate: ${scheduledDate} ${scheduledTime} ${timezone}`,
+      );
+    }
+
+    return selected[0];
+  }
+
+  if (uniqueMatches.length !== 1) {
+    throw new Error(
+      `ambiguous local wall-clock time requires explicit utcOffsetMinutes: ${scheduledDate} ${scheduledTime} ${timezone}`,
+    );
+  }
+
+  return uniqueMatches[0];
 }
 
 /**
@@ -387,6 +478,7 @@ export function evaluateEligibility(queue, ledger, options = {}) {
   const instants = [];
   if (queueOk) {
     let zoneFailed = false;
+    let scheduleFailed = false;
 
     for (const post of queue) {
       if (!isSupportedTimeZone(post.timezone)) {
@@ -398,13 +490,16 @@ export function evaluateEligibility(queue, ledger, options = {}) {
       try {
         instants.push(resolveScheduledAt(post));
       } catch {
-        zoneFailed = true;
+        scheduleFailed = true;
         instants.push(null);
       }
     }
 
     if (zoneFailed) {
       failures.push('unknown_timezone');
+    }
+    if (scheduleFailed) {
+      failures.push('invalid_scheduled_assignment');
     }
   }
 

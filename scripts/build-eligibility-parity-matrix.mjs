@@ -92,6 +92,15 @@ function classifyLocalThrow(error) {
   if (/scheduledDate, scheduledTime and timezone are required/.test(message)) {
     return 'malformed_queue';
   }
+  if (
+    /nonexistent local wall-clock time/i.test(message) ||
+    /ambiguous local wall-clock time/i.test(message) ||
+    /scheduledDate\/scheduledTime must be strict/i.test(message) ||
+    /not a real calendar wall clock/i.test(message) ||
+    /scheduledAt must be canonical/i.test(message)
+  ) {
+    return 'invalid_scheduled_assignment';
+  }
   if (error instanceof RangeError || /time zone/i.test(message)) {
     return 'unknown_timezone';
   }
@@ -465,7 +474,7 @@ function fixtures(realQueue) {
   add({
     id: 'dst-spring-forward-gap-before',
     description:
-      'Nonexistent wall clock 2027-03-14 02:30 (the spring-forward gap). Both implementations resolve it to 2027-03-14T07:30:00.000Z; one millisecond earlier it is not yet due.',
+      'Nonexistent wall clock 2027-03-14 02:30 (the spring-forward gap). Both implementations refuse the assignment instead of normalizing it.',
     queue: [G1],
     ledgerSetup: 'empty ledger',
     ledger: ledger(),
@@ -475,7 +484,7 @@ function fixtures(realQueue) {
   add({
     id: 'dst-spring-forward-gap-due',
     description:
-      'The same nonexistent wall clock is due at exactly 2027-03-14T07:30:00.000Z.',
+      'The same nonexistent wall clock remains invalid regardless of evaluation time.',
     queue: [G1],
     ledgerSetup: 'empty ledger',
     ledger: ledger(),
@@ -488,7 +497,7 @@ function fixtures(realQueue) {
   add({
     id: 'dst-fall-back',
     description:
-      'America/Chicago 2027-11-07 fall back: 01:30 resolves to 06:30Z (CDT) and 02:30 resolves to 08:30Z (CST) — two hours of UTC across one hour of wall clock.',
+      'America/Chicago 2027-11-07 fall back: an undisambiguated 01:30 assignment is ambiguous and both implementations refuse the queue.',
     queue: [F1, F2],
     ledgerSetup: 'empty ledger',
     ledger: ledger(),
@@ -499,7 +508,7 @@ function fixtures(realQueue) {
   add({
     id: 'dst-fall-back-ambiguous-before',
     description:
-      'Ambiguous wall clock 2027-11-07 01:30 occurs twice. Both implementations pick the FIRST (CDT, 06:30Z) occurrence, so at 06:29:59.999Z it is not due.',
+      'Ambiguous wall clock 2027-11-07 01:30 occurs twice. Both implementations refuse it without an explicit offset.',
     queue: [F1],
     ledgerSetup: 'empty ledger',
     ledger: ledger(),
@@ -509,7 +518,7 @@ function fixtures(realQueue) {
   add({
     id: 'dst-fall-back-ambiguous-first-occurrence',
     description:
-      'The ambiguous wall clock is due at 06:30:00.000Z (first occurrence). Had either side resolved it to the repeated CST hour it would not be due here.',
+      'The ambiguous wall clock remains invalid at the first occurrence because no explicit offset was committed.',
     queue: [F1],
     ledgerSetup: 'empty ledger',
     ledger: ledger(),
@@ -730,6 +739,15 @@ export function buildMatrix() {
   const queueBytes = `${JSON.stringify(realQueue, null, 2)}\n`;
   const queueSha = createHash('sha256').update(queueBytes, 'utf8').digest('hex');
 
+  // #52 adds only the committed scheduledAt field to the static queue shape.
+  // Strip that field and the exact legacy canonical bytes must still hash to
+  // the pre-#52 production queue SHA, proving no ID/content/local slot drift.
+  const legacyProjection = realQueue.map(({ scheduledAt, ...post }) => post);
+  const legacyQueueBytes = `${JSON.stringify(legacyProjection, null, 2)}\n`;
+  const legacyQueueSha = createHash('sha256')
+    .update(legacyQueueBytes, 'utf8')
+    .digest('hex');
+
   const rows = fixtures(realQueue).map((fixture) => {
     const now = new Date(fixture.nowIso);
     const options = { now, graceMinutes: fixture.graceMinutes };
@@ -813,7 +831,11 @@ export function buildMatrix() {
     cloudflareModule: 'cloudflare/src/eligibility.mjs',
     comparedFields: COMPARED_FIELDS,
     maxPublications: MAX_PUBLICATIONS,
-    productionQueue: { count: realQueue.length, sha256: queueSha },
+    productionQueue: {
+      count: realQueue.length,
+      sha256: queueSha,
+      legacyProjectionSha256: legacyQueueSha,
+    },
     documentedDivergences: [
       "Read-only fail-closed on a 'prepared' inflight: local live mode clears it by writing state.json and proceeds; the Cloudflare evaluator cannot write, so it blocks with reason inflight_prepared.",
       'safeToPublish is a Cloudflare-only extra gate (it ANDs health.ok on top of the local decision). It can only withhold, never permit; selection.selected still mirrors the local decision exactly.',

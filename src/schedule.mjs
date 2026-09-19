@@ -11,6 +11,8 @@
 //     split exactly and never puts two posts from the same pillar on one day.
 //     Repeating it 9 times consumes exactly the 180-post library.
 
+import { resolveUniqueWallClock } from './schedule-slot.mjs';
+
 export const PILLAR_CYCLE = [
   ['A', 'B'], ['A', 'C'], ['B', 'D'], ['A', 'B'], ['A', 'D'],
   ['A', 'C'], ['B', 'C'], ['A', 'B'], ['A', 'D'], ['A', 'C'],
@@ -59,7 +61,20 @@ function nextDay(dateISO) {
 }
 
 function chronologyKey(post) {
-  return `${post.scheduledDate}T${post.scheduledTime}`;
+  return post.scheduledAt ?? `${post.scheduledDate}T${post.scheduledTime}`;
+}
+
+function resolvedAssignmentFields(scheduledDate, scheduledTime, timezone) {
+  return {
+    scheduledDate,
+    scheduledTime,
+    timezone,
+    scheduledAt: resolveUniqueWallClock({
+      scheduledDate,
+      scheduledTime,
+      timezone,
+    }).toISOString(),
+  };
 }
 
 /**
@@ -91,9 +106,11 @@ function deferPostsToEnd(queue, ids, cfg) {
     if (slotIndex === 0) date = days.next().value;
 
     const post = byId.get(requested[i]);
-    post.scheduledDate = date;
-    post.scheduledTime = cfg.slots[slotIndex] ?? cfg.slots[cfg.slots.length - 1];
-    post.timezone = cfg.timezone;
+    const scheduledTime = cfg.slots[slotIndex] ?? cfg.slots[cfg.slots.length - 1];
+    Object.assign(
+      post,
+      resolvedAssignmentFields(date, scheduledTime, cfg.timezone),
+    );
     post.slot = slotIndex === 0 ? 'lull' : 'post-close';
     post.deferredToEnd = true;
   }
@@ -141,11 +158,11 @@ export function schedule(posts, opts = {}) {
           })();
       if (!pick) break;
 
+      const scheduledTime = cfg.slots[s] ?? cfg.slots[cfg.slots.length - 1];
+
       queue.push({
         ...pick,
-        scheduledDate: date,
-        scheduledTime: cfg.slots[s] ?? cfg.slots[cfg.slots.length - 1],
-        timezone: cfg.timezone,
+        ...resolvedAssignmentFields(date, scheduledTime, cfg.timezone),
         slot: s === 0 ? 'lull' : 'post-close',
         status: 'queued',
       });
@@ -158,8 +175,11 @@ export function schedule(posts, opts = {}) {
   const pin = queue.findIndex((q) => q.pinned);
   if (pin > 0) {
     const sched = (q) => ({
-      scheduledDate: q.scheduledDate, scheduledTime: q.scheduledTime,
-      timezone: q.timezone, slot: q.slot,
+      scheduledDate: q.scheduledDate,
+      scheduledTime: q.scheduledTime,
+      timezone: q.timezone,
+      scheduledAt: q.scheduledAt,
+      slot: q.slot,
     });
     const first = sched(queue[0]);
     Object.assign(queue[0], sched(queue[pin]));
