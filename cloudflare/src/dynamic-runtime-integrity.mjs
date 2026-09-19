@@ -17,7 +17,6 @@ export const DYNAMIC_RUNTIME_FORMAT = 1;
 
 export const RUNTIME_STATE_SQL = `
 SELECT
-  singleton_id,
   generation,
   revision_digest,
   active_assignment_count,
@@ -25,9 +24,10 @@ SELECT
   media_required_count,
   media_ready_count,
   source_operation_id,
-  updated_at
-FROM queue_runtime_state
-WHERE singleton_id = 1
+  created_at AS updated_at
+FROM queue_runtime_revisions
+ORDER BY generation DESC
+LIMIT 1
 `;
 
 export const ACTIVE_ASSIGNMENTS_SQL = `

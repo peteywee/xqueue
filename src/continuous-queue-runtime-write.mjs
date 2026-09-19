@@ -127,24 +127,44 @@ export function renderRuntimeRevisionInsertSql(revision) {
     throw new Error('runtime revision predecessor shape is invalid');
   }
 
+  const values = [
+    String(generation),
+    sqlString(revisionDigest),
+    String(integer(revision.active_assignment_count, 'active assignment count')),
+    String(integer(revision.approved_unscheduled_count, 'approved-unscheduled count')),
+    String(integer(revision.media_required_count, 'media required count')),
+    String(integer(revision.media_ready_count, 'media ready count')),
+    sqlString(previous),
+    sqlString(revision.source_operation_id ?? null),
+    sqlString(revision.created_at),
+  ].join(',');
+
+  const cas =
+    generation === 1
+      ? 'NOT EXISTS (SELECT 1 FROM queue_runtime_revisions)'
+      : (
+          '(SELECT generation FROM queue_runtime_revisions ' +
+          'ORDER BY generation DESC LIMIT 1) = ' +
+          String(generation - 1) +
+          ' AND (SELECT revision_digest FROM queue_runtime_revisions ' +
+          'ORDER BY generation DESC LIMIT 1) = ' +
+          sqlString(previous)
+        );
+
+  // One INSERT ... SELECT statement is the revision CAS. There is no trigger
+  // and no mutable current-state projection. The latest immutable ledger row
+  // is current truth. Concurrent/stale writers either insert exactly once or
+  // fail/insert zero rows and must reconcile by readback.
   return (
     'INSERT INTO queue_runtime_revisions (' +
     'generation,revision_digest,active_assignment_count,' +
     'approved_unscheduled_count,media_required_count,media_ready_count,' +
     'previous_revision_digest,source_operation_id,created_at' +
-    ') VALUES (' +
-    [
-      String(generation),
-      sqlString(revisionDigest),
-      String(integer(revision.active_assignment_count, 'active assignment count')),
-      String(integer(revision.approved_unscheduled_count, 'approved-unscheduled count')),
-      String(integer(revision.media_required_count, 'media required count')),
-      String(integer(revision.media_ready_count, 'media ready count')),
-      sqlString(previous),
-      sqlString(revision.source_operation_id ?? null),
-      sqlString(revision.created_at),
-    ].join(',') +
-    ');\n'
+    ') SELECT ' +
+    values +
+    ' WHERE ' +
+    cas +
+    ';\n'
   );
 }
 
