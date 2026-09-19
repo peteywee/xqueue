@@ -301,3 +301,31 @@ export function renderShadowBackfillSql(
   lines.push('');
   return `${lines.join('\n')}\n`;
 }
+
+export function renderShadowVerificationSql(model) {
+  if (!model || !Number.isSafeInteger(model.count) || model.count < 1) {
+    throw new Error('shadow model count is invalid');
+  }
+
+  const expected = model.count;
+
+  return [
+    '-- READ-ONLY #88 SHADOW VERIFICATION.',
+    '-- Every mismatch/duplicate observation must be zero before any future activation.',
+    '',
+    `SELECT 'content_count' AS check_name, COUNT(*) AS observed, ${expected} AS expected FROM queue_content;`,
+    `SELECT 'revision_count' AS check_name, COUNT(*) AS observed, ${expected} AS expected FROM queue_content_revisions;`,
+    `SELECT 'active_assignment_count' AS check_name, COUNT(*) AS observed, ${expected} AS expected FROM queue_assignments WHERE status = 'active';`,
+    '',
+    "SELECT 'duplicate_active_content' AS check_name, COUNT(*) AS observed, 0 AS expected FROM (SELECT content_id FROM queue_assignments WHERE status = 'active' GROUP BY content_id HAVING COUNT(*) > 1);",
+    "SELECT 'duplicate_active_slots' AS check_name, COUNT(*) AS observed, 0 AS expected FROM (SELECT target_account, resolved_at FROM queue_assignments WHERE status = 'active' GROUP BY target_account, resolved_at HAVING COUNT(*) > 1);",
+    "SELECT 'assignment_digest_mismatch' AS check_name, COUNT(*) AS observed, 0 AS expected FROM queue_assignments a LEFT JOIN queue_content_revisions r ON r.content_id = a.content_id AND r.revision = a.content_revision WHERE r.content_id IS NULL OR r.content_digest <> a.content_digest;",
+    '',
+    "-- Existing publication_state is still authoritative during #88. Prove the",
+    "-- shadow assignment for every current post carries the exact same UTC slot.",
+    "SELECT 'publication_state_missing_shadow' AS check_name, COUNT(*) AS observed, 0 AS expected FROM publication_state p LEFT JOIN queue_assignments a ON a.content_id = p.post_id AND a.status = 'active' WHERE a.content_id IS NULL;",
+    "SELECT 'shadow_missing_publication_state' AS check_name, COUNT(*) AS observed, 0 AS expected FROM queue_assignments a LEFT JOIN publication_state p ON p.post_id = a.content_id WHERE a.status = 'active' AND p.post_id IS NULL;",
+    "SELECT 'publication_state_slot_mismatch' AS check_name, COUNT(*) AS observed, 0 AS expected FROM publication_state p JOIN queue_assignments a ON a.content_id = p.post_id AND a.status = 'active' WHERE a.resolved_at <> p.scheduled_at;",
+    '',
+  ].join('\n') + '\n';
+}
