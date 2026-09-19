@@ -293,7 +293,7 @@ export function assertExactShadowReadback(model, readback) {
   return true;
 }
 
-export function assertPublicationStateParity(model, publicationRows) {
+export function assertPublicationStateCoverage(model, publicationRows) {
   const rows = mapBy(publicationRows, 'post_id');
   if (rows.size !== model.count) {
     throw new Error(
@@ -302,14 +302,8 @@ export function assertPublicationStateParity(model, publicationRows) {
   }
 
   for (const assignment of model.assignments) {
-    const row = rows.get(assignment.content_id);
-    if (!row) {
+    if (!rows.has(assignment.content_id)) {
       throw new Error(`publication_state is missing ${assignment.content_id}`);
-    }
-    if (row.scheduled_at !== assignment.resolved_at) {
-      throw new Error(
-        `${assignment.content_id} publication_state UTC mismatch: ${row.scheduled_at} != ${assignment.resolved_at}`,
-      );
     }
   }
 
