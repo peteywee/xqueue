@@ -9,6 +9,7 @@ import { schedule } from '../src/schedule.mjs';
 import {
   buildContinuousQueueShadow,
   renderShadowBackfillSql,
+  renderShadowVerificationSql,
   shadowManifestJson,
   shadowManifestSha256,
 } from '../src/continuous-queue-shadow.mjs';
@@ -26,6 +27,7 @@ function parseArgs(argv) {
   for (const arg of argv) {
     if (arg === '--json') options.format = 'json';
     else if (arg === '--sql') options.format = 'sql';
+    else if (arg === '--verify-sql') options.format = 'verify-sql';
     else if (arg.startsWith('--recorded-at=')) {
       options.recordedAt = arg.slice('--recorded-at='.length);
     } else {
@@ -69,6 +71,11 @@ function main() {
     process.stdout.write(
       renderShadowBackfillSql(model, { recordedAt: options.recordedAt }),
     );
+    return;
+  }
+
+  if (options.format === 'verify-sql') {
+    process.stdout.write(renderShadowVerificationSql(model));
     return;
   }
 
