@@ -48,7 +48,7 @@ All upstream paths converge on the same finished-post ingestion boundary. Source
 4. 03-schedule-identity.md — proposed resolution for issue #47: assignment version and policy version are separate.
 5. 04-dynamic-queue-integrity.md — integrity without a hard-coded 180-post count/hash.
 6. 05-bulk-ingestion.md — deterministic single/batch behavior.
-7. 06-runway-monitoring.md — queue-low monitoring without content or publication authority.
+7. 06-runway-monitoring.md — queue-low monitoring without content or publication authority.\n8. ../scheduling-and-missed-slot-contract.md — canonical scheduling, missed-slot, append, and replacement semantics.
 
 ## Scope guard
 
