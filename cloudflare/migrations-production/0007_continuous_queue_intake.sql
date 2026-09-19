@@ -46,6 +46,9 @@ CREATE TABLE queue_intake_operations (
     proposed_frontier_resolved_at TEXT NOT NULL,
     baseline_assignment_hash TEXT NOT NULL
       CHECK (length(baseline_assignment_hash) = 64),
+    target_account TEXT NOT NULL,
+    policy_version INTEGER NOT NULL
+      CHECK (policy_version >= 1),
     status TEXT NOT NULL
       CHECK (status IN (
         'planned',
