@@ -448,9 +448,7 @@ test('every local queue/grace/time refusal is matched by a Cloudflare refusal', 
   }
 });
 
-test('out-of-range but well-formed date/time components roll over identically', () => {
-  // These are NOT refusals on either side: Date.UTC normalises them. Both
-  // implementations must land on the same instant.
+test('out-of-range calendar/time components are refused on both paths', () => {
   for (const [d, t] of [
     ['2027-13-45', '14:30'],
     ['2026-09-31', '14:30'],
@@ -458,11 +456,17 @@ test('out-of-range but well-formed date/time components roll over identically', 
     ['2026-02-30', '00:00'],
   ]) {
     const p = post('R1', d, t);
-    assert.equal(
-      resolveScheduledAt(p),
-      scheduledAt(p).getTime(),
-      `instant must match for ${d} ${t}`,
+    assert.throws(
+      () => scheduledAt(p),
+      /scheduledDate\/scheduledTime/,
+      `local must refuse ${d} ${t}`,
     );
+    assert.throws(
+      () => resolveScheduledAt(p),
+      /scheduledDate\/scheduledTime/,
+      `Cloudflare must refuse ${d} ${t}`,
+    );
+    assertNeverMorePermissive(`out-of-range ${d} ${t}`, [p], ledger(), {});
   }
 });
 
