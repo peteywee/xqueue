@@ -145,7 +145,10 @@ export function assertMigrationLedger(names, { shadowMayExist = true } = {}) {
   const validTails = [
     [],
     [SHADOW_MIGRATION],
-    [SHADOW_MIGRATION, ...KNOWN_POST_SHADOW_MIGRATIONS],
+    ...KNOWN_POST_SHADOW_MIGRATIONS.map((_, index) => [
+      SHADOW_MIGRATION,
+      ...KNOWN_POST_SHADOW_MIGRATIONS.slice(0, index + 1),
+    ]),
   ];
 
   if (!validTails.some((expected) => JSON.stringify(tail) === JSON.stringify(expected))) {
