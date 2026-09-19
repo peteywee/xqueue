@@ -12,7 +12,10 @@ export const BASE_MIGRATIONS = Object.freeze([
   '0005_publication_state_generation.sql',
 ]);
 
-export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';\nexport const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([\n  '0007_continuous_queue_intake.sql',\n]);
+export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';
+export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
+  '0007_continuous_queue_intake.sql',
+]);
 
 export function sha256Json(value) {
   return createHash('sha256')
