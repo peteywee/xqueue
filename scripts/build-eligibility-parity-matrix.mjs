@@ -739,6 +739,15 @@ export function buildMatrix() {
   const queueBytes = `${JSON.stringify(realQueue, null, 2)}\n`;
   const queueSha = createHash('sha256').update(queueBytes, 'utf8').digest('hex');
 
+  // #52 adds only the committed scheduledAt field to the static queue shape.
+  // Strip that field and the exact legacy canonical bytes must still hash to
+  // the pre-#52 production queue SHA, proving no ID/content/local slot drift.
+  const legacyProjection = realQueue.map(({ scheduledAt, ...post }) => post);
+  const legacyQueueBytes = `${JSON.stringify(legacyProjection, null, 2)}\n`;
+  const legacyQueueSha = createHash('sha256')
+    .update(legacyQueueBytes, 'utf8')
+    .digest('hex');
+
   const rows = fixtures(realQueue).map((fixture) => {
     const now = new Date(fixture.nowIso);
     const options = { now, graceMinutes: fixture.graceMinutes };
@@ -822,7 +831,11 @@ export function buildMatrix() {
     cloudflareModule: 'cloudflare/src/eligibility.mjs',
     comparedFields: COMPARED_FIELDS,
     maxPublications: MAX_PUBLICATIONS,
-    productionQueue: { count: realQueue.length, sha256: queueSha },
+    productionQueue: {
+      count: realQueue.length,
+      sha256: queueSha,
+      legacyProjectionSha256: legacyQueueSha,
+    },
     documentedDivergences: [
       "Read-only fail-closed on a 'prepared' inflight: local live mode clears it by writing state.json and proceeds; the Cloudflare evaluator cannot write, so it blocks with reason inflight_prepared.",
       'safeToPublish is a Cloudflare-only extra gate (it ANDs health.ok on top of the local decision). It can only withhold, never permit; selection.selected still mirrors the local decision exactly.',
