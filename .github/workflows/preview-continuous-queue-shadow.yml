@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
 
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       XQUEUE_PREVIEW_SHADOW_EVIDENCE: /tmp/xqueue-preview-shadow-proof.json
 
