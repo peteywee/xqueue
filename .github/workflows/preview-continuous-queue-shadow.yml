@@ -1,0 +1,61 @@
+name: Preview Continuous Queue Shadow Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preview-continuous-queue-shadow.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-continuous-queue-shadow
+  cancel-in-progress: false
+
+jobs:
+  prove-preview-shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XQUEUE_PREVIEW_SHADOW_EVIDENCE: /tmp/xqueue-preview-shadow-proof.json
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove preview-only executor guards
+        run: |
+          node --test \
+            test/d1-preview-shadow-proof.test.mjs \
+            test/continuous-queue-shadow.test.mjs
+
+      - name: Apply and prove non-authoritative preview shadow
+        run: node scripts/preview-continuous-queue-shadow-proof.mjs
+
+      - name: Upload preview shadow evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-shadow-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-preview-shadow-proof.json
+          if-no-files-found: warn
