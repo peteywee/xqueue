@@ -138,6 +138,22 @@ test('migration ledger accepts only exact 0001-0005 baseline with optional termi
     },
   );
 
+  assert.deepEqual(
+    assertMigrationLedger([
+      ...BASE_MIGRATIONS,
+      SHADOW_MIGRATION,
+      '0007_continuous_queue_intake.sql',
+      '0008_dynamic_runtime_integrity.sql',
+    ]),
+    {
+      hasShadow: true,
+      postShadowMigrations: [
+        '0007_continuous_queue_intake.sql',
+        '0008_dynamic_runtime_integrity.sql',
+      ],
+    },
+  );
+
   assert.throws(
     () => assertMigrationLedger(BASE_MIGRATIONS.slice(0, -1)),
     /exact 0001-0005 baseline/,

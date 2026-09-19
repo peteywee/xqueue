@@ -139,6 +139,9 @@ test('Worker health exposes readiness without converting it into authority', asy
   const body = await response.json();
   assert.equal(body.status, 'ok');
   assert.equal(body.queueIntegrity.ok, true);
+  assert.equal(body.dynamicRuntimeReadiness.authoritative, false);
+  assert.equal(body.dynamicRuntimeReadiness.ok, false);
+  assert.equal(body.dynamicRuntimeReadiness.reason, 'dynamic_schema_unavailable');
   assert.equal(body.authorityReadiness.authorized, false);
   assert.equal(body.authorityReadiness.ok, false);
   assert.equal(body.livePublication, false);

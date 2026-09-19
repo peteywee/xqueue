@@ -305,6 +305,7 @@ export function planIntake({
   existingContent = [],
   existingDigests = [],
   baselineAssignmentHash,
+  runtimeState = null,
   targetAccount = DEFAULT_TARGET_ACCOUNT,
 }) {
   if (!normalized || normalized.format !== INTAKE_FORMAT) {
@@ -331,6 +332,21 @@ export function planIntake({
     throw new Error('baseline assignment hash is required');
   }
   requiredString(targetAccount, 'target account');
+
+  let expectedRuntimeGeneration = null;
+  let expectedRuntimeRevisionDigest = null;
+  if (runtimeState !== null) {
+    expectedRuntimeGeneration = positiveInteger(
+      Number(runtimeState?.generation),
+      'runtime generation',
+    );
+    expectedRuntimeRevisionDigest = String(
+      runtimeState?.revision_digest ?? '',
+    ).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedRuntimeRevisionDigest)) {
+      throw new Error('runtime revision digest is invalid');
+    }
+  }
 
   const inputIds = new Set(normalized.items.map((item) => item.content_id));
   const inputDigests = new Set(normalized.items.map((item) => item.content_digest));
@@ -373,6 +389,8 @@ export function planIntake({
     expected_frontier_resolved_at: frontierResolvedAt,
     proposed_frontier_resolved_at: proposedFrontier,
     baseline_assignment_hash: baselineAssignmentHash,
+    expected_runtime_generation: expectedRuntimeGeneration,
+    expected_runtime_revision_digest: expectedRuntimeRevisionDigest,
     target_account: targetAccount,
     policy_version: cfg.version,
     items: items.map((item) => ({
@@ -415,6 +433,7 @@ export function renderOperationCreateSql(plan, recordedAt) {
     '  operation_id, plan_digest, batch_digest, item_count,',
     '  expected_frontier_generation, expected_frontier_resolved_at,',
     '  proposed_frontier_resolved_at, baseline_assignment_hash,',
+    '  expected_runtime_generation, expected_runtime_revision_digest,',
     '  target_account, policy_version, status, created_at, updated_at',
     ') VALUES (',
     [
@@ -426,6 +445,10 @@ export function renderOperationCreateSql(plan, recordedAt) {
       sqlString(plan.expected_frontier_resolved_at),
       sqlString(plan.proposed_frontier_resolved_at),
       sqlString(plan.baseline_assignment_hash),
+      plan.expected_runtime_generation == null
+        ? 'NULL'
+        : sqlInteger(plan.expected_runtime_generation),
+      sqlString(plan.expected_runtime_revision_digest),
       sqlString(plan.target_account),
       sqlInteger(plan.policy_version),
       sqlString('planned'),
@@ -482,6 +505,31 @@ export function renderOperationStatusSql(operationId, status, recordedAt) {
   return (
     'UPDATE queue_intake_operations SET ' +
     `status = ${sqlString(status)}, updated_at = ${sqlString(recordedAt)} ` +
+    `WHERE operation_id = ${sqlString(operationId)};\n`
+  );
+}
+
+export function renderOperationRuntimeResultSql(
+  operationId,
+  runtimeRevision,
+  recordedAt,
+) {
+  requiredString(operationId, 'operationId');
+  canonicalInstant(recordedAt, 'recordedAt');
+  const generation = positiveInteger(
+    Number(runtimeRevision?.generation),
+    'runtime result generation',
+  );
+  const digest = String(runtimeRevision?.revision_digest ?? '').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error('runtime result digest is invalid');
+  }
+
+  return (
+    'UPDATE queue_intake_operations SET ' +
+    `resulting_runtime_generation = ${sqlInteger(generation)}, ` +
+    `resulting_runtime_revision_digest = ${sqlString(digest)}, ` +
+    `updated_at = ${sqlString(recordedAt)} ` +
     `WHERE operation_id = ${sqlString(operationId)};\n`
   );
 }
@@ -730,6 +778,8 @@ export function assertOperationMatchesPlan(operation, plan) {
     expected_frontier_resolved_at: plan.expected_frontier_resolved_at,
     proposed_frontier_resolved_at: plan.proposed_frontier_resolved_at,
     baseline_assignment_hash: plan.baseline_assignment_hash,
+    expected_runtime_generation: plan.expected_runtime_generation,
+    expected_runtime_revision_digest: plan.expected_runtime_revision_digest,
     target_account: plan.target_account,
     policy_version: plan.policy_version,
   };
@@ -792,6 +842,50 @@ export async function executeIntakePlan({
   }
   if (operation.status === 'complete') {
     return Object.freeze({ status: 'already_applied', operation_id: plan.operation_id });
+  }
+
+  let committedRuntimeRevision = null;
+
+  if (plan.expected_runtime_generation !== null) {
+    if (
+      typeof transport.readRuntimeState !== 'function' ||
+      typeof transport.readRuntimeRevisionForOperation !== 'function' ||
+      typeof transport.commitRuntimeRevision !== 'function'
+    ) {
+      throw new Error('runtime revision transport is required for this intake plan');
+    }
+
+    committedRuntimeRevision =
+      await transport.readRuntimeRevisionForOperation(plan.operation_id);
+
+    if (committedRuntimeRevision) {
+      const expectedGeneration = plan.expected_runtime_generation + 1;
+      if (
+        Number(committedRuntimeRevision.generation) !== expectedGeneration ||
+        committedRuntimeRevision.previous_revision_digest !==
+          plan.expected_runtime_revision_digest
+      ) {
+        await transport.markOperation(
+          plan.operation_id,
+          'needs_reconciliation',
+          recordedAt,
+        );
+        throw new Error('intake runtime revision replay evidence conflicts');
+      }
+    } else {
+      const runtimeState = await transport.readRuntimeState();
+      const runtimeMatchesPlan =
+        runtimeState &&
+        Number(runtimeState.generation) === plan.expected_runtime_generation &&
+        runtimeState.revision_digest === plan.expected_runtime_revision_digest;
+
+      if (!runtimeMatchesPlan) {
+        await transport.markOperation(plan.operation_id, 'stale', recordedAt);
+        throw new Error(
+          'runtime revision changed after dry run; intake plan is stale',
+        );
+      }
+    }
   }
 
   let frontier = await transport.readFrontier();
@@ -888,6 +982,42 @@ export async function executeIntakePlan({
     throw new Error('pre-existing assignment set changed during intake');
   }
 
+  let runtimeRevision = committedRuntimeRevision;
+
+  if (plan.expected_runtime_generation !== null && !runtimeRevision) {
+    try {
+      runtimeRevision = await transport.commitRuntimeRevision(plan, recordedAt);
+    } catch {
+      runtimeRevision =
+        await transport.readRuntimeRevisionForOperation(plan.operation_id);
+    }
+
+    if (
+      !runtimeRevision ||
+      Number(runtimeRevision.generation) !==
+        plan.expected_runtime_generation + 1 ||
+      runtimeRevision.previous_revision_digest !==
+        plan.expected_runtime_revision_digest
+    ) {
+      await transport.markOperation(
+        plan.operation_id,
+        'needs_reconciliation',
+        recordedAt,
+      );
+      throw new Error(
+        'runtime revision commit is ambiguous or conflicts with the intake plan',
+      );
+    }
+
+    if (typeof transport.recordRuntimeResult === 'function') {
+      await transport.recordRuntimeResult(
+        plan.operation_id,
+        runtimeRevision,
+        recordedAt,
+      );
+    }
+  }
+
   await transport.markOperation(plan.operation_id, 'complete', recordedAt);
 
   try {
@@ -915,5 +1045,9 @@ export async function executeIntakePlan({
     count: plan.count,
     frontier_generation: Number(frontier.generation),
     frontier_resolved_at: frontier.resolved_at,
+    runtime_generation: runtimeRevision
+      ? Number(runtimeRevision.generation)
+      : null,
+    runtime_revision_digest: runtimeRevision?.revision_digest ?? null,
   });
 }

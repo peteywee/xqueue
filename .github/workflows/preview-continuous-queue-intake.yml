@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: xqueue-preview-continuous-queue-intake
+  group: xqueue-preview-schema-mutation
   cancel-in-progress: false
 
 jobs:

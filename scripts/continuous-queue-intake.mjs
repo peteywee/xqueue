@@ -21,13 +21,26 @@ import {
   renderFrontierReleaseSql,
   renderItemApplySql,
   renderOperationCreateSql,
+  renderOperationRuntimeResultSql,
   renderOperationStatusSql,
   verifyReplayInput,
 } from '../src/continuous-queue-intake.mjs';
+import {
+  ACTIVE_ASSIGNMENTS_SQL,
+  APPROVED_UNSCHEDULED_SQL,
+  buildDynamicRuntimeSnapshot,
+  CURRENT_MEDIA_SQL,
+  RUNTIME_STATE_SQL,
+} from '../cloudflare/src/dynamic-runtime-integrity.mjs';
+import {
+  nextRuntimeRevision,
+  renderRuntimeRevisionInsertSql,
+} from '../src/continuous-queue-runtime-write.mjs';
 
 const PREVIEW_DB = 'xqueue-preview';
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const POLICY_FILE = resolve('config/schedule-policy.json');
+const RUNTIME_SCHEMA_MIGRATION = '0008_dynamic_runtime_integrity.sql';
 
 const args = process.argv.slice(2);
 
@@ -142,6 +155,8 @@ function readOperation(operationId) {
   const [row] = query(
     'SELECT operation_id,plan_digest,batch_digest,item_count,expected_frontier_generation,' +
     'expected_frontier_resolved_at,proposed_frontier_resolved_at,baseline_assignment_hash,' +
+    'expected_runtime_generation,expected_runtime_revision_digest,' +
+    'resulting_runtime_generation,resulting_runtime_revision_digest,' +
     'target_account,policy_version,status,created_at,updated_at ' +
     `FROM queue_intake_operations WHERE operation_id = ${sqlString(operationId)};`,
   );
@@ -160,6 +175,8 @@ function findCompletedBatch(batchDigest) {
   const [row] = query(
     'SELECT operation_id,plan_digest,batch_digest,item_count,expected_frontier_generation,' +
     'expected_frontier_resolved_at,proposed_frontier_resolved_at,baseline_assignment_hash,' +
+    'expected_runtime_generation,expected_runtime_revision_digest,' +
+    'resulting_runtime_generation,resulting_runtime_revision_digest,' +
     'target_account,policy_version,status,created_at,updated_at ' +
     'FROM queue_intake_operations ' +
     `WHERE batch_digest = ${sqlString(batchDigest)} AND status = 'complete' ` +
@@ -205,6 +222,30 @@ function contentIndex() {
     'FROM queue_content c JOIN queue_content_revisions r ' +
     'ON r.content_id = c.content_id AND r.revision = c.current_revision;',
   );
+}
+
+function runtimeState() {
+  const [row] = query(RUNTIME_STATE_SQL);
+  return row ?? null;
+}
+
+function runtimeRevisionForOperation(operationId) {
+  const [row] = query(
+    'SELECT generation,revision_digest,active_assignment_count,' +
+    'approved_unscheduled_count,media_required_count,media_ready_count,' +
+    'previous_revision_digest,source_operation_id,created_at ' +
+    'FROM queue_runtime_revisions ' +
+    `WHERE source_operation_id = ${sqlString(operationId)};`,
+  );
+  return row ?? null;
+}
+
+async function dynamicRuntimeSnapshot() {
+  return buildDynamicRuntimeSnapshot({
+    assignments: query(ACTIVE_ASSIGNMENTS_SQL),
+    approvedUnscheduled: query(APPROVED_UNSCHEDULED_SQL),
+    media: query(CURRENT_MEDIA_SQL),
+  });
 }
 
 function verifyCompletedReplay(normalized, operation) {
@@ -263,6 +304,43 @@ function transport() {
         activeAssignments().filter((row) => !excluded.has(row.content_id)),
       );
     },
+    readRuntimeState: async () => runtimeState(),
+    readRuntimeRevisionForOperation: async (operationId) =>
+      runtimeRevisionForOperation(operationId),
+    commitRuntimeRevision: async (plan, recordedAt) => {
+      const current = runtimeState();
+      if (
+        !current ||
+        Number(current.generation) !== plan.expected_runtime_generation ||
+        current.revision_digest !== plan.expected_runtime_revision_digest
+      ) {
+        throw new Error('runtime revision changed before commit');
+      }
+
+      const snapshot = await dynamicRuntimeSnapshot();
+      const revision = nextRuntimeRevision({
+        currentState: current,
+        snapshot,
+        sourceOperationId: plan.operation_id,
+        recordedAt,
+      });
+
+      executeCommand(renderRuntimeRevisionInsertSql(revision));
+
+      const readback = runtimeRevisionForOperation(plan.operation_id);
+      if (!readback) {
+        throw new Error('runtime revision insert was not readable after commit');
+      }
+      return readback;
+    },
+    recordRuntimeResult: async (operationId, runtimeRevision, recordedAt) =>
+      executeCommand(
+        renderOperationRuntimeResultSql(
+          operationId,
+          runtimeRevision,
+          recordedAt,
+        ),
+      ),
     releaseFrontier: async (plan, recordedAt) =>
       executeCommand(renderFrontierReleaseSql(plan, recordedAt)),
   };
@@ -271,10 +349,12 @@ function transport() {
 function requireSchema() {
   const rows = query('SELECT name FROM d1_migrations ORDER BY id;');
   const names = rows.map((row) => row.name);
-  if (!names.includes(INTAKE_SCHEMA_MIGRATION)) {
-    throw new Error(
-      `preview intake schema is not active; apply ${INTAKE_SCHEMA_MIGRATION} to xqueue-preview first`,
-    );
+  for (const required of [INTAKE_SCHEMA_MIGRATION, RUNTIME_SCHEMA_MIGRATION]) {
+    if (!names.includes(required)) {
+      throw new Error(
+        `preview intake schema is not active; apply ${required} to xqueue-preview first`,
+      );
+    }
   }
 }
 
@@ -290,6 +370,12 @@ function printPlan(plan) {
       resolved_at: plan.expected_frontier_resolved_at,
     },
     proposed_frontier: plan.proposed_frontier_resolved_at,
+    expected_runtime_revision: plan.expected_runtime_generation == null
+      ? null
+      : {
+          generation: plan.expected_runtime_generation,
+          digest: plan.expected_runtime_revision_digest,
+        },
     items: plan.items.map((item) => ({
       ordinal: item.ordinal,
       content_id: item.content_id,
@@ -337,6 +423,7 @@ async function main() {
   }
 
   const frontier = readFrontier();
+  const currentRuntimeState = runtimeState();
   const allContent = contentIndex();
   const ids = new Set(normalized.items.map((item) => item.content_id));
   const digests = new Set(normalized.items.map((item) => item.content_digest));
@@ -349,11 +436,21 @@ async function main() {
     existingContent: allContent.filter((row) => ids.has(row.content_id)),
     existingDigests: allContent.filter((row) => digests.has(row.content_digest)),
     baselineAssignmentHash: hashAssignmentRows(assignments),
+    runtimeState: currentRuntimeState,
   });
 
   if (!apply) {
     printPlan(plan);
     return;
+  }
+
+  if (
+    plan.expected_runtime_generation == null ||
+    plan.expected_runtime_revision_digest == null
+  ) {
+    throw new Error(
+      'preview runtime revision is not initialized; bootstrap #90 dynamic runtime evidence first',
+    );
   }
 
   const result = await executeIntakePlan({

@@ -54,8 +54,8 @@ async function digestHex(arrayBuffer) {
 
 /** Byte-for-byte the same canonical form as scripts/build-media-manifest.mjs. */
 export function canonicalizeManifestObjects(objects) {
-  return `${JSON.stringify(
-    objects.map((o) => ({
+  const canonical = objects.map((o) => {
+    const row = {
       postId: o.postId,
       figure: o.figure,
       logicalMediaId: o.logicalMediaId,
@@ -63,10 +63,16 @@ export function canonicalizeManifestObjects(objects) {
       extension: o.extension,
       byteSize: o.byteSize,
       sha256: o.sha256,
-    })),
-    null,
-    2,
-  )}\n`;
+    };
+
+    // MIME is optional for the legacy generated manifest so its existing
+    // canonical digest remains byte-for-byte unchanged. Dynamic D1 media rows
+    // supply it and therefore bind content type into their own manifest digest.
+    if (typeof o.mimeType === 'string') row.mimeType = o.mimeType;
+    return row;
+  });
+
+  return `${JSON.stringify(canonical, null, 2)}\n`;
 }
 
 export async function computeManifestSha256(objects) {
@@ -105,7 +111,11 @@ export async function inspectManifest(manifest) {
       typeof object.sha256 !== 'string' ||
       typeof object.logicalMediaId !== 'string' ||
       !Number.isInteger(object.figure) ||
-      !Number.isInteger(object.byteSize)
+      !Number.isInteger(object.byteSize) ||
+      (
+        object.mimeType !== undefined &&
+        typeof object.mimeType !== 'string'
+      )
     ) {
       return { ok: false, reason: 'manifest_malformed' };
     }
@@ -140,10 +150,12 @@ function failedObject(object, reason, extra = {}) {
     expected: {
       byteSize: Number.isInteger(object?.byteSize) ? object.byteSize : null,
       sha256: typeof object?.sha256 === 'string' ? object.sha256 : null,
+      mimeType: typeof object?.mimeType === 'string' ? object.mimeType : null,
     },
     present: false,
     sizeMatch: false,
     hashMatch: false,
+    mimeMatch: object?.mimeType === undefined,
     ok: false,
     reason,
     hashSource: null,
@@ -209,6 +221,20 @@ async function verifyOne(bucket, object) {
   }
 
   base.sizeMatch = true;
+
+  if (typeof object.mimeType === 'string') {
+    const observedMime = String(head?.httpMetadata?.contentType ?? '')
+      .split(';', 1)[0]
+      .trim()
+      .toLowerCase();
+    const expectedMime = object.mimeType.trim().toLowerCase();
+
+    base.actual.mimeType = observedMime || null;
+    if (!observedMime || observedMime !== expectedMime) {
+      return { ...base, reason: 'mime_mismatch' };
+    }
+    base.mimeMatch = true;
+  }
 
   let resolved;
   try {
@@ -285,6 +311,7 @@ function emptySummary() {
     missingCount: 0,
     sizeMismatchCount: 0,
     hashMismatchCount: 0,
+    mimeMismatchCount: 0,
     unrelatedObjectCount: 0,
     unrelatedObjects: [],
     unrelatedListing: { ok: false, complete: false, reason: 'r2_unreachable' },
@@ -350,6 +377,7 @@ async function verifyMediaObjectsInner(env, manifest) {
       (o) => o.reason === 'size_mismatch' || o.reason === 'zero_byte_object',
     ).length,
     hashMismatchCount: objects.filter((o) => o.reason === 'hash_mismatch').length,
+    mimeMismatchCount: objects.filter((o) => o.reason === 'mime_mismatch').length,
     unrelatedObjectCount: unrelated.count,
     unrelatedObjects: unrelated.objects,
     unrelatedListing: { ok: unrelated.ok, complete: unrelated.complete, reason: unrelated.reason },

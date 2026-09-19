@@ -15,6 +15,7 @@ export const BASE_MIGRATIONS = Object.freeze([
 export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';
 export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
   '0007_continuous_queue_intake.sql',
+  '0008_dynamic_runtime_integrity.sql',
 ]);
 
 export function sha256Json(value) {
@@ -144,7 +145,10 @@ export function assertMigrationLedger(names, { shadowMayExist = true } = {}) {
   const validTails = [
     [],
     [SHADOW_MIGRATION],
-    [SHADOW_MIGRATION, ...KNOWN_POST_SHADOW_MIGRATIONS],
+    ...KNOWN_POST_SHADOW_MIGRATIONS.map((_, index) => [
+      SHADOW_MIGRATION,
+      ...KNOWN_POST_SHADOW_MIGRATIONS.slice(0, index + 1),
+    ]),
   ];
 
   if (!validTails.some((expected) => JSON.stringify(tail) === JSON.stringify(expected))) {
