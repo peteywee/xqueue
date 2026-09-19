@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { schedule, stats, PILLAR_CYCLE } from '../src/schedule.mjs';
+import { resolveUniqueWallClock } from '../src/schedule-slot.mjs';
 
 /** Build a synthetic library with the same shape as the real one. */
 function library({ A = 72, B = 45, C = 36, D = 27 } = {}) {
@@ -122,6 +123,92 @@ test('custom slot times are honoured', () => {
   assert.equal(q[1].scheduledTime, '17:30');
 });
 
+test('assignments persist an exact UTC instant alongside local scheduling metadata', () => {
+  const q = schedule(library(), { start: '2026-08-31' });
+
+  assert.equal(q[0].scheduledAt, '2026-08-31T19:30:00.000Z');
+
+  const winter = q.find(
+    (post) => post.scheduledDate === '2026-12-01' && post.scheduledTime === '14:30',
+  );
+  assert.ok(winter, 'expected a winter afternoon assignment');
+  assert.equal(winter.scheduledAt, '2026-12-01T20:30:00.000Z');
+
+  for (const post of q) {
+    assert.equal(
+      post.scheduledAt,
+      resolveUniqueWallClock(post).toISOString(),
+      `${post.id}: committed UTC instant must match assignment wall clock`,
+    );
+  }
+});
+
+test('spring-forward nonexistent wall clocks are rejected at assignment time', () => {
+  assert.throws(
+    () => schedule(library(), {
+      start: '2027-03-14',
+      daysOfWeek: [0],
+      slots: ['02:30', '14:30'],
+      timezone: 'America/Chicago',
+    }),
+    /nonexistent local wall-clock time/,
+  );
+});
+
+test('fall-back ambiguous wall clocks are rejected unless explicitly disambiguated', () => {
+  assert.throws(
+    () => schedule(library(), {
+      start: '2027-11-07',
+      daysOfWeek: [0],
+      slots: ['01:30', '14:30'],
+      timezone: 'America/Chicago',
+    }),
+    /ambiguous local wall-clock time/,
+  );
+
+  assert.equal(
+    resolveUniqueWallClock({
+      scheduledDate: '2027-11-07',
+      scheduledTime: '01:30',
+      timezone: 'America/Chicago',
+      utcOffsetMinutes: -300,
+    }).toISOString(),
+    '2027-11-07T06:30:00.000Z',
+  );
+
+  assert.equal(
+    resolveUniqueWallClock({
+      scheduledDate: '2027-11-07',
+      scheduledTime: '01:30',
+      timezone: 'America/Chicago',
+      utcOffsetMinutes: -360,
+    }).toISOString(),
+    '2027-11-07T07:30:00.000Z',
+  );
+});
+
+test('strict assignment parsing rejects malformed and impossible wall clocks', () => {
+  for (const spec of [
+    { scheduledDate: '2027-02-30', scheduledTime: '14:30' },
+    { scheduledDate: '2027-03-14', scheduledTime: '24:00' },
+    { scheduledDate: '2027-03-14', scheduledTime: '02:60' },
+  ]) {
+    assert.throws(
+      () => resolveUniqueWallClock({ ...spec, timezone: 'America/Chicago' }),
+      /scheduledDate\/scheduledTime/,
+    );
+  }
+
+  assert.throws(
+    () => resolveUniqueWallClock({
+      scheduledDate: '2027-03-14',
+      scheduledTime: '14:30',
+      timezone: 'Mars/Phobos',
+    }),
+    /time zone|invalid/i,
+  );
+});
+
 test('an unbalanced library still schedules every post', () => {
   const lib = library({ A: 10, B: 2, C: 1, D: 1 });
   const q = schedule(lib, { start: '2026-09-07' });
@@ -149,10 +236,13 @@ test('tail deferrals preserve every other schedule and append exact IDs', () => 
   assert.deepEqual(q.slice(-3).map((post) => post.id), deferredIds);
   assert.equal(q.at(-3).scheduledDate, '2027-01-04');
   assert.equal(q.at(-3).scheduledTime, '14:30');
+  assert.equal(q.at(-3).scheduledAt, '2027-01-04T20:30:00.000Z');
   assert.equal(q.at(-2).scheduledDate, '2027-01-04');
   assert.equal(q.at(-2).scheduledTime, '22:15');
+  assert.equal(q.at(-2).scheduledAt, '2027-01-05T04:15:00.000Z');
   assert.equal(q.at(-1).scheduledDate, '2027-01-05');
   assert.equal(q.at(-1).scheduledTime, '14:30');
+  assert.equal(q.at(-1).scheduledAt, '2027-01-05T20:30:00.000Z');
   assert.ok(q.slice(-3).every((post) => post.deferredToEnd === true));
   assert.equal(Object.keys(byDay(q)).length, 91);
 });
