@@ -209,7 +209,7 @@ test('shadow builder fails closed on duplicate ids, duplicate slots, missing UTC
   );
 });
 
-test('read-only verification SQL cross-checks shadow rows against publication_state', () => {
+test('read-only verification SQL checks publication_state ID coverage without using legacy scheduled_at as the schedule oracle', () => {
   const model = buildProductionShadow();
   const sql = renderShadowVerificationSql(model);
 
@@ -222,7 +222,9 @@ test('read-only verification SQL cross-checks shadow rows against publication_st
   assert.match(sql, /assignment_digest_mismatch/);
   assert.match(sql, /publication_state_missing_shadow/);
   assert.match(sql, /shadow_missing_publication_state/);
-  assert.match(sql, /publication_state_slot_mismatch/);
+  assert.doesNotMatch(sql, /publication_state_slot_mismatch/);
+  assert.doesNotMatch(sql, /a\.resolved_at\s*<>\s*p\.scheduled_at/);
+  assert.match(sql, /static queue remains schedule-authoritative/i);
   assert.match(sql, /FROM publication_state/);
   assert.doesNotMatch(sql, /\b(?:INSERT|UPDATE|DELETE|ALTER|DROP)\b/i);
 });

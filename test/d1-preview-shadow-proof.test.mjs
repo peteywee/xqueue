@@ -5,7 +5,7 @@ import {
   assertExactShadowReadback,
   assertMigrationLedger,
   assertPreviewConfig,
-  assertPublicationStateParity,
+  assertPublicationStateCoverage,
   BASE_MIGRATIONS,
   classifyShadowCounts,
   flattenStatementRows,
@@ -252,7 +252,7 @@ test('exact readback binds all durable content and assignment identity fields', 
   );
 });
 
-test('publication_state parity requires exact post set and exact UTC instant', () => {
+test('publication_state coverage requires exact current post set', () => {
   const model = {
     count: 1,
     assignments: [{
@@ -262,18 +262,15 @@ test('publication_state parity requires exact post set and exact UTC instant', (
   };
 
   assert.equal(
-    assertPublicationStateParity(model, [{
+    assertPublicationStateCoverage(model, [{
       post_id: 'A1',
-      scheduled_at: '2026-08-31T19:30:00.000Z',
+      scheduled_at: '2026-08-31T19:31:00.000Z',
     }]),
     true,
   );
 
   assert.throws(
-    () => assertPublicationStateParity(model, [{
-      post_id: 'A1',
-      scheduled_at: '2026-08-31T19:31:00.000Z',
-    }]),
-    /UTC mismatch/,
+    () => assertPublicationStateCoverage(model, []),
+    /count 0 does not match shadow model 1/,
   );
 });

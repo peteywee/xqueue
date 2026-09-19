@@ -9,7 +9,7 @@ import {
   assertExactShadowReadback,
   assertMigrationLedger,
   assertPreviewConfig,
-  assertPublicationStateParity,
+  assertPublicationStateCoverage,
   classifyShadowCounts,
   flattenStatementRows,
   migrationNames,
@@ -191,7 +191,7 @@ function main() {
   const publicationRows = query(
     'SELECT post_id,scheduled_at FROM publication_state ORDER BY post_id;',
   );
-  assertPublicationStateParity(model, publicationRows);
+  assertPublicationStateCoverage(model, publicationRows);
 
   const afterRuntime = immutableRuntimeSnapshot();
   assertSameRuntimeSnapshot(beforeRuntime, afterRuntime);
@@ -218,7 +218,8 @@ function main() {
     },
     checks: {
       exact_shadow_readback: 'pass',
-      publication_state_slot_parity: 'pass',
+      static_queue_slot_parity: 'pass',
+      publication_state_post_set_parity: 'pass',
       publication_state_unchanged: 'pass',
       runtime_metadata_unchanged: 'pass',
       authority_state_unchanged: 'pass',
