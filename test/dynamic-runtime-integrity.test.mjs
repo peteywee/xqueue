@@ -157,7 +157,10 @@ function activeAssignmentRows(db) {
 
 function runtimeState(db) {
   return db.prepare(
-    'SELECT * FROM queue_runtime_state WHERE singleton_id=1;',
+    'SELECT generation,revision_digest,active_assignment_count,' +
+    'approved_unscheduled_count,media_required_count,media_ready_count,' +
+    'source_operation_id,created_at AS updated_at ' +
+    'FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 1;',
   ).get() ?? null;
 }
 
@@ -365,7 +368,7 @@ test('dynamic snapshot fails closed on duplicate active content, duplicate slot,
   );
 });
 
-test('runtime revision promotion trigger refuses a stale predecessor', async () => {
+test('single-statement runtime revision CAS refuses a stale predecessor', async () => {
   const db = new DatabaseSync(':memory:');
   seed180(db);
 
@@ -387,10 +390,14 @@ test('runtime revision promotion trigger refuses a stale predecessor', async () 
     created_at: AT2,
   };
 
-  assert.throws(
-    () => db.exec(renderRuntimeRevisionInsertSql(bad)),
-    /runtime_revision_cas_failed/,
-  );
+  db.exec(renderRuntimeRevisionInsertSql(bad));
+
+  const history = db.prepare(
+    'SELECT generation,revision_digest FROM queue_runtime_revisions ORDER BY generation;',
+  ).all();
+  assert.equal(history.length, 1);
+  assert.equal(history[0].generation, 1);
+  assert.equal(history[0].revision_digest, first.revision_digest);
 
   const state = runtimeState(db);
   assert.equal(state.generation, 1);
