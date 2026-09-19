@@ -1,4 +1,5 @@
 import { publicationAuthorityEnabled } from './authority-config.mjs';
+import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
 import { runScheduledPublication } from './production-publisher.mjs';
@@ -62,6 +63,7 @@ export default {
       try {
         const storage = await storageHealth(env);
         const queueIntegrity = await verifyQueueIntegrity(env);
+        const dynamicRuntimeReadiness = await verifyDynamicRuntime(env);
         const authorityReadiness = await evaluateAuthorityReadiness(env);
         const schedulerLiveness = await readSchedulerLiveness(env.DB, {
           required: authorityReadiness.authorityFlag === true,
@@ -88,6 +90,7 @@ export default {
             schedulerLiveness,
 
             queueIntegrity,
+            dynamicRuntimeReadiness,
             authorityReadiness,
 
             storage,
