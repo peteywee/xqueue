@@ -415,7 +415,7 @@ export function renderOperationCreateSql(plan, recordedAt) {
     '  operation_id, plan_digest, batch_digest, item_count,',
     '  expected_frontier_generation, expected_frontier_resolved_at,',
     '  proposed_frontier_resolved_at, baseline_assignment_hash,',
-    '  status, created_at, updated_at',
+    '  target_account, policy_version, status, created_at, updated_at',
     ') VALUES (',
     [
       sqlString(plan.operation_id),
@@ -426,6 +426,8 @@ export function renderOperationCreateSql(plan, recordedAt) {
       sqlString(plan.expected_frontier_resolved_at),
       sqlString(plan.proposed_frontier_resolved_at),
       sqlString(plan.baseline_assignment_hash),
+      sqlString(plan.target_account),
+      sqlInteger(plan.policy_version),
       sqlString('planned'),
       sqlString(recordedAt),
       sqlString(recordedAt),
@@ -728,6 +730,8 @@ export function assertOperationMatchesPlan(operation, plan) {
     expected_frontier_resolved_at: plan.expected_frontier_resolved_at,
     proposed_frontier_resolved_at: plan.proposed_frontier_resolved_at,
     baseline_assignment_hash: plan.baseline_assignment_hash,
+    target_account: plan.target_account,
+    policy_version: plan.policy_version,
   };
   for (const [key, value] of Object.entries(expected)) {
     if (!equal(operation[key], value)) {
