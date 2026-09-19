@@ -51,7 +51,7 @@ export function buildProductionShadow() {
 
   return buildContinuousQueueShadow(queue, {
     policyVersion: policy.version,
-    targetAccount: 'PatrickCra94338',
+    targetAccount: 'x-primary',
   });
 }
 
