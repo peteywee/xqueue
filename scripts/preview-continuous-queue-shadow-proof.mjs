@@ -55,8 +55,7 @@ function query(sql) {
 }
 
 function executeFile(file) {
-  const { stdout } = run('pnpm', wranglerExecuteArgs({ file }));
-  return parseWranglerJson(stdout);
+  run('pnpm', wranglerExecuteArgs({ file }));
 }
 
 function readMigrationLedger() {
