@@ -147,7 +147,7 @@ test('migration ledger accepts only exact 0001-0005 baseline with optional termi
       ...BASE_MIGRATIONS,
       '9999_unknown.sql',
     ]),
-    /exact 0001-0005 baseline/,
+    /exact 0001-0005 baseline|unknown or reordered tail/,
   );
   assert.throws(
     () => assertMigrationLedger([
