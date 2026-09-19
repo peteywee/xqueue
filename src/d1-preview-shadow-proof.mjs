@@ -15,6 +15,7 @@ export const BASE_MIGRATIONS = Object.freeze([
 export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';
 export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
   '0007_continuous_queue_intake.sql',
+  '0008_dynamic_runtime_integrity.sql',
 ]);
 
 export function sha256Json(value) {
