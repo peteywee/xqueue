@@ -1,0 +1,78 @@
+name: Preview Dynamic Runtime Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preview-dynamic-runtime.yml'
+      - 'cloudflare/migrations/0008_dynamic_runtime_integrity.sql'
+      - 'cloudflare/src/dynamic-runtime-integrity.mjs'
+      - 'cloudflare/src/media-verify.mjs'
+      - 'cloudflare/src/worker.mjs'
+      - 'src/continuous-queue-runtime-write.mjs'
+      - 'src/continuous-queue-intake.mjs'
+      - 'scripts/continuous-queue-intake.mjs'
+      - 'scripts/preview-dynamic-runtime-proof.mjs'
+      - 'test/dynamic-runtime-integrity.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-schema-mutation
+  cancel-in-progress: false
+
+jobs:
+  prove-preview-dynamic-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XQUEUE_PREVIEW_DYNAMIC_RUNTIME_EVIDENCE: /tmp/xqueue-preview-dynamic-runtime-proof.json
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove dynamic runtime guards locally
+        run: |
+          node --test \
+            test/dynamic-runtime-integrity.test.mjs \
+            test/cloudflare-media.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/d1-preview-shadow-proof.test.mjs
+
+      - name: Assert publication authority boundary remains intact
+        run: pnpm audit:authority
+
+      - name: Apply preview-only schema
+        run: pnpm preview:intake:migrate
+
+      - name: Initialize and prove preview dynamic runtime
+        run: pnpm preview:runtime-proof
+
+      - name: Upload dynamic runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-dynamic-runtime-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-preview-dynamic-runtime-proof.json
+          if-no-files-found: warn
