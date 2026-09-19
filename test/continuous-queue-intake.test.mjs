@@ -336,3 +336,24 @@ test('ambiguous item mutation is accepted only after exact readback', async () =
   assert.equal(result.status, 'applied');
   assert.equal(transport.putCalls, 1);
 });
+
+
+test('exact completed-plan replay is idempotent and performs no second item write', async () => {
+  const plan = planFor();
+  const transport = makeTransport(plan);
+
+  const first = await executeIntakePlan({
+    plan,
+    transport,
+    recordedAt: '2026-09-19T18:30:00.000Z',
+  });
+  const second = await executeIntakePlan({
+    plan,
+    transport,
+    recordedAt: '2026-09-19T18:31:00.000Z',
+  });
+
+  assert.equal(first.status, 'applied');
+  assert.equal(second.status, 'already_applied');
+  assert.equal(transport.putCalls, 1);
+});
