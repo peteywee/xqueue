@@ -12,10 +12,7 @@ export const BASE_MIGRATIONS = Object.freeze([
   '0005_publication_state_generation.sql',
 ]);
 
-export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';
-export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
-  '0007_continuous_queue_intake.sql',
-]);
+export const SHADOW_MIGRATION = '0006_continuous_queue_shadow.sql';\nexport const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([\n  '0007_continuous_queue_intake.sql',\n]);
 
 export function sha256Json(value) {
   return createHash('sha256')
@@ -166,3 +163,163 @@ export function assertMigrationLedger(names, { shadowMayExist = true } = {}) {
   });
 }
 
+export function classifyShadowCounts(row, expected = 180) {
+  const counts = {
+    content: Number(row?.content_count),
+    revisions: Number(row?.revision_count),
+    assignments: Number(row?.assignment_count),
+    contentEvents: Number(row?.content_event_count),
+    assignmentEvents: Number(row?.assignment_event_count),
+  };
+
+  for (const [key, value] of Object.entries(counts)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`shadow ${key} count is invalid`);
+    }
+  }
+
+  const values = Object.values(counts);
+  if (values.every((value) => value === 0)) {
+    return Object.freeze({ state: 'empty', counts });
+  }
+
+  if (values.every((value) => value === expected)) {
+    return Object.freeze({ state: 'complete', counts });
+  }
+
+  throw new Error(
+    `preview shadow tables are partially populated: ${JSON.stringify(counts)}`,
+  );
+}
+
+function mapBy(rows, key) {
+  const map = new Map();
+  for (const row of rows) {
+    const id = row?.[key];
+    if (typeof id !== 'string' || id.length === 0 || map.has(id)) {
+      throw new Error(`readback has invalid or duplicate ${key}`);
+    }
+    map.set(id, row);
+  }
+  return map;
+}
+
+function equalValue(actual, expected) {
+  return actual === expected ||
+    (actual === null && expected === undefined) ||
+    (actual === undefined && expected === null);
+}
+
+function assertFields(actual, expected, fields, label) {
+  for (const field of fields) {
+    if (!equalValue(actual?.[field], expected?.[field])) {
+      throw new Error(
+        `${label} field ${field} mismatch: expected ${JSON.stringify(expected?.[field])}, got ${JSON.stringify(actual?.[field])}`,
+      );
+    }
+  }
+}
+
+export function assertExactShadowReadback(model, readback) {
+  if (!model || model.count !== 180) {
+    throw new Error('expected the canonical 180-item shadow model');
+  }
+
+  const content = mapBy(readback.content, 'content_id');
+  const revisions = mapBy(readback.revisions, 'content_id');
+  const assignments = mapBy(readback.assignments, 'content_id');
+
+  if (content.size !== model.count || revisions.size !== model.count || assignments.size !== model.count) {
+    throw new Error('shadow readback count does not match model');
+  }
+
+  const contentFields = [
+    'content_id',
+    'pillar',
+    'current_revision',
+    'status',
+    'generation',
+  ];
+  const revisionFields = [
+    'content_id',
+    'revision',
+    'title',
+    'body',
+    'publication_text',
+    'content_digest',
+    'figure',
+    'source_ref',
+  ];
+  const assignmentFields = [
+    'assignment_id',
+    'assignment_version',
+    'content_id',
+    'content_revision',
+    'content_digest',
+    'target_account',
+    'policy_version',
+    'resolved_at',
+    'scheduled_date',
+    'scheduled_time',
+    'timezone',
+    'slot_label',
+    'status',
+    'superseded_by_version',
+    'generation',
+  ];
+
+  for (const expected of model.content) {
+    assertFields(
+      content.get(expected.content_id),
+      expected,
+      contentFields,
+      `content ${expected.content_id}`,
+    );
+  }
+
+  for (const expected of model.revisions) {
+    assertFields(
+      revisions.get(expected.content_id),
+      expected,
+      revisionFields,
+      `revision ${expected.content_id}`,
+    );
+  }
+
+  for (const expected of model.assignments) {
+    assertFields(
+      assignments.get(expected.content_id),
+      expected,
+      assignmentFields,
+      `assignment ${expected.content_id}`,
+    );
+  }
+
+  const slots = new Set(
+    readback.assignments.map(
+      (row) => `${row.target_account}\u0000${row.resolved_at}`,
+    ),
+  );
+  if (slots.size !== model.count) {
+    throw new Error('shadow readback contains duplicate active slots');
+  }
+
+  return true;
+}
+
+export function assertPublicationStateCoverage(model, publicationRows) {
+  const rows = mapBy(publicationRows, 'post_id');
+  if (rows.size !== model.count) {
+    throw new Error(
+      `publication_state count ${rows.size} does not match shadow model ${model.count}`,
+    );
+  }
+
+  for (const assignment of model.assignments) {
+    if (!rows.has(assignment.content_id)) {
+      throw new Error(`publication_state is missing ${assignment.content_id}`);
+    }
+  }
+
+  return true;
+}
