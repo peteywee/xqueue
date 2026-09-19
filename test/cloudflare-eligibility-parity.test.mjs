@@ -84,12 +84,13 @@ test('the parity matrix covers every required scenario', () => {
   }
 });
 
-test('the parity matrix is built against the canonical 180-post queue', () => {
+test('the parity matrix preserves the exact legacy 180-post campaign projection', () => {
   const matrix = buildMatrix();
 
   assert.equal(matrix.productionQueue.count, 180);
+  assert.match(matrix.productionQueue.sha256, /^[a-f0-9]{64}$/);
   assert.equal(
-    matrix.productionQueue.sha256,
+    matrix.productionQueue.legacyProjectionSha256,
     'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7',
   );
 });
@@ -137,10 +138,8 @@ const INSTANTS = [
   ['2027-01-04', '22:15', '2027-01-05T04:15:00.000Z', 'deferred tail A30'],
   ['2027-01-05', '14:30', '2027-01-05T20:30:00.000Z', 'deferred tail C1'],
   ['2027-03-14', '01:30', '2027-03-14T07:30:00.000Z', 'spring forward, before the gap (CST)'],
-  ['2027-03-14', '02:30', '2027-03-14T07:30:00.000Z', 'spring forward, NONEXISTENT wall clock'],
   ['2027-03-14', '03:30', '2027-03-14T08:30:00.000Z', 'spring forward, after the gap (CDT)'],
   ['2027-03-14', '14:30', '2027-03-14T19:30:00.000Z', 'spring-forward day, afternoon (CDT)'],
-  ['2027-11-07', '01:30', '2027-11-07T06:30:00.000Z', 'fall back, AMBIGUOUS wall clock (first/CDT)'],
   ['2027-11-07', '02:30', '2027-11-07T08:30:00.000Z', 'fall back, after the repeat (CST)'],
   ['2027-11-07', '14:30', '2027-11-07T20:30:00.000Z', 'fall-back day, afternoon (CST)'],
 ];
@@ -154,25 +153,47 @@ for (const [scheduledDate, scheduledTime, expected, label] of INSTANTS) {
   });
 }
 
-test('a nonexistent spring-forward wall clock collapses onto the instant before the gap', () => {
-  assert.equal(
-    resolveScheduledAt({ scheduledDate: '2027-03-14', scheduledTime: '02:30', timezone: TZ }),
-    resolveScheduledAt({ scheduledDate: '2027-03-14', scheduledTime: '01:30', timezone: TZ }),
-  );
+test('a nonexistent spring-forward wall clock is refused on both runtime paths', () => {
+  const spec = {
+    scheduledDate: '2027-03-14',
+    scheduledTime: '02:30',
+    timezone: TZ,
+  };
+
+  assert.throws(() => scheduledAt(spec), /nonexistent local wall-clock time/);
+  assert.throws(() => resolveScheduledAt(spec), /nonexistent local wall-clock time/);
 });
 
-test('an ambiguous fall-back wall clock resolves to the first (CDT) occurrence', () => {
-  const first = Date.parse('2027-11-07T06:30:00.000Z');
-  const second = Date.parse('2027-11-07T07:30:00.000Z');
-
-  const resolved = resolveScheduledAt({
+test('an ambiguous fall-back wall clock is refused without explicit disambiguation', () => {
+  const spec = {
     scheduledDate: '2027-11-07',
     scheduledTime: '01:30',
     timezone: TZ,
-  });
+  };
 
-  assert.equal(resolved, first);
-  assert.notEqual(resolved, second);
+  assert.throws(() => scheduledAt(spec), /ambiguous local wall-clock time/);
+  assert.throws(() => resolveScheduledAt(spec), /ambiguous local wall-clock time/);
+
+  assert.equal(
+    resolveScheduledAt({ ...spec, utcOffsetMinutes: -300 }),
+    Date.parse('2027-11-07T06:30:00.000Z'),
+  );
+  assert.equal(
+    resolveScheduledAt({ ...spec, utcOffsetMinutes: -360 }),
+    Date.parse('2027-11-07T07:30:00.000Z'),
+  );
+});
+
+test('committed scheduledAt is authoritative on both local and Cloudflare readers', () => {
+  const spec = {
+    scheduledAt: '2026-09-01T19:30:00.000Z',
+    scheduledDate: '2099-01-01',
+    scheduledTime: '00:00',
+    timezone: TZ,
+  };
+
+  assert.equal(scheduledAt(spec).toISOString(), spec.scheduledAt);
+  assert.equal(resolveScheduledAt(spec), Date.parse(spec.scheduledAt));
 });
 
 test('isSupportedTimeZone accepts IANA zones and rejects nonsense', () => {
@@ -372,6 +393,25 @@ test('invalid_grace', () => {
     assertFailsClosed(
       evaluateEligibility([P1], ledger(), { now: NOW, graceMinutes }),
       'invalid_grace',
+    );
+  }
+});
+
+test('invalid_scheduled_assignment', () => {
+  for (const broken of [
+    post('G1', '2027-03-14', '02:30'),
+    post('F1', '2027-11-07', '01:30'),
+    {
+      id: 'C1',
+      scheduledAt: '2026-09-01T19:30:00Z',
+      scheduledDate: '2026-09-01',
+      scheduledTime: '14:30',
+      timezone: TZ,
+    },
+  ]) {
+    assertFailsClosed(
+      evaluateEligibility([broken], ledger(), { now: NOW }),
+      'invalid_scheduled_assignment',
     );
   }
 });
