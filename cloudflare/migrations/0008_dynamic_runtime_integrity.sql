@@ -65,7 +65,9 @@ CREATE UNIQUE INDEX queue_runtime_revisions_source_operation_uq
 ON queue_runtime_revisions(source_operation_id)
 WHERE source_operation_id IS NOT NULL;
 
--- Current runtime truth is the latest immutable row in queue_runtime_revisions.\n-- No trigger/projection table is used: revision promotion is a single INSERT ... SELECT CAS.\n\nCREATE TABLE queue_media_objects (
+-- Current runtime truth is the latest immutable row in queue_runtime_revisions.
+-- No trigger/projection table is used: revision promotion is a single INSERT ... SELECT CAS.
+CREATE TABLE queue_media_objects (
     content_id TEXT NOT NULL,
     content_revision INTEGER NOT NULL
       CHECK (content_revision >= 1),
