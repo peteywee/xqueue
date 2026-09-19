@@ -37,6 +37,12 @@ export function scheduledAt({
     return committedInstant(persistedScheduledAt);
   }
 
+  if (!scheduledDate || !scheduledTime || !timezone) {
+    throw new Error(
+      'scheduledDate, scheduledTime and timezone are required',
+    );
+  }
+
   return resolveUniqueWallClock({
     scheduledDate,
     scheduledTime,
