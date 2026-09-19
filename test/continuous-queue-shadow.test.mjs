@@ -10,6 +10,7 @@ import { schedule } from '../src/schedule.mjs';
 import {
   buildContinuousQueueShadow,
   renderShadowBackfillSql,
+  renderShadowVerificationSql,
   shadowManifestJson,
   shadowManifestSha256,
 } from '../src/continuous-queue-shadow.mjs';
@@ -206,6 +207,24 @@ test('shadow builder fails closed on duplicate ids, duplicate slots, missing UTC
     () => buildContinuousQueueShadow(utcDrift, options),
     /resolved UTC mismatch/,
   );
+});
+
+test('read-only verification SQL cross-checks shadow rows against publication_state', () => {
+  const model = buildProductionShadow();
+  const sql = renderShadowVerificationSql(model);
+
+  assert.match(sql, /READ-ONLY #88 SHADOW VERIFICATION/);
+  assert.match(sql, /content_count/);
+  assert.match(sql, /revision_count/);
+  assert.match(sql, /active_assignment_count/);
+  assert.match(sql, /duplicate_active_content/);
+  assert.match(sql, /duplicate_active_slots/);
+  assert.match(sql, /assignment_digest_mismatch/);
+  assert.match(sql, /publication_state_missing_shadow/);
+  assert.match(sql, /shadow_missing_publication_state/);
+  assert.match(sql, /publication_state_slot_mismatch/);
+  assert.match(sql, /FROM publication_state/);
+  assert.doesNotMatch(sql, /\b(?:INSERT|UPDATE|DELETE|ALTER|DROP)\b/i);
 });
 
 test('shadow SQL requires an explicit truthful recording instant', () => {
