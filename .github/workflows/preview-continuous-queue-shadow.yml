@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/preview-continuous-queue-shadow.yml'
+      - 'scripts/preview-continuous-queue-shadow-proof.mjs'
+      - 'src/d1-preview-shadow-proof.mjs'
+      - 'src/continuous-queue-shadow.mjs'
+      - 'test/d1-preview-shadow-proof.test.mjs'
+      - 'test/continuous-queue-shadow.test.mjs'
   workflow_dispatch:
 
 permissions:
