@@ -1,0 +1,73 @@
+name: Preview 0008 Read-only Diagnostic
+
+on:
+  push:
+    branches:
+      - fix/issue-90-d1-migration-parser
+    paths:
+      - '.github/workflows/preview-0008-readonly-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Inspect migration ledger
+        run: |
+          pnpm wrangler d1 execute xqueue-preview \
+            --config wrangler.preview.jsonc \
+            --remote --yes --json \
+            --command "SELECT id,name,applied_at FROM d1_migrations ORDER BY id;" \
+            > /tmp/preview-0008-ledger.json
+          cat /tmp/preview-0008-ledger.json
+
+      - name: Inspect intake columns
+        run: |
+          pnpm wrangler d1 execute xqueue-preview \
+            --config wrangler.preview.jsonc \
+            --remote --yes --json \
+            --command "PRAGMA table_info(queue_intake_operations);" \
+            > /tmp/preview-0008-intake-columns.json
+          cat /tmp/preview-0008-intake-columns.json
+
+      - name: Inspect runtime objects
+        run: |
+          pnpm wrangler d1 execute xqueue-preview \
+            --config wrangler.preview.jsonc \
+            --remote --yes --json \
+            --command "SELECT type,name,tbl_name FROM sqlite_master WHERE name IN ('queue_runtime_revisions','queue_runtime_state','queue_runtime_revision_promote','queue_media_objects','queue_media_events','queue_runtime_revisions_source_operation_uq','queue_media_objects_content_idx','queue_media_events_content_idx') ORDER BY type,name;" \
+            > /tmp/preview-0008-objects.json
+          cat /tmp/preview-0008-objects.json
+
+      - name: Upload diagnostic evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-0008-readonly-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            /tmp/preview-0008-ledger.json
+            /tmp/preview-0008-intake-columns.json
+            /tmp/preview-0008-objects.json
+          if-no-files-found: error
