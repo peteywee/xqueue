@@ -102,7 +102,6 @@ test('all Wrangler D1 mutation/read argv are hard-pinned to preview target', () 
       '--config',
       'wrangler.preview.jsonc',
       '--remote',
-      '--yes',
     ],
   );
 

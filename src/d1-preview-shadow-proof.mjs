@@ -84,7 +84,6 @@ export function wranglerMigrationsApplyArgs() {
     '--config',
     PREVIEW_CONFIG,
     '--remote',
-    '--yes',
   ];
 }
 
