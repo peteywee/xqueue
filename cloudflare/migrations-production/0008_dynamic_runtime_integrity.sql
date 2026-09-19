@@ -1,3 +1,31 @@
+ALTER TABLE queue_intake_operations
+  ADD COLUMN expected_runtime_generation INTEGER
+    CHECK (
+      expected_runtime_generation IS NULL
+      OR expected_runtime_generation >= 1
+    );
+
+ALTER TABLE queue_intake_operations
+  ADD COLUMN expected_runtime_revision_digest TEXT
+    CHECK (
+      expected_runtime_revision_digest IS NULL
+      OR length(expected_runtime_revision_digest) = 64
+    );
+
+ALTER TABLE queue_intake_operations
+  ADD COLUMN resulting_runtime_generation INTEGER
+    CHECK (
+      resulting_runtime_generation IS NULL
+      OR resulting_runtime_generation >= 1
+    );
+
+ALTER TABLE queue_intake_operations
+  ADD COLUMN resulting_runtime_revision_digest TEXT
+    CHECK (
+      resulting_runtime_revision_digest IS NULL
+      OR length(resulting_runtime_revision_digest) = 64
+    );
+
 CREATE TABLE queue_runtime_revisions (
     generation INTEGER PRIMARY KEY
       CHECK (generation >= 1),
