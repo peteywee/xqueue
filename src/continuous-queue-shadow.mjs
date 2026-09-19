@@ -45,7 +45,7 @@ export function buildContinuousQueueShadow(
   queue,
   {
     policyVersion,
-    targetAccount = 'PatrickCra94338',
+    targetAccount = 'x-primary',
   } = {},
 ) {
   if (!Array.isArray(queue) || queue.length === 0) {
