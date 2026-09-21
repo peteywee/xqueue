@@ -20,6 +20,10 @@ import {
   publicationAuthorityEnabled,
 } from './authority-config.mjs';
 import {
+  publicationHaltVerdict,
+  readGlobalPublicationHalt,
+} from './publication-halt.mjs';
+import {
   readCurrentAssignmentHandle,
 } from './assignment-version-fence.mjs';
 import {
@@ -190,6 +194,27 @@ function idle(reason, extra = {}) {
   });
 }
 
+async function currentHaltVerdict(readHalt, db) {
+  try {
+    return publicationHaltVerdict(await readHalt(db));
+  } catch {
+    return Object.freeze({
+      ok: false,
+      reason: 'halt_store_unavailable',
+      halt: null,
+    });
+  }
+}
+
+function haltTransportError(verdict) {
+  const error = new Error(verdict?.reason ?? 'publication_halt_unavailable');
+  error.code =
+    verdict?.reason === 'publication_halted'
+      ? 'PUBLICATION_HALTED'
+      : 'PUBLICATION_HALT_UNAVAILABLE';
+  return safeTransportError(error, 'pre_dispatch');
+}
+
 export async function runScheduledPublication(
   env,
   {
@@ -219,6 +244,13 @@ export async function runScheduledPublication(
   const verifyLease = dependencies.verifyPublicationLease ?? verifyPublicationLease;
   const readAssignment =
     dependencies.readCurrentAssignmentHandle ?? readCurrentAssignmentHandle;
+  const readHalt =
+    dependencies.readGlobalPublicationHalt ?? readGlobalPublicationHalt;
+
+  const initialHalt = await currentHaltVerdict(readHalt, env.DB);
+  if (!initialHalt.ok) {
+    return idle(initialHalt.reason, { halt: initialHalt.halt });
+  }
 
   const queueIntegrity = await verifyQueue(env);
   if (!queueIntegrity?.ok) {
@@ -284,6 +316,15 @@ export async function runScheduledPublication(
       evaluateEligibility: evaluate,
 
       acquireLease: async () => {
+        const halt = await currentHaltVerdict(readHalt, env.DB);
+        if (!halt.ok) {
+          return {
+            acquired: false,
+            reason: halt.reason,
+            halt: halt.halt,
+          };
+        }
+
         const identity = createPublicationLeaseIdentity();
         const acquired = await acquireLease(env.DB, {
           ...identity,
@@ -326,6 +367,11 @@ export async function runScheduledPublication(
         const mediaIds = [];
 
         if (media.required) {
+          const haltBeforeMedia = await currentHaltVerdict(readHalt, env.DB);
+          if (!haltBeforeMedia.ok) {
+            throw haltTransportError(haltBeforeMedia);
+          }
+
           try {
             client ??= createClient(env);
             const mediaId = await uploadMediaBytesViaClient(client, media.bytes);
@@ -343,6 +389,11 @@ export async function runScheduledPublication(
             error.code = 'LEASE_FENCED_AFTER_MEDIA';
             throw safeTransportError(error, 'pre_dispatch');
           }
+        }
+
+        const haltBeforePost = await currentHaltVerdict(readHalt, env.DB);
+        if (!haltBeforePost.ok) {
+          throw haltTransportError(haltBeforePost);
         }
 
         try {
