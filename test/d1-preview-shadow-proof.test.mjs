@@ -214,6 +214,30 @@ test('migration ledger accepts only the exact ordered preview migration chain', 
     },
   );
 
+  assert.deepEqual(
+    assertMigrationLedger([
+      ...BASE_MIGRATIONS,
+      SHADOW_MIGRATION,
+      '0007_continuous_queue_intake.sql',
+      '0008_dynamic_runtime_integrity.sql',
+      '0009_deferred_lifecycle.sql',
+      '0010_publication_fence_identity.sql',
+      '0011_global_publication_halt.sql',
+      '0012_reconciliation_determinations.sql',
+    ]),
+    {
+      hasShadow: true,
+      postShadowMigrations: [
+        '0007_continuous_queue_intake.sql',
+        '0008_dynamic_runtime_integrity.sql',
+        '0009_deferred_lifecycle.sql',
+        '0010_publication_fence_identity.sql',
+        '0011_global_publication_halt.sql',
+        '0012_reconciliation_determinations.sql',
+      ],
+    },
+  );
+
   assert.throws(
     () => assertMigrationLedger(BASE_MIGRATIONS.slice(0, -1)),
     /exact 0001-0005 baseline/,

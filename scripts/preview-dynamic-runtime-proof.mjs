@@ -266,12 +266,21 @@ async function main() {
     '0009_deferred_lifecycle.sql',
     '0010_publication_fence_identity.sql',
     '0011_global_publication_halt.sql',
+    '0012_reconciliation_determinations.sql',
   ];
 
-  if (JSON.stringify(names.slice(-6)) !== JSON.stringify(expectedTail)) {
+  if (JSON.stringify(names.slice(-7)) !== JSON.stringify(expectedTail)) {
     throw new Error(
-      `preview migration tail is not exact 0006-0011: ${JSON.stringify(names)}`,
+      `preview migration tail is not exact 0006-0012: ${JSON.stringify(names)}`,
     );
+  }
+
+  const reconciliationSchema = query(
+    "SELECT name FROM sqlite_master WHERE type='table' " +
+    "AND name='publication_reconciliation_determinations';",
+  );
+  if (reconciliationSchema.length !== 1) {
+    throw new Error('preview reconciliation determination schema is missing');
   }
 
   const halt = query(
