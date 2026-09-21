@@ -105,21 +105,21 @@ function executeFile(sql) {
 
   try {
     writeFileSync(file, sql, 'utf8');
-    parseWranglerJson(
-      run('pnpm', [
-        'wrangler',
-        'd1',
-        'execute',
-        PREVIEW_DB,
-        '--config',
-        PREVIEW_CONFIG,
-        '--remote',
-        '--yes',
-        '--json',
-        '--file',
-        file,
-      ]),
-    );
+    // Wrangler 4.131.0 emits human-formatted output for --file even when
+    // --json is requested. Exit status is the mutation result; exact state is
+    // always reconciled by the caller's independent D1 readback before retry.
+    run('pnpm', [
+      'wrangler',
+      'd1',
+      'execute',
+      PREVIEW_DB,
+      '--config',
+      PREVIEW_CONFIG,
+      '--remote',
+      '--yes',
+      '--file',
+      file,
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
