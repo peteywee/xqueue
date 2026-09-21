@@ -26,7 +26,7 @@ import {
   deferOneMissedAssignment,
   MISSED_REASON,
   publicationDeferralHandoff,
-} from '../cloudflare/src/deferred-lifecycle.mjs';
+} from '../src/d1-deferred-lifecycle.mjs';
 
 function migration(path) {
   return readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
