@@ -4,6 +4,25 @@ import {
   MISSED_REASON,
 } from './d1-deferred-lifecycle.mjs';
 
+
+export const PRECUTOVER_NORMALIZATION_CANDIDATES_SQL = [
+  'SELECT',
+  ' a.assignment_id,a.assignment_version,a.content_id,a.content_revision,a.content_digest,',
+  ' a.target_account,a.policy_version,a.resolved_at,a.scheduled_date,a.scheduled_time,',
+  ' a.timezone,a.slot_label,a.status AS assignment_status,a.lifecycle_state,',
+  ' a.generation AS assignment_generation,p.status AS publication_status,',
+  ' p.generation AS publication_generation,d.state AS deferral_state',
+  'FROM queue_assignments a',
+  'JOIN publication_state p ON p.post_id=a.content_id',
+  'LEFT JOIN queue_deferrals d ON d.content_id=a.content_id',
+  "WHERE a.status='active'",
+  " AND a.lifecycle_state='scheduled'",
+  " AND p.status='scheduled'",
+  ' AND p.attempt_id IS NULL',
+  ' AND d.content_id IS NULL',
+  'ORDER BY a.resolved_at,a.content_id,a.assignment_version;',
+].join(' ');
+
 function sqlText(value) {
   if (value === null || value === undefined) return 'NULL';
   return "'" + String(value).replaceAll("'", "''") + "'";
