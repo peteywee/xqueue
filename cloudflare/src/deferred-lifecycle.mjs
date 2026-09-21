@@ -1,3 +1,13 @@
+import {
+  buildDynamicRuntimeSnapshot,
+  readDynamicRuntimeRows,
+  readRuntimeState,
+} from './dynamic-runtime-integrity.mjs';
+import {
+  nextRuntimeRevision,
+  renderRuntimeRevisionInsertSql,
+} from '../../src/continuous-queue-runtime-write.mjs';
+
 // deferred-lifecycle.mjs — durable missed-slot -> deferred transition.
 //
 // This is scheduling lifecycle only. It never publishes, never calls X, and
@@ -406,6 +416,78 @@ export async function deferOneMissedAssignment(
   );
 }
 
+async function promoteRuntimeRevisionIfNeeded(db, recordedAt) {
+  const current = await readRuntimeState(db);
+  if (!current) {
+    throw new Error('runtime revision state is missing; refusing deferred lifecycle mutation');
+  }
+
+  const rows = await readDynamicRuntimeRows(db);
+  const snapshot = await buildDynamicRuntimeSnapshot(rows);
+
+  const currentGeneration = positiveInt(
+    current.generation,
+    'runtime revision generation',
+  );
+  if (
+    snapshot.revision_digest === current.revision_digest &&
+    snapshot.active_assignment_count === Number(current.active_assignment_count) &&
+    snapshot.approved_unscheduled_count === Number(current.approved_unscheduled_count) &&
+    snapshot.media_required_count === Number(current.media_required_count) &&
+    snapshot.media_ready_count === Number(current.media_ready_count)
+  ) {
+    return Object.freeze({
+      status: 'unchanged',
+      generation: currentGeneration,
+      revisionDigest: current.revision_digest,
+      deferredCount: snapshot.deferred_count,
+    });
+  }
+
+  const sourceOperationId =
+    `deferred-lifecycle:${snapshot.revision_digest.slice(0, 24)}`;
+  const revision = nextRuntimeRevision({
+    currentState: current,
+    snapshot,
+    sourceOperationId,
+    recordedAt,
+  });
+  const sql = renderRuntimeRevisionInsertSql(revision);
+
+  try {
+    const statement = db.prepare(sql);
+    if (!statement || typeof statement.run !== 'function') {
+      throw new Error('D1 run interface is unavailable');
+    }
+    await statement.run();
+  } catch {
+    // Ambiguous runtime-revision write: read back exact latest state before
+    // deciding whether a retry would be safe.
+  }
+
+  const observed = await readRuntimeState(db);
+  if (
+    Number(observed?.generation) === revision.generation &&
+    observed?.revision_digest === revision.revision_digest &&
+    Number(observed?.active_assignment_count) === revision.active_assignment_count &&
+    Number(observed?.approved_unscheduled_count) === revision.approved_unscheduled_count &&
+    Number(observed?.media_required_count) === revision.media_required_count &&
+    Number(observed?.media_ready_count) === revision.media_ready_count
+  ) {
+    return Object.freeze({
+      status: 'promoted',
+      generation: revision.generation,
+      revisionDigest: revision.revision_digest,
+      deferredCount: snapshot.deferred_count,
+      sourceOperationId,
+    });
+  }
+
+  throw new Error(
+    'deferred lifecycle changed runtime truth but canonical revision promotion is ambiguous; publication must remain fail-closed',
+  );
+}
+
 export async function deferMissedAssignments(
   db,
   {
@@ -437,7 +519,15 @@ export async function deferMissedAssignments(
     }
   }
 
-  return Object.freeze(outcomes);
+  const runtimeRevision = await promoteRuntimeRevisionIfNeeded(
+    db,
+    isoNow(now),
+  );
+
+  return Object.freeze({
+    outcomes: Object.freeze(outcomes),
+    runtimeRevision,
+  });
 }
 
 export const deferredLifecycleSql = Object.freeze({
