@@ -146,15 +146,45 @@ async function fixture() {
   insertContent('P2', 'deferred-two', d2);
   insertContent('F1', 'future', df);
 
-  for (const [id, d] of [['P1', d1], ['P2', d2]]) {
+  const deferredFixtures = [
+    {
+      id: 'P1',
+      digest: d1,
+      resolvedAt: '2026-09-18T19:30:00.000Z',
+      scheduledDate: '2026-09-18',
+      scheduledTime: '14:30',
+      slotLabel: 'lull',
+      deferredAt: '2026-09-18T20:00:00.000Z',
+    },
+    {
+      id: 'P2',
+      digest: d2,
+      resolvedAt: '2026-09-19T03:15:00.000Z',
+      scheduledDate: '2026-09-18',
+      scheduledTime: '22:15',
+      slotLabel: 'post-close',
+      deferredAt: '2026-09-19T03:45:00.000Z',
+    },
+  ];
+
+  for (const item of deferredFixtures) {
     db.prepare(
       'INSERT INTO queue_assignments ' +
       '(assignment_id,assignment_version,content_id,content_revision,content_digest,target_account,' +
       'policy_version,resolved_at,scheduled_date,scheduled_time,timezone,slot_label,status,' +
       'superseded_by_version,generation,created_at,updated_at,lifecycle_state) ' +
-      "VALUES (?,1,?,1,?,'x-primary',2,'2026-09-18T19:30:00.000Z'," +
-      "'2026-09-18','14:30','America/Chicago','lull','active',NULL,2,?,?,'deferred')",
-    ).run(id, id, d, RECORDED_AT, RECORDED_AT);
+      "VALUES (?,1,?,1,?,'x-primary',2,?,?,?,'America/Chicago',?,'active',NULL,2,?,?,'deferred')",
+    ).run(
+      item.id,
+      item.id,
+      item.digest,
+      item.resolvedAt,
+      item.scheduledDate,
+      item.scheduledTime,
+      item.slotLabel,
+      RECORDED_AT,
+      RECORDED_AT,
+    );
 
     db.prepare(
       'INSERT INTO queue_deferrals ' +
@@ -162,17 +192,25 @@ async function fixture() {
       'policy_version,content_digest,target_account,prior_resolved_at,prior_scheduled_date,' +
       'prior_scheduled_time,prior_timezone,prior_slot_label,reason,deferred_at,state,generation,' +
       'replacement_assignment_version) ' +
-      "VALUES (?,1,?,1,1,2,?,'x-primary','2026-09-18T19:30:00.000Z'," +
-      "'2026-09-18','14:30','America/Chicago','lull','missed_slot_grace_expired'," +
-      "'2026-09-18T20:00:00.000Z','pending_replacement',1,NULL)",
-    ).run(id, id, d);
+      "VALUES (?,1,?,1,1,2,?,'x-primary',?,?,?,'America/Chicago',?,'missed_slot_grace_expired',?," +
+      "'pending_replacement',1,NULL)",
+    ).run(
+      item.id,
+      item.id,
+      item.digest,
+      item.resolvedAt,
+      item.scheduledDate,
+      item.scheduledTime,
+      item.slotLabel,
+      item.deferredAt,
+    );
 
     db.prepare(
       'INSERT INTO publication_state ' +
       '(post_id,status,scheduled_at,tweet_id,prepared_at,publishing_at,posted_at,skipped_at,' +
       'skip_reason,last_error,updated_at,attempt_id,generation) ' +
-      "VALUES (?,'scheduled','2026-09-18T19:30:00.000Z',NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,NULL,3)",
-    ).run(id, RECORDED_AT);
+      "VALUES (?,'scheduled',?,NULL,NULL,NULL,NULL,NULL,NULL,NULL,?,NULL,3)",
+    ).run(item.id, item.resolvedAt, RECORDED_AT);
   }
 
   db.prepare(
@@ -313,7 +351,12 @@ function readback(db, plan) {
 
 test('automatic replacement ordering is deterministic by prior instant then content id', async () => {
   const { db } = await fixture();
-  const deferrals = pendingDeferrals(db).reverse();
+  const base = pendingDeferrals(db);
+  const tied = base.map((row) => ({
+    ...row,
+    prior_resolved_at: '2026-09-18T19:30:00.000Z',
+  }));
+  const deferrals = tied.reverse();
 
   const a = planAutomaticReplacements({
     deferrals,
