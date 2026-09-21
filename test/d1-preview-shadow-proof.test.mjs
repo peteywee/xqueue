@@ -115,7 +115,7 @@ test('all Wrangler D1 mutation/read argv are hard-pinned to preview target', () 
   }
 });
 
-test('migration ledger accepts only exact 0001-0005 baseline with optional terminal 0006', () => {
+test('migration ledger accepts only the exact ordered preview migration chain', () => {
   assert.deepEqual(
     assertMigrationLedger([...BASE_MIGRATIONS]),
     { hasShadow: false, postShadowMigrations: [] },
@@ -168,6 +168,26 @@ test('migration ledger accepts only exact 0001-0005 baseline with optional termi
         '0007_continuous_queue_intake.sql',
         '0008_dynamic_runtime_integrity.sql',
         '0009_deferred_lifecycle.sql',
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    assertMigrationLedger([
+      ...BASE_MIGRATIONS,
+      SHADOW_MIGRATION,
+      '0007_continuous_queue_intake.sql',
+      '0008_dynamic_runtime_integrity.sql',
+      '0009_deferred_lifecycle.sql',
+      '0010_publication_fence_identity.sql',
+    ]),
+    {
+      hasShadow: true,
+      postShadowMigrations: [
+        '0007_continuous_queue_intake.sql',
+        '0008_dynamic_runtime_integrity.sql',
+        '0009_deferred_lifecycle.sql',
+        '0010_publication_fence_identity.sql',
       ],
     },
   );
