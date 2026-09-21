@@ -45,6 +45,7 @@ SELECT
   a.timezone,
   a.slot_label,
   a.status,
+  a.lifecycle_state,
   a.superseded_by_version,
   a.generation AS assignment_generation,
   c.pillar,
@@ -62,11 +63,58 @@ JOIN queue_content_revisions r
   ON r.content_id = a.content_id
  AND r.revision = a.content_revision
 WHERE a.status = 'active'
+  AND a.lifecycle_state = 'scheduled'
 ORDER BY
   a.target_account,
   a.resolved_at,
   a.content_id,
   a.assignment_version
+`;
+
+export const DEFERRED_ASSIGNMENTS_SQL = `
+SELECT
+  a.assignment_id,
+  a.assignment_version,
+  a.content_id,
+  a.content_revision,
+  a.content_digest,
+  a.target_account,
+  a.policy_version,
+  a.resolved_at,
+  a.scheduled_date,
+  a.scheduled_time,
+  a.timezone,
+  a.slot_label,
+  a.status,
+  a.lifecycle_state,
+  a.superseded_by_version,
+  a.generation AS assignment_generation,
+  d.reason AS deferral_reason,
+  d.deferred_at,
+  d.state AS deferral_state,
+  c.pillar,
+  c.intake_state,
+  r.title,
+  r.body,
+  r.publication_text,
+  r.content_digest AS revision_content_digest,
+  r.figure,
+  r.source_ref
+FROM queue_assignments a
+JOIN queue_deferrals d
+  ON d.content_id = a.content_id
+ AND d.assignment_id = a.assignment_id
+ AND d.assignment_version = a.assignment_version
+JOIN queue_content c
+  ON c.content_id = a.content_id
+JOIN queue_content_revisions r
+  ON r.content_id = a.content_id
+ AND r.revision = a.content_revision
+WHERE
+  a.status = 'active'
+  AND a.lifecycle_state = 'deferred'
+  AND d.state = 'pending_replacement'
+ORDER BY a.resolved_at, a.content_id, a.assignment_version
 `;
 
 export const APPROVED_UNSCHEDULED_SQL = `
@@ -210,6 +258,21 @@ function assignmentIdentity(row) {
   };
 }
 
+function deferredIdentity(row) {
+  return {
+    assignment_id: row.assignment_id,
+    assignment_version: Number(row.assignment_version),
+    content_id: row.content_id,
+    content_revision: Number(row.content_revision),
+    content_digest: row.content_digest,
+    policy_version: Number(row.policy_version),
+    prior_resolved_at: row.resolved_at,
+    reason: row.deferral_reason,
+    deferred_at: row.deferred_at,
+    generation: Number(row.assignment_generation),
+  };
+}
+
 function unscheduledIdentity(row) {
   return {
     content_id: row.content_id,
@@ -239,10 +302,11 @@ function mediaIdentity(row) {
 
 export function canonicalRuntimePayload({
   assignments,
+  deferred = [],
   approvedUnscheduled,
   media,
 }) {
-  return {
+  const payload = {
     format: DYNAMIC_RUNTIME_FORMAT,
     assignments: sortByJson(assignments.map(assignmentIdentity)),
     approved_unscheduled: sortByJson(
@@ -250,6 +314,12 @@ export function canonicalRuntimePayload({
     ),
     media: sortByJson(media.map(mediaIdentity)),
   };
+
+  if (deferred.length > 0) {
+    payload.deferred = sortByJson(deferred.map(deferredIdentity));
+  }
+
+  return payload;
 }
 
 export async function runtimeRevisionDigest(rows) {
@@ -313,10 +383,16 @@ function validateMediaRow(row, label) {
 
 export async function buildDynamicRuntimeSnapshot({
   assignments = [],
+  deferred = [],
   approvedUnscheduled = [],
   media = [],
 } = {}) {
-  if (!Array.isArray(assignments) || !Array.isArray(approvedUnscheduled) || !Array.isArray(media)) {
+  if (
+    !Array.isArray(assignments) ||
+    !Array.isArray(deferred) ||
+    !Array.isArray(approvedUnscheduled) ||
+    !Array.isArray(media)
+  ) {
     throw new Error('runtime rows must be arrays');
   }
 
@@ -378,6 +454,51 @@ export async function buildDynamicRuntimeSnapshot({
       contentRevision,
       figure: row.figure == null ? null : integer(row.figure, `${label} figure`, { min: 1 }),
       scheduled: true,
+    });
+  }
+
+
+  for (const [index, row] of deferred.entries()) {
+    const label = `deferred assignment ${index + 1}`;
+    requiredString(row.assignment_id, `${label} id`);
+    integer(row.assignment_version, `${label} version`, { min: 1 });
+    const contentId = requiredString(row.content_id, `${label} content_id`);
+    const contentRevision = integer(
+      row.content_revision,
+      `${label} content_revision`,
+      { min: 1 },
+    );
+    const assignmentDigest = digestString(
+      row.content_digest,
+      `${label} content_digest`,
+    );
+    const revisionDigest = await validateContentDigest(row, label);
+
+    if (assignmentDigest !== revisionDigest) {
+      throw new Error(`${label} assignment/content digest mismatch`);
+    }
+    if (row.status !== 'active' || row.lifecycle_state !== 'deferred') {
+      throw new Error(`${label} lifecycle mismatch`);
+    }
+    if (row.deferral_state !== 'pending_replacement') {
+      throw new Error(`${label} deferral projection mismatch`);
+    }
+    canonicalInstant(row.resolved_at, `${label} resolved_at`);
+    canonicalInstant(row.deferred_at, `${label} deferred_at`);
+    requiredString(row.deferral_reason, `${label} reason`);
+
+    if (contentIds.has(contentId)) {
+      throw new Error(`content has multiple current scheduling states: ${contentId}`);
+    }
+    contentIds.add(contentId);
+
+    const key = currentContentKey(contentId, contentRevision);
+    currentContent.set(key, {
+      contentId,
+      contentRevision,
+      figure: row.figure == null ? null : integer(row.figure, `${label} figure`, { min: 1 }),
+      scheduled: false,
+      deferred: true,
     });
   }
 
@@ -473,6 +594,7 @@ export async function buildDynamicRuntimeSnapshot({
 
   const digest = await runtimeRevisionDigest({
     assignments,
+    deferred,
     approvedUnscheduled,
     media,
   });
@@ -481,6 +603,7 @@ export async function buildDynamicRuntimeSnapshot({
     format: DYNAMIC_RUNTIME_FORMAT,
     revision_digest: digest,
     active_assignment_count: assignments.length,
+    deferred_count: deferred.length,
     approved_unscheduled_count: approvedUnscheduled.length,
     media_required_count: mediaRequiredCount,
     media_ready_count: mediaReadyCount,
@@ -515,13 +638,14 @@ export async function readDynamicRuntimeRows(db) {
     throw new Error('D1 binding DB is not available');
   }
 
-  const [assignments, approvedUnscheduled, media] = await Promise.all([
+  const [assignments, deferred, approvedUnscheduled, media] = await Promise.all([
     all(db, ACTIVE_ASSIGNMENTS_SQL),
+    all(db, DEFERRED_ASSIGNMENTS_SQL),
     all(db, APPROVED_UNSCHEDULED_SQL),
     all(db, CURRENT_MEDIA_SQL),
   ]);
 
-  return { assignments, approvedUnscheduled, media };
+  return { assignments, deferred, approvedUnscheduled, media };
 }
 
 export async function readRuntimeState(db) {
@@ -637,6 +761,7 @@ function fail(reason, extra = {}) {
     revisionDigest: null,
     activeAssignmentCount: null,
     approvedUnscheduledCount: null,
+    deferredCount: null,
     mediaRequiredCount: null,
     mediaReadyCount: null,
     media: null,
@@ -797,6 +922,7 @@ export async function verifyDynamicRuntime(
     revisionDigest: state.revisionDigest,
     activeAssignmentCount: snapshot.active_assignment_count,
     approvedUnscheduledCount: snapshot.approved_unscheduled_count,
+    deferredCount: snapshot.deferred_count,
     mediaRequiredCount: snapshot.media_required_count,
     mediaReadyCount: snapshot.media_ready_count,
     media: mediaVerdict,
