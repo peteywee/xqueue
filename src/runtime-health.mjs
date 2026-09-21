@@ -3,7 +3,8 @@ import { scheduledAt } from './post-time.mjs';
 export function isResolved(state, postId) {
   return Boolean(
     state?.posted?.[postId] ||
-    state?.skipped?.[postId]
+    state?.skipped?.[postId] ||
+    state?.deferred?.[postId]
   );
 }
 
@@ -48,6 +49,7 @@ export function analyzeRuntime(
     ok: !state?.inflight && overdue.length === 0,
     postedCount: Object.keys(state?.posted ?? {}).length,
     skippedCount: Object.keys(state?.skipped ?? {}).length,
+    deferredCount: Object.keys(state?.deferred ?? {}).length,
     unresolvedCount: unresolved.length,
     due,
     overdue,
