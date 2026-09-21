@@ -25,11 +25,21 @@ const SHARED = [
 
 test('default production config uses the production-safe migration lane', () => {
   const production = config('wrangler.jsonc');
+  const status = config('wrangler.status.jsonc');
+  const publisher = config('wrangler.publisher.jsonc');
   const preview = config('wrangler.preview.jsonc');
   const authority = config('wrangler.authority.jsonc');
 
   assert.equal(
     production.d1_databases[0].migrations_dir,
+    'cloudflare/migrations-production',
+  );
+  assert.equal(
+    status.d1_databases[0].migrations_dir,
+    'cloudflare/migrations-production',
+  );
+  assert.equal(
+    publisher.d1_databases[0].migrations_dir,
     'cloudflare/migrations-production',
   );
   assert.equal(
