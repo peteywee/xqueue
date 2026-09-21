@@ -64,6 +64,7 @@ const cloudflareFiles = readAll(walk(join(ROOT, 'cloudflare')));
 const workerFiles = cloudflareFiles.filter((file) => file.path.startsWith('cloudflare/src/'));
 const productionPublisherPath = 'cloudflare/src/production-publisher.mjs';
 const publicationLedgerPath = 'cloudflare/src/publication-ledger.mjs';
+const publicationHaltPath = 'cloudflare/src/publication-halt.mjs';
 const schedulerLivenessPath = 'cloudflare/src/scheduler-liveness.mjs';
 
 const defaultConfig = readJsonc('wrangler.jsonc');
@@ -207,10 +208,12 @@ gate(
 
 const LEDGER_TABLES = ['publication_state', 'publication_events', 'runtime_metadata'];
 const FENCE_TABLES = ['publication_fences'];
+const HALT_TABLES = ['publication_halt_state', 'publication_halt_events'];
 const LEASE_TABLES = ['publication_leases', 'publication_lease_events'];
 const ALLOWED_TABLES = new Set([
   ...LEDGER_TABLES,
   ...FENCE_TABLES,
+  ...HALT_TABLES,
   ...LEASE_TABLES,
 ]);
 
@@ -244,6 +247,10 @@ const leaseWritesOutsideLeaseModule = writeTargets.filter(
   (write) => LEASE_TABLES.includes(write.table) &&
     write.path !== 'cloudflare/src/publication-lease.mjs',
 );
+const haltWritesOutsideHaltModule = writeTargets.filter(
+  (write) => HALT_TABLES.includes(write.table) &&
+    write.path !== publicationHaltPath,
+);
 
 gate(
   'ledger/fence/heartbeat writes are confined to approved modules',
@@ -258,7 +265,24 @@ gate(
 );
 
 gate(
-  'Worker D1 writes target only declared ledger/lease tables',
+  'halt writes remain confined to publication-halt.mjs',
+  haltWritesOutsideHaltModule.length === 0,
+  haltWritesOutsideHaltModule.map((write) => write.where).join(' ') || 'confined',
+);
+
+const runtimeOwnerClearHits = findMatches(
+  workerFiles,
+  /\bSET\s+halted\s*=\s*0\b|\bactor_class\s*=\s*['"]owner['"]\b/i,
+);
+
+gate(
+  'Worker runtime contains no owner-clear halt capability',
+  runtimeOwnerClearHits.length === 0,
+  runtimeOwnerClearHits.join(' ') || 'absent',
+);
+
+gate(
+  'Worker D1 writes target only declared ledger/fence/halt/lease tables',
   unknownWrites.length === 0,
   unknownWrites.map((write) => `${write.where}(${write.table})`).join(' ') || 'declared tables only',
 );
