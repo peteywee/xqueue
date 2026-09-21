@@ -18,7 +18,7 @@ const TARGETS = Object.freeze({
   },
 });
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     action: 'status',
     environment: 'preview',
@@ -59,6 +59,31 @@ function parseArgs(argv) {
   }
   if (!Object.hasOwn(TARGETS, options.environment)) {
     throw new Error('environment must be preview or production');
+  }
+
+  return options;
+}
+
+
+export function validateOwnerAction(options) {
+  if (options.action === 'status') return options;
+
+  if (!options.apply) {
+    throw new Error('owner clear is dry-run by default; pass --apply to mutate');
+  }
+  if (!Number.isSafeInteger(options.expectedGeneration) || options.expectedGeneration < 1) {
+    throw new Error('--expected-generation is required for owner clear');
+  }
+  if (typeof options.reason !== 'string' || options.reason.trim().length === 0) {
+    throw new Error('--reason is required for owner clear');
+  }
+  if (
+    options.environment === 'production' &&
+    options.confirm !== 'xqueue-production-owner-clear'
+  ) {
+    throw new Error(
+      'production owner clear requires --confirm xqueue-production-owner-clear',
+    );
   }
 
   return options;
@@ -109,23 +134,7 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (!options.apply) {
-    throw new Error('owner clear is dry-run by default; pass --apply to mutate');
-  }
-  if (!Number.isSafeInteger(options.expectedGeneration) || options.expectedGeneration < 1) {
-    throw new Error('--expected-generation is required for owner clear');
-  }
-  if (typeof options.reason !== 'string' || options.reason.trim().length === 0) {
-    throw new Error('--reason is required for owner clear');
-  }
-  if (
-    options.environment === 'production' &&
-    options.confirm !== 'xqueue-production-owner-clear'
-  ) {
-    throw new Error(
-      'production owner clear requires --confirm xqueue-production-owner-clear',
-    );
-  }
+  validateOwnerAction(options);
 
   const sql = renderOwnerClearPublicationHaltSql({
     expectedGeneration: options.expectedGeneration,
