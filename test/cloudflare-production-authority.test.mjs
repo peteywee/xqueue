@@ -221,6 +221,16 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
         },
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 1,
+            reason: 'initial_unhalted',
+            actorClass: 'migration',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
         evaluateEligibility() { return eligible(); },
         decodeBundledQueue() { return queue(); },
         async readCurrentAssignmentHandle() { return assignmentHandle('C99'); },
@@ -493,6 +503,16 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
         async verifyQueueIntegrity() { return { ok: true }; },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
+        },
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 1,
+            reason: 'initial_unhalted',
+            actorClass: 'migration',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
         },
         evaluateEligibility() {
           return {
