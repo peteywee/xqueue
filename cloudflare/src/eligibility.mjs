@@ -411,7 +411,6 @@ function emptyHealth(graceMinutes) {
     ok: false,
     postedCount: 0,
     skippedCount: 0,
-    deferredCount: 0,
     unresolvedCount: 0,
     due: [],
     overdue: [],
@@ -563,7 +562,9 @@ export function evaluateEligibility(queue, ledger, options = {}) {
     ok: !inflight && overdueIdx.length === 0,
     postedCount: Object.keys(ledger.posted ?? {}).length,
     skippedCount: Object.keys(ledger.skipped ?? {}).length,
-    deferredCount: Object.keys(ledger.deferred ?? {}).length,
+    ...(Object.hasOwn(ledger, 'deferred')
+      ? { deferredCount: Object.keys(ledger.deferred ?? {}).length }
+      : {}),
     unresolvedCount: unresolvedIdx.length,
     due: dueIdx.map((i) => queue[i].id),
     overdue: overdueIdx.map((i) => queue[i].id),
