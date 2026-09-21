@@ -256,10 +256,9 @@ test('0009 durable transition removes dispatch authority and appends exact evide
   const assignment = db.prepare(
     "SELECT status,lifecycle_state,generation FROM queue_assignments WHERE content_id='P1'",
   ).get();
-  assert.deepEqual(
-    assignment,
-    { status: 'active', lifecycle_state: 'deferred', generation: 2 },
-  );
+  assert.equal(assignment.status, 'active');
+  assert.equal(assignment.lifecycle_state, 'deferred');
+  assert.equal(assignment.generation, 2);
 
   const deferral = db.prepare(
     "SELECT * FROM queue_deferrals WHERE content_id='P1'",
