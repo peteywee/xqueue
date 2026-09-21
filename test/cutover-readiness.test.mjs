@@ -52,17 +52,17 @@ function readyD1(queue, sha) {
   };
 }
 
-test('current production bundle remains explicitly blocked until #52 scheduledAt activation', () => {
+test('UTC production bundle still blocks until D1 metadata is atomically activated', () => {
   const queue = decodeBundledQueue();
   assert.equal(queue.length, 180);
-  assert.equal(queue.some((row) => row.scheduledAt != null), false);
+  assert.equal(queue.filter((row) => typeof row.scheduledAt === 'string').length, 180);
 
   const result = evaluateCutoverReadiness({
     queue,
     canonicalQueueText: CANONICAL_QUEUE_JSON,
     declaredQueueSha256: DECLARED_QUEUE_SHA256,
     health: healthyInertHealth(),
-    d1: readyD1(queue, DECLARED_QUEUE_SHA256),
+    d1: readyD1(queue, 'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7'),
     controlPlane: { schedules: [], deployments: [], observationErrors: [] },
     authorityBoundaryIntact: true,
     credentialBoundaryIntact: true,

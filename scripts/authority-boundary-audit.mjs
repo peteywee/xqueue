@@ -78,6 +78,7 @@ const defaultConfig = readJsonc('wrangler.jsonc');
 const statusConfig = readJsonc('wrangler.status.jsonc');
 const publisherConfig = readJsonc('wrangler.publisher.jsonc');
 const authorityConfig = readJsonc('wrangler.authority.jsonc');
+const prepConfig = readJsonc('wrangler.prep.jsonc');
 const previewConfig = readJsonc('wrangler.preview.jsonc');
 
 const defaultDeclaresTriggers = Object.hasOwn(defaultConfig.value, 'triggers');
@@ -85,6 +86,7 @@ const statusDeclaresTriggers = Object.hasOwn(statusConfig.value, 'triggers');
 const publisherDeclaresTriggers = Object.hasOwn(publisherConfig.value, 'triggers');
 const previewDeclaresTriggers = Object.hasOwn(previewConfig.value, 'triggers');
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
+const prepCrons = prepConfig.value.triggers?.crons ?? [];
 
 gate(
   'legacy production descriptor remains inert until #46',
@@ -121,6 +123,17 @@ gate(
 );
 
 gate(
+  'production prep config is exact-cron but authority-disabled',
+  prepConfig.value.name === 'xqueue-production' &&
+    prepConfig.value.main === legacyWorkerPath &&
+    Array.isArray(prepCrons) &&
+    prepCrons.length === 1 &&
+    prepCrons[0] === '*/15 * * * *' &&
+    prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+  prepConfig.value.name + ':' + JSON.stringify(prepCrons),
+);
+
+gate(
   'preview config cannot declare scheduler authority',
   previewDeclaresTriggers === false,
   previewDeclaresTriggers ? 'triggers declared' : 'triggers omitted',
@@ -131,6 +144,7 @@ const productionConfigs = [
   statusConfig,
   publisherConfig,
   authorityConfig,
+  prepConfig,
 ];
 const productionD1Exact = productionConfigs.every(({ value }) => {
   const db = value.d1_databases?.[0];
@@ -164,13 +178,24 @@ const allConfigRaw = [
   statusConfig.raw,
   publisherConfig.raw,
   authorityConfig.raw,
+  prepConfig.raw,
+  previewConfig.raw,
+].join('\n');
+
+const nonPrepConfigRaw = [
+  defaultConfig.raw,
+  statusConfig.raw,
+  publisherConfig.raw,
+  authorityConfig.raw,
   previewConfig.raw,
 ].join('\n');
 
 gate(
-  'publication authority flag is not hard-coded in Wrangler config',
-  !/XQUEUE_PUBLISH_AUTHORITY/.test(allConfigRaw),
-  /XQUEUE_PUBLISH_AUTHORITY/.test(allConfigRaw) ? 'found' : 'absent',
+  'publication authority is hard-coded only as disabled in prep config',
+  !/XQUEUE_PUBLISH_AUTHORITY/.test(nonPrepConfigRaw) &&
+    prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
+    !/XQUEUE_PUBLISH_AUTHORITY\s*["']?\s*[:=]\s*["']enabled["']/i.test(prepConfig.raw),
+  prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing',
 );
 
 const publisher = workerFiles.find(
@@ -198,6 +223,7 @@ const credentialConfigHits = findMatches(
     { path: 'wrangler.status.jsonc', text: statusConfig.raw },
     { path: 'wrangler.publisher.jsonc', text: publisherConfig.raw },
     { path: 'wrangler.authority.jsonc', text: authorityConfig.raw },
+    { path: 'wrangler.prep.jsonc', text: prepConfig.raw },
     { path: 'wrangler.preview.jsonc', text: previewConfig.raw },
   ],
   CREDENTIAL_RE,
