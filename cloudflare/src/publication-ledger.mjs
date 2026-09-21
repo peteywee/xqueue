@@ -45,6 +45,13 @@ WHERE key = '${SNAPSHOT_KEY}'
       AND attempt_id = ?5
       AND generation = ?6
   )
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
 `;
 
 const UPDATE_PUBLISHING_SQL = `
@@ -85,6 +92,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
@@ -103,6 +117,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
@@ -119,6 +140,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
