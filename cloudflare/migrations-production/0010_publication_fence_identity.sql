@@ -57,3 +57,15 @@ BEFORE DELETE ON publication_fences
 BEGIN
   SELECT RAISE(ABORT, 'publication_fences are immutable');
 END;
+
+CREATE TRIGGER publication_events_immutable_update
+BEFORE UPDATE ON publication_events
+BEGIN
+  SELECT RAISE(ABORT, 'publication_events are immutable');
+END;
+
+CREATE TRIGGER publication_events_immutable_delete
+BEFORE DELETE ON publication_events
+BEGIN
+  SELECT RAISE(ABORT, 'publication_events are immutable');
+END;
