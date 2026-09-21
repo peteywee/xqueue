@@ -1,0 +1,75 @@
+name: Preview Static Dynamic Parity Proof
+
+on:
+  workflow_run:
+    workflows:
+      - 'Preview D1 Recovery Proof'
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-parity-readonly
+  cancel-in-progress: false
+
+jobs:
+  prove-static-dynamic-parity:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XQUEUE_PREVIEW_PARITY_EVIDENCE: /tmp/xqueue-preview-static-dynamic-parity.json
+      XQUEUE_PARITY_CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Checkout exact recovered main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove parity guards locally
+        run: |
+          node --test \
+            test/static-dynamic-parity.test.mjs \
+            test/static-dynamic-parity-cli.test.mjs \
+            test/cloudflare-eligibility-parity.test.mjs \
+            test/deferred-lifecycle.test.mjs \
+            test/d1-publication-reconciliation.test.mjs \
+            test/d1-logical-backup.test.mjs
+
+      - name: Assert publication authority boundary remains intact
+        run: pnpm audit:authority
+
+      - name: Prove live preview static dynamic parity
+        run: pnpm preview:parity-proof
+
+      - name: Upload parity evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-static-dynamic-parity-${{ github.event.workflow_run.head_sha || github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-preview-static-dynamic-parity.json
+          if-no-files-found: warn
