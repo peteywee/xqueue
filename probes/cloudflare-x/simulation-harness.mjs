@@ -164,7 +164,14 @@ export async function simulatePublicationTransaction(deps, input = {}) {
       });
     }
 
-    return blocked('media', media?.reason ?? 'media_verification_failed');
+    return blocked(
+      'media',
+      media?.reason ?? 'media_verification_failed',
+      {
+        deferRecommended: true,
+        deferReason: 'confirmed_media_handoff',
+      },
+    );
   }
 
   const preDispatchLeaseCurrent = await leaseIsCurrent(verifyLease, lease, {
