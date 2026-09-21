@@ -614,6 +614,7 @@ export function renderReplacementItemSql(plan, item, recordedAt) {
       'AND a.assignment_version=' + sqlInteger(item.assignment_version) + ' ' +
       "AND a.status='superseded' " +
       'AND a.superseded_by_version=' + sqlInteger(item.to_assignment_version) + ') ' +
+      'AND ' + frontierOwned(plan) + ' ' +
       'AND NOT EXISTS (SELECT 1 FROM queue_assignment_events e WHERE ' +
       'e.assignment_id=' + sqlString(item.assignment_id) + ' ' +
       'AND e.assignment_version=' + sqlInteger(item.assignment_version) + ' ' +
@@ -632,6 +633,7 @@ export function renderReplacementItemSql(plan, item, recordedAt) {
       'a.assignment_id=' + sqlString(item.assignment_id) + ' ' +
       'AND a.assignment_version=' + sqlInteger(item.to_assignment_version) + ' ' +
       "AND a.status='active' AND a.lifecycle_state='scheduled') " +
+      'AND ' + frontierOwned(plan) + ' ' +
       'AND NOT EXISTS (SELECT 1 FROM queue_assignment_events e WHERE ' +
       'e.assignment_id=' + sqlString(item.assignment_id) + ' ' +
       'AND e.assignment_version=' + sqlInteger(item.to_assignment_version) + ' ' +
@@ -651,6 +653,7 @@ export function renderReplacementItemSql(plan, item, recordedAt) {
       'd.content_id=' + sqlString(item.content_id) + ' ' +
       "AND d.state='replaced' " +
       'AND d.replacement_assignment_version=' + sqlInteger(item.to_assignment_version) + ') ' +
+      'AND ' + frontierOwned(plan) + ' ' +
       'AND NOT EXISTS (SELECT 1 FROM queue_deferral_events e WHERE ' +
       'e.content_id=' + sqlString(item.content_id) + ' ' +
       'AND e.assignment_version=' + sqlInteger(item.assignment_version) + ' ' +
