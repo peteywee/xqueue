@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "xqueue-production",
-  "main": "cloudflare/src/worker.mjs",
+  "name": "xqueue-publisher-production",
+  "main": "cloudflare/src/publisher-worker.mjs",
   "compatibility_date": "2026-09-02",
   "observability": {
     "enabled": true,
