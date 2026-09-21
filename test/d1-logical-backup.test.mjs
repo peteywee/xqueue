@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   applicationTableNames,
+  backupEvidence,
   buildLogicalBackup,
   compareBackupToRows,
   renderLogicalRestoreSql,
@@ -239,4 +240,22 @@ test('restore catches uniqueness corruption instead of silently normalizing it',
     () => restored.exec(renderLogicalRestoreSql(rebuilt)),
     /UNIQUE constraint failed/,
   );
+});
+
+
+test('published backup evidence contains hashes and counts but no raw rows or schema SQL', () => {
+  const artifact = backup(sourceDb());
+  const evidence = backupEvidence(artifact);
+
+  assert.equal(evidence.backupId, artifact.backupId);
+  assert.equal(evidence.backupHash, artifact.backupHash);
+  assert.equal(evidence.tableCount, Object.keys(artifact.tables).length);
+  assert.equal(Object.hasOwn(evidence, 'data'), false);
+  assert.equal(Object.hasOwn(evidence, 'schema'), false);
+
+  for (const manifest of Object.values(evidence.tables)) {
+    assert.equal(Object.hasOwn(manifest, 'rows'), false);
+    assert.equal(Number.isSafeInteger(manifest.rowCount), true);
+    assert.match(manifest.rowsHash, /^[a-f0-9]{64}$/);
+  }
 });
