@@ -108,7 +108,7 @@ export function nextRuntimeRevision({
   });
 }
 
-export function renderRuntimeRevisionInsertSql(revision) {
+export function renderRuntimeRevisionInsertSql(\n  revision,\n  { additionalGuardSql = null } = {},\n) {
   const generation = integer(revision?.generation, 'revision generation', 1);
   const revisionDigest = digest(
     revision?.revision_digest,
@@ -139,7 +139,7 @@ export function renderRuntimeRevisionInsertSql(revision) {
     sqlString(revision.created_at),
   ].join(',');
 
-  const cas =
+  const predecessorCas =
     generation === 1
       ? 'NOT EXISTS (SELECT 1 FROM queue_runtime_revisions)'
       : (
@@ -150,6 +150,20 @@ export function renderRuntimeRevisionInsertSql(revision) {
           'ORDER BY generation DESC LIMIT 1) = ' +
           sqlString(previous)
         );
+
+  let cas = predecessorCas;
+  if (additionalGuardSql !== null) {
+    const guard = requiredString(
+      additionalGuardSql,
+      'additional runtime revision guard SQL',
+    ).trim();
+    if (guard.includes(';') || guard.includes('--') || guard.includes('/*')) {
+      throw new Error(
+        'additional runtime revision guard SQL must be a single expression',
+      );
+    }
+    cas += ' AND (' + guard + ')';
+  }
 
   // One INSERT ... SELECT statement is the revision CAS. There is no trigger
   // and no mutable current-state projection. The latest immutable ledger row
