@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 import {
   publicationAuthorityEnabled,
@@ -25,6 +26,38 @@ function ledger() {
     posted: {},
     skipped: {},
     inflight: null,
+  };
+}
+
+function sha256(text) {
+  return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+}
+
+function fenceEvidence() {
+  return {
+    attemptId: 'attempt-123',
+    stateGeneration: 2,
+    leaseName: 'publisher',
+    leaseGeneration: 1,
+    leaseOwnerToken: 'owner-token',
+    leaseAcquisitionId: 'acquisition-id',
+    leaseAcquiredAtMs: 1000,
+    leaseExpiresAtMs: 9999999999999,
+    assignmentId: 'C99',
+    assignmentVersion: 1,
+    policyVersion: 2,
+    contentDigest: 'a'.repeat(64),
+  };
+}
+
+function assignmentHandle(contentId = 'C99') {
+  return {
+    assignment_id: contentId,
+    assignment_version: 1,
+    content_id: contentId,
+    policy_version: 2,
+    content_digest: 'a'.repeat(64),
+    resolved_at: '2026-09-02T16:00:00.000Z',
   };
 }
 
@@ -96,6 +129,7 @@ function changeProofDb({
             status: stateStatus,
             attempt_id: stateAttemptId,
             generation: stateGeneration,
+            scheduled_at: '2026-09-02T16:00:00.000Z',
           };
         }
         throw new Error('unexpected first() query in proof DB');
@@ -110,15 +144,22 @@ function changeProofDb({
         { success: true, results: [{ direct_changes: 1 }] },
         { success: true, results: [] },
         { success: true, results: [{ direct_changes: 1 }] },
+        { success: true, results: [] },
+        { success: true, results: [{ direct_changes: 1 }] },
       ];
     },
   };
 }
 
 function publishingSnapshot(state) {
+  const fence = state.inflight?.publicationFence ?? fenceEvidence();
+  if (state.inflight && !state.inflight.publicationFence) {
+    state.inflight.publicationFence = fence;
+  }
   return {
     raw: JSON.stringify(state),
     ledger: state,
+    publicationFence: fence,
     publicationStateGeneration: 2,
   };
 }
@@ -182,6 +223,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
         },
         evaluateEligibility() { return eligible(); },
         decodeBundledQueue() { return queue(); },
+        async readCurrentAssignmentHandle() { return assignmentHandle('C99'); },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
@@ -190,6 +232,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
           return {
             acquired: true,
             lease: {
+              leaseName: 'publisher',
               ownerToken: 'owner-token',
               acquisitionId: 'acquisition-id',
               generation: 1,
@@ -203,7 +246,11 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
           releaseCalls += 1;
           return { released: true };
         },
-        async beginPublishingFence() {
+        async beginPublishingFence(db, snapshot, input) {
+          assert.equal(input.lease.leaseName, 'publisher');
+          assert.equal(input.lease.acquisitionId, 'acquisition-id');
+          assert.equal(input.assignment.assignment_id, 'C99');
+          assert.equal(input.assignment.assignment_version, 1);
           const next = structuredClone(source);
           next.inflight = {
             attemptId: 'attempt-123',
@@ -262,6 +309,18 @@ test('publishing fence mirrors local inflight semantics and advances state gener
       cost: 0.015,
       now: new Date('2026-09-02T16:00:00.000Z'),
       attemptId: 'attempt-123',
+      lease: {
+        leaseName: 'publisher',
+        ownerToken: 'owner-token',
+        acquisitionId: 'acquisition-id',
+        generation: 1,
+        acquiredAtMs: 1000,
+        expiresAtMs: 9999999999999,
+      },
+      assignment: {
+        ...assignmentHandle('C99'),
+        content_digest: sha256('hello'),
+      },
     },
   );
 
@@ -444,6 +503,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
         decodeBundledQueue() {
           return [{ ...queue()[0], id: 'B99', pillar: 'B' }];
         },
+        async readCurrentAssignmentHandle() { return assignmentHandle('B99'); },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
         },
@@ -452,6 +512,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
           return {
             acquired: true,
             lease: {
+              leaseName: 'publisher',
               ownerToken: 'owner-token',
               acquisitionId: 'acquisition-id',
               generation: 1,
@@ -463,6 +524,8 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
         async verifyPublicationLease() { return true; },
         async releasePublicationLease() { return { released: true }; },
         async beginPublishingFence(db, snapshot, input) {
+          assert.equal(input.lease.leaseName, 'publisher');
+          assert.equal(input.assignment.assignment_id, 'B99');
           renderedText = input.text;
           const next = structuredClone(source);
           next.inflight = {

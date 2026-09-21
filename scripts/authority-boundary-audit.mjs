@@ -206,8 +206,13 @@ gate(
 // --------------------------------------------------------- 5. D1 writes
 
 const LEDGER_TABLES = ['publication_state', 'publication_events', 'runtime_metadata'];
+const FENCE_TABLES = ['publication_fences'];
 const LEASE_TABLES = ['publication_leases', 'publication_lease_events'];
-const ALLOWED_TABLES = new Set([...LEDGER_TABLES, ...LEASE_TABLES]);
+const ALLOWED_TABLES = new Set([
+  ...LEDGER_TABLES,
+  ...FENCE_TABLES,
+  ...LEASE_TABLES,
+]);
 
 const WRITE_STATEMENT_RE =
   /\b(?:INSERT\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
@@ -229,6 +234,9 @@ const ledgerWritesOutsideAllowedModules = writeTargets.filter((write) => {
   if (write.table === 'runtime_metadata') {
     return ![publicationLedgerPath, schedulerLivenessPath].includes(write.path);
   }
+  if (FENCE_TABLES.includes(write.table)) {
+    return write.path !== publicationLedgerPath;
+  }
   return false;
 });
 const unknownWrites = writeTargets.filter((write) => !ALLOWED_TABLES.has(write.table));
@@ -238,7 +246,7 @@ const leaseWritesOutsideLeaseModule = writeTargets.filter(
 );
 
 gate(
-  'ledger/heartbeat writes are confined to approved modules',
+  'ledger/fence/heartbeat writes are confined to approved modules',
   ledgerWritesOutsideAllowedModules.length === 0,
   ledgerWritesOutsideAllowedModules.map((write) => write.where).join(' ') || `${publicationLedgerPath}, ${schedulerLivenessPath}`,
 );

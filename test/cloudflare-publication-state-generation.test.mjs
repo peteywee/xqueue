@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -65,6 +66,73 @@ function ledger() {
     posted: {},
     skipped: {},
     inflight: null,
+  };
+}
+
+function sha256(text) {
+  return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+}
+
+function enablePublicationFence(sqlite, text) {
+  for (const name of [
+    '0006_continuous_queue_shadow.sql',
+    '0007_continuous_queue_intake.sql',
+    '0008_dynamic_runtime_integrity.sql',
+    '0009_deferred_lifecycle.sql',
+    '0010_publication_fence_identity.sql',
+  ]) {
+    sqlite.exec(readMigration(name));
+  }
+
+  const contentDigest = sha256(text);
+  sqlite.prepare(
+    "INSERT INTO queue_content " +
+    "(content_id,pillar,current_revision,status,generation,created_at,updated_at,intake_state) " +
+    "VALUES ('A1','A',1,'active',1,?,?, 'scheduled')",
+  ).run('2026-09-15T17:00:00.000Z', '2026-09-15T17:00:00.000Z');
+
+  sqlite.prepare(
+    "INSERT INTO queue_content_revisions " +
+    "(content_id,revision,title,body,publication_text,content_digest,figure,source_ref,created_at) " +
+    "VALUES ('A1',1,'A1',?,?,?,NULL,'fixture',?)",
+  ).run(text, text, contentDigest, '2026-09-15T17:00:00.000Z');
+
+  sqlite.prepare(
+    "INSERT INTO queue_assignments " +
+    "(assignment_id,assignment_version,content_id,content_revision,content_digest,target_account," +
+    "policy_version,resolved_at,scheduled_date,scheduled_time,timezone,slot_label,status," +
+    "superseded_by_version,generation,created_at,updated_at,lifecycle_state) " +
+    "VALUES ('A1',1,'A1',1,?,'x-primary',2,'2026-09-15T18:00:00.000Z'," +
+    "'2026-09-15','13:00','America/Chicago','lull','active',NULL,1,?,?,'scheduled')",
+  ).run(
+    contentDigest,
+    '2026-09-15T17:00:00.000Z',
+    '2026-09-15T17:00:00.000Z',
+  );
+
+  sqlite.prepare(
+    "INSERT INTO publication_leases " +
+    "(lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms) " +
+    "VALUES ('publisher','fixture-owner-token','fixture-acquisition-id',1,1000,9999999999999,1000)",
+  ).run();
+
+  return {
+    lease: {
+      leaseName: 'publisher',
+      ownerToken: 'fixture-owner-token',
+      acquisitionId: 'fixture-acquisition-id',
+      generation: 1,
+      acquiredAtMs: 1000,
+      expiresAtMs: 9999999999999,
+    },
+    assignment: {
+      assignment_id: 'A1',
+      assignment_version: 1,
+      content_id: 'A1',
+      policy_version: 2,
+      content_digest: contentDigest,
+      resolved_at: '2026-09-15T18:00:00.000Z',
+    },
   };
 }
 
@@ -183,6 +251,7 @@ test('publishing and outcome transitions advance generation exactly once and per
   const { sqlite, db } = fixture();
   sqlite.exec(readMigration('0005_publication_state_generation.sql'));
 
+  const fence = enablePublicationFence(sqlite, 'generation fenced post');
   const source = await readPublicationSnapshot(db);
   const publishing = await beginPublishingFence(
     db,
@@ -193,6 +262,7 @@ test('publishing and outcome transitions advance generation exactly once and per
       cost: 0.01,
       now: new Date('2026-09-15T18:00:00.000Z'),
       attemptId: 'attempt-generation-1',
+      ...fence,
     },
   );
 
@@ -239,6 +309,7 @@ test('stale outcome replay changes neither snapshot nor state and appends no mis
   const { sqlite, db } = fixture();
   sqlite.exec(readMigration('0005_publication_state_generation.sql'));
 
+  const fence = enablePublicationFence(sqlite, 'stale replay proof');
   const source = await readPublicationSnapshot(db);
   const publishing = await beginPublishingFence(
     db,
@@ -249,6 +320,7 @@ test('stale outcome replay changes neither snapshot nor state and appends no mis
       cost: 0.01,
       now: new Date('2026-09-15T18:00:00.000Z'),
       attemptId: 'attempt-replay-0001',
+      ...fence,
     },
   );
 
@@ -294,6 +366,7 @@ test('concurrent publishing contenders produce one generation winner and one eve
   const { sqlite, db } = fixture();
   sqlite.exec(readMigration('0005_publication_state_generation.sql'));
 
+  const fence = enablePublicationFence(sqlite, 'same contender text');
   const source = await readPublicationSnapshot(db);
 
   const results = await Promise.allSettled([
@@ -302,10 +375,11 @@ test('concurrent publishing contenders produce one generation winner and one eve
       source,
       {
         post: { id: 'A1', title: 'A1' },
-        text: 'contender one',
+        text: 'same contender text',
         cost: 0.01,
         now: new Date('2026-09-15T18:00:00.000Z'),
         attemptId: 'attempt-contender-1',
+        ...fence,
       },
     ),
     beginPublishingFence(
@@ -313,10 +387,11 @@ test('concurrent publishing contenders produce one generation winner and one eve
       source,
       {
         post: { id: 'A1', title: 'A1' },
-        text: 'contender two',
+        text: 'same contender text',
         cost: 0.01,
         now: new Date('2026-09-15T18:00:00.000Z'),
         attemptId: 'attempt-contender-2',
+        ...fence,
       },
     ),
   ]);

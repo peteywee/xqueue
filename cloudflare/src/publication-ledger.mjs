@@ -4,7 +4,8 @@ const READ_STATE_CURSOR_SQL = `
 SELECT
   status,
   attempt_id,
-  generation
+  generation,
+  scheduled_at
 FROM publication_state
 WHERE post_id = ?1
 LIMIT 1
@@ -22,6 +23,13 @@ WHERE key = '${SNAPSHOT_KEY}'
       AND status = 'scheduled'
       AND generation = ?5
   )
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?6
+      AND post_id = ?4
+      AND state_generation = ?7
+  )
 `;
 
 const UPDATE_OUTCOME_SNAPSHOT_SQL = `
@@ -36,6 +44,13 @@ WHERE key = '${SNAPSHOT_KEY}'
       AND status = 'publishing'
       AND attempt_id = ?5
       AND generation = ?6
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
   )
 `;
 
@@ -52,6 +67,13 @@ SET
 WHERE post_id = ?3
   AND status = 'scheduled'
   AND generation = ?4
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?1
+      AND post_id = ?3
+      AND state_generation = ?5
+  )
   AND changes() = 1
 `;
 
@@ -70,6 +92,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
@@ -88,6 +117,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
@@ -104,6 +140,13 @@ WHERE post_id = ?4
   AND status = 'publishing'
   AND attempt_id = ?5
   AND generation = ?6
+  AND EXISTS (
+    SELECT 1
+    FROM publication_fences
+    WHERE attempt_id = ?5
+      AND post_id = ?4
+      AND state_generation = ?6
+  )
   AND changes() = 1
 `;
 
@@ -116,6 +159,59 @@ INSERT INTO publication_events (
 )
 SELECT ?1, ?2, ?3, ?4
 WHERE changes() = 1
+`;
+
+const INSERT_PUBLICATION_FENCE_SQL = `
+INSERT OR IGNORE INTO publication_fences (
+  attempt_id,
+  post_id,
+  state_generation,
+  lease_name,
+  lease_generation,
+  lease_owner_token,
+  lease_acquisition_id,
+  lease_acquired_at_ms,
+  lease_expires_at_ms,
+  assignment_id,
+  assignment_version,
+  policy_version,
+  content_digest,
+  recorded_at
+)
+SELECT
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+  ?8, ?9, ?10, ?11, ?12, ?13, ?14
+WHERE EXISTS (
+  SELECT 1
+  FROM publication_leases lease
+  WHERE lease.lease_name = ?4
+    AND lease.generation = ?5
+    AND lease.owner_token = ?6
+    AND lease.acquisition_id = ?7
+    AND lease.acquired_at_ms = ?8
+    AND lease.expires_at_ms = ?9
+    AND lease.expires_at_ms > ?15
+)
+AND EXISTS (
+  SELECT 1
+  FROM queue_assignments assignment
+  WHERE assignment.assignment_id = ?10
+    AND assignment.assignment_version = ?11
+    AND assignment.content_id = ?2
+    AND assignment.policy_version = ?12
+    AND assignment.content_digest = ?13
+    AND assignment.status = 'active'
+    AND assignment.lifecycle_state = 'scheduled'
+    AND assignment.resolved_at = (
+      SELECT state.scheduled_at
+      FROM publication_state state
+      WHERE state.post_id = ?2
+        AND state.status = 'scheduled'
+        AND state.attempt_id IS NULL
+        AND state.generation = ?16
+      LIMIT 1
+    )
+)
 `;
 
 const DIRECT_CHANGES_SQL = 'SELECT changes() AS direct_changes';
@@ -167,6 +263,83 @@ async function sha256Hex(text) {
     .join('');
 }
 
+function requiredString(value, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(label + ' is required');
+  }
+  return value;
+}
+
+function positiveInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new Error(label + ' must be a positive integer');
+  }
+  return number;
+}
+
+function nonNegativeInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error(label + ' must be a non-negative integer');
+  }
+  return number;
+}
+
+function exactDigest(value, label) {
+  const digest = requiredString(value, label).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error(label + ' must be sha256 hex');
+  }
+  return digest;
+}
+
+function normalizeLeaseHandle(lease) {
+  if (!lease || typeof lease !== 'object') {
+    throw new Error('verified lease handle is required');
+  }
+  const normalized = {
+    leaseName: requiredString(lease.leaseName, 'lease name'),
+    generation: positiveInteger(lease.generation, 'lease generation'),
+    ownerToken: requiredString(lease.ownerToken, 'lease owner token'),
+    acquisitionId: requiredString(lease.acquisitionId, 'lease acquisition id'),
+    acquiredAtMs: nonNegativeInteger(lease.acquiredAtMs, 'lease acquiredAtMs'),
+    expiresAtMs: nonNegativeInteger(lease.expiresAtMs, 'lease expiresAtMs'),
+  };
+  if (normalized.leaseName !== 'publisher') {
+    throw new Error('lease name must be publisher');
+  }
+  if (normalized.ownerToken.length < 8 || normalized.acquisitionId.length < 8) {
+    throw new Error('lease holder identity is invalid');
+  }
+  if (normalized.expiresAtMs <= normalized.acquiredAtMs) {
+    throw new Error('lease expiry is invalid');
+  }
+  return Object.freeze(normalized);
+}
+
+function normalizeAssignmentHandle(assignment) {
+  if (!assignment || typeof assignment !== 'object') {
+    throw new Error('verified assignment handle is required');
+  }
+  const normalized = {
+    assignmentId: requiredString(assignment.assignment_id, 'assignment id'),
+    assignmentVersion: positiveInteger(
+      assignment.assignment_version,
+      'assignment version',
+    ),
+    contentId: requiredString(assignment.content_id, 'assignment content id'),
+    policyVersion: positiveInteger(assignment.policy_version, 'policy version'),
+    contentDigest: exactDigest(assignment.content_digest, 'content digest'),
+    resolvedAt: requiredString(assignment.resolved_at, 'assignment resolved_at'),
+  };
+  const ms = Date.parse(normalized.resolvedAt);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== normalized.resolvedAt) {
+    throw new Error('assignment resolved_at must be canonical UTC');
+  }
+  return Object.freeze(normalized);
+}
+
 async function readPublicationStateCursor(db, postId) {
   if (!db || typeof db.prepare !== 'function') {
     throw new Error('D1 binding DB is unavailable');
@@ -185,6 +358,8 @@ async function readPublicationStateCursor(db, postId) {
     status: row.status,
     attemptId: row.attempt_id ?? null,
     generation: positiveGeneration(row.generation),
+    scheduledAt:
+      typeof row.scheduled_at === 'string' ? row.scheduled_at : null,
   };
 }
 
@@ -229,6 +404,8 @@ export async function beginPublishingFence(
     cost,
     now = new Date(),
     attemptId = crypto.randomUUID(),
+    lease,
+    assignment,
   },
 ) {
   if (!snapshot || typeof snapshot.raw !== 'string' || !snapshot.ledger) {
@@ -258,7 +435,36 @@ export async function beginPublishingFence(
   const expectedGeneration = cursor.generation;
   const nextGeneration = expectedGeneration + 1;
   const at = isoNow(now);
+  const nowMs = now.getTime();
   const contentHash = await sha256Hex(text);
+  const verifiedLease = normalizeLeaseHandle(lease);
+  const verifiedAssignment = normalizeAssignmentHandle(assignment);
+
+  if (verifiedAssignment.contentId !== post.id) {
+    throw new Error('assignment content identity does not match selected post');
+  }
+  if (verifiedAssignment.contentDigest !== contentHash) {
+    throw new Error('assignment content digest does not match publication text');
+  }
+  if (cursor.scheduledAt !== verifiedAssignment.resolvedAt) {
+    throw new Error('assignment resolved_at does not match publication_state');
+  }
+
+  const publicationFence = Object.freeze({
+    attemptId,
+    stateGeneration: nextGeneration,
+    leaseName: verifiedLease.leaseName,
+    leaseGeneration: verifiedLease.generation,
+    leaseOwnerToken: verifiedLease.ownerToken,
+    leaseAcquisitionId: verifiedLease.acquisitionId,
+    leaseAcquiredAtMs: verifiedLease.acquiredAtMs,
+    leaseExpiresAtMs: verifiedLease.expiresAtMs,
+    assignmentId: verifiedAssignment.assignmentId,
+    assignmentVersion: verifiedAssignment.assignmentVersion,
+    policyVersion: verifiedAssignment.policyVersion,
+    contentDigest: verifiedAssignment.contentDigest,
+  });
+
   const next = cloneJson(snapshot.ledger);
 
   next.inflight = {
@@ -270,6 +476,7 @@ export async function beginPublishingFence(
     startedAt: at,
     status: 'publishing',
     publishStartedAt: at,
+    publicationFence,
   };
 
   const nextRaw = JSON.stringify(next);
@@ -278,29 +485,61 @@ export async function beginPublishingFence(
     contentHash,
     cost,
     stateGeneration: nextGeneration,
+    publicationFence,
   });
 
   const results = await db.batch([
     db
+      .prepare(INSERT_PUBLICATION_FENCE_SQL)
+      .bind(
+        attemptId,
+        post.id,
+        nextGeneration,
+        verifiedLease.leaseName,
+        verifiedLease.generation,
+        verifiedLease.ownerToken,
+        verifiedLease.acquisitionId,
+        verifiedLease.acquiredAtMs,
+        verifiedLease.expiresAtMs,
+        verifiedAssignment.assignmentId,
+        verifiedAssignment.assignmentVersion,
+        verifiedAssignment.policyVersion,
+        verifiedAssignment.contentDigest,
+        at,
+        nowMs,
+        expectedGeneration,
+      ),
+    db.prepare(DIRECT_CHANGES_SQL),
+    db
       .prepare(UPDATE_BEGIN_SNAPSHOT_SQL)
-      .bind(nextRaw, at, snapshot.raw, post.id, expectedGeneration),
+      .bind(
+        nextRaw,
+        at,
+        snapshot.raw,
+        post.id,
+        expectedGeneration,
+        attemptId,
+        nextGeneration,
+      ),
     db.prepare(DIRECT_CHANGES_SQL),
     db
       .prepare(UPDATE_PUBLISHING_SQL)
-      .bind(attemptId, at, post.id, expectedGeneration),
+      .bind(attemptId, at, post.id, expectedGeneration, nextGeneration),
     db.prepare(DIRECT_CHANGES_SQL),
     db.prepare(INSERT_EVENT_SQL).bind(post.id, 'publishing', at, eventDetail),
     db.prepare(DIRECT_CHANGES_SQL),
   ]);
 
-  assertExactlyOne(results?.[1], 'publication snapshot fence');
-  assertExactlyOne(results?.[3], 'publication_state publishing fence');
-  assertExactlyOne(results?.[5], 'publication publishing event');
+  assertExactlyOne(results?.[1], 'publication identity fence');
+  assertExactlyOne(results?.[3], 'publication snapshot fence');
+  assertExactlyOne(results?.[5], 'publication_state publishing fence');
+  assertExactlyOne(results?.[7], 'publication publishing event');
 
   return {
     raw: nextRaw,
     ledger: next,
     attempt: next.inflight,
+    publicationFence,
     publicationStateGeneration: nextGeneration,
   };
 }
@@ -330,6 +569,14 @@ export async function persistPublicationOutcome(
     snapshot.publicationStateGeneration,
     'publishing snapshot generation',
   );
+  const publicationFence = snapshot.publicationFence ?? attempt.publicationFence;
+  if (
+    !publicationFence ||
+    publicationFence.attemptId !== attempt.attemptId ||
+    publicationFence.stateGeneration !== expectedGeneration
+  ) {
+    throw new Error('matching immutable publication fence is required');
+  }
   const nextGeneration = expectedGeneration + 1;
   const at = isoNow(now);
   const next = cloneJson(snapshot.ledger);
@@ -357,6 +604,7 @@ export async function persistPublicationOutcome(
       cost: attempt.cost,
       contentHash: attempt.contentHash,
       attemptId: attempt.attemptId,
+      publicationFence,
     };
     const durableRecord = {
       ...record,
@@ -388,6 +636,7 @@ export async function persistPublicationOutcome(
       classification,
       reason,
       stateGeneration: nextGeneration,
+      publicationFence,
     });
   } else if (classification === 'confirmed_not_posted') {
     const record = {
@@ -399,6 +648,7 @@ export async function persistPublicationOutcome(
       cost: attempt.cost,
       automaticRetryAllowed: false,
       stateGeneration: nextGeneration,
+      publicationFence,
     };
 
     next.inflight = null;
@@ -426,6 +676,7 @@ export async function persistPublicationOutcome(
     const durableRecord = {
       ...next.inflight,
       stateGeneration: nextGeneration,
+      publicationFence,
     };
 
     stateStatement = db
@@ -446,6 +697,7 @@ export async function persistPublicationOutcome(
       reason,
       automaticRetryAllowed: false,
       stateGeneration: nextGeneration,
+      publicationFence,
     });
   }
 
@@ -493,5 +745,6 @@ export const publicationLedgerSql = Object.freeze({
   updateConfirmedNotPosted: UPDATE_CONFIRMED_NOT_POSTED_SQL,
   updateReconciliation: UPDATE_RECONCILIATION_SQL,
   insertEvent: INSERT_EVENT_SQL,
+  insertPublicationFence: INSERT_PUBLICATION_FENCE_SQL,
   directChanges: DIRECT_CHANGES_SQL,
 });

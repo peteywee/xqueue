@@ -20,6 +20,9 @@ import {
   publicationAuthorityEnabled,
 } from './authority-config.mjs';
 import {
+  readCurrentAssignmentHandle,
+} from './assignment-version-fence.mjs';
+import {
   evaluateEligibility,
 } from './eligibility.mjs';
 import {
@@ -214,6 +217,8 @@ export async function runScheduledPublication(
   const acquireLease = dependencies.acquirePublicationLease ?? acquirePublicationLease;
   const releaseLease = dependencies.releasePublicationLease ?? releasePublicationLease;
   const verifyLease = dependencies.verifyPublicationLease ?? verifyPublicationLease;
+  const readAssignment =
+    dependencies.readCurrentAssignmentHandle ?? readCurrentAssignmentHandle;
 
   const queueIntegrity = await verifyQueue(env);
   if (!queueIntegrity?.ok) {
@@ -245,6 +250,13 @@ export async function runScheduledPublication(
         'nothing_due',
       { eligibility },
     );
+  }
+
+  let assignmentHandle;
+  try {
+    assignmentHandle = await readAssignment(env.DB, post.id);
+  } catch {
+    return idle('assignment_identity_unavailable');
   }
 
   const preparedMedia = await prepareMedia(env, post);
@@ -303,6 +315,8 @@ export async function runScheduledPublication(
               text,
               cost,
               now: new Date(),
+              lease: activeLease,
+              assignment: assignmentHandle,
             },
           );
         } catch (error) {

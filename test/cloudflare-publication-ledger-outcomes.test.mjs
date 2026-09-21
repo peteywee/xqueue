@@ -35,6 +35,20 @@ function fakeDb(onBatch) {
 }
 
 function publishingSnapshot() {
+  const publicationFence = {
+    attemptId: 'attempt-12345678',
+    stateGeneration: 2,
+    leaseName: 'publisher',
+    leaseGeneration: 1,
+    leaseOwnerToken: 'owner-token',
+    leaseAcquisitionId: 'acquisition-id',
+    leaseAcquiredAtMs: 1000,
+    leaseExpiresAtMs: 5000,
+    assignmentId: 'A1',
+    assignmentVersion: 1,
+    policyVersion: 2,
+    contentDigest: 'a'.repeat(64),
+  };
   const ledger = {
     posted: {},
     spend: 0,
@@ -47,12 +61,14 @@ function publishingSnapshot() {
       startedAt: '2026-09-06T12:00:00.000Z',
       status: 'publishing',
       publishStartedAt: '2026-09-06T12:00:00.000Z',
+      publicationFence,
     },
   };
 
   return {
     raw: JSON.stringify(ledger),
     ledger,
+    publicationFence,
     publicationStateGeneration: 2,
   };
 }

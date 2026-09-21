@@ -17,6 +17,7 @@ export const KNOWN_POST_SHADOW_MIGRATIONS = Object.freeze([
   '0007_continuous_queue_intake.sql',
   '0008_dynamic_runtime_integrity.sql',
   '0009_deferred_lifecycle.sql',
+  '0010_publication_fence_identity.sql',
 ]);
 
 export function sha256Json(value) {
