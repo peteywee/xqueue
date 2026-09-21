@@ -483,6 +483,7 @@ test('a stale runtime head or occupied target slot prevents any replacement muta
       now: NOW,
     });
     const target = plan.items[0];
+    const sql = await buildTransaction(db, plan);
     const d = digest('collision');
     db.prepare(
       'INSERT INTO queue_content ' +
@@ -511,7 +512,6 @@ test('a stale runtime head or occupied target slot prevents any replacement muta
       RECORDED_AT,
     );
 
-    const sql = await buildTransaction(db, plan);
     db.exec(sql);
     assert.equal(
       db.prepare("SELECT COUNT(*) n FROM queue_assignments WHERE assignment_id='P1' AND assignment_version=2").get().n,
@@ -663,8 +663,11 @@ test('concurrent plans sharing one frontier cannot both claim scheduling authori
   const first = planAutomaticReplacements({ ...base, deferrals: [rows[0]] });
   const second = planAutomaticReplacements({ ...base, deferrals: [rows[1]] });
 
-  db.exec(await buildTransaction(db, first));
+  // Both candidates are frozen against the same starting frontier/runtime.
+  // Only one may win; the second must fail closed when replayed afterward.
+  const firstSql = await buildTransaction(db, first);
   const secondSql = await buildTransaction(db, second);
+  db.exec(firstSql);
   db.exec(secondSql);
 
   assert.equal(
