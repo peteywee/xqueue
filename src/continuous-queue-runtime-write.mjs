@@ -108,7 +108,10 @@ export function nextRuntimeRevision({
   });
 }
 
-export function renderRuntimeRevisionInsertSql(\n  revision,\n  { additionalGuardSql = null } = {},\n) {
+export function renderRuntimeRevisionInsertSql(
+  revision,
+  { additionalGuardSql = null } = {},
+) {
   const generation = integer(revision?.generation, 'revision generation', 1);
   const revisionDigest = digest(
     revision?.revision_digest,
