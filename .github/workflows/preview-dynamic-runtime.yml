@@ -7,6 +7,7 @@ on:
       - '.github/workflows/preview-dynamic-runtime.yml'
       - 'cloudflare/migrations/0008_dynamic_runtime_integrity.sql'
       - 'cloudflare/migrations/0009_deferred_lifecycle.sql'
+      - 'cloudflare/migrations/0010_publication_fence_identity.sql'
       - 'cloudflare/src/dynamic-runtime-integrity.mjs'
       - 'src/d1-deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
