@@ -708,11 +708,16 @@ export function renderReplacementFrontierReleaseSql(plan, recordedAt) {
 
 export function projectReplacementRuntimeRows(plan, rows) {
   if (!rows || !Array.isArray(rows.assignments) ||
+      !Array.isArray(rows.deferred) ||
       !Array.isArray(rows.approvedUnscheduled) || !Array.isArray(rows.media)) {
     throw new Error('runtime rows are required');
   }
 
   const assignments = rows.assignments.map((row) => ({ ...row }));
+  const replacedContent = new Set(plan.items.map((item) => item.content_id));
+  const deferred = rows.deferred
+    .filter((row) => !replacedContent.has(row.content_id))
+    .map((row) => ({ ...row }));
   const keys = new Set(assignments.map((row) =>
     occupiedKey(row.target_account, row.resolved_at),
   ));
@@ -754,6 +759,7 @@ export function projectReplacementRuntimeRows(plan, rows) {
 
   return {
     assignments,
+    deferred,
     approvedUnscheduled: rows.approvedUnscheduled.map((row) => ({ ...row })),
     media: rows.media.map((row) => ({ ...row })),
   };
