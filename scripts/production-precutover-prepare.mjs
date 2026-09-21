@@ -364,11 +364,11 @@ async function seedDynamicRuntime() {
   });
 
   if (
-    snapshot.active_assignment_count !== 180 ||
+    snapshot.active_assignment_count + snapshot.deferred_count !== 180 ||
     snapshot.media_required_count !== 4 ||
     snapshot.media_ready_count !== 4
   ) {
-    throw new Error('production dynamic runtime snapshot is not 180 assignments / 4 of 4 media');
+    throw new Error('production dynamic runtime snapshot does not preserve 180 assigned/deferred items and 4 of 4 media');
   }
 
   let state = query(RUNTIME_STATE_SQL)[0] ?? null;
@@ -388,11 +388,13 @@ async function seedDynamicRuntime() {
 
   if (
     !state ||
-    Number(state.generation) !== 1 ||
+    !Number.isSafeInteger(Number(state.generation)) ||
+    Number(state.generation) < 1 ||
     state.revision_digest !== snapshot.revision_digest ||
-    Number(state.active_assignment_count) !== 180 ||
-    Number(state.media_required_count) !== 4 ||
-    Number(state.media_ready_count) !== 4
+    Number(state.active_assignment_count) !== snapshot.active_assignment_count ||
+    Number(state.approved_unscheduled_count) !== snapshot.approved_unscheduled_count ||
+    Number(state.media_required_count) !== snapshot.media_required_count ||
+    Number(state.media_ready_count) !== snapshot.media_ready_count
   ) {
     throw new Error('production runtime revision does not match recomputed durable truth');
   }
