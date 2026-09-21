@@ -54,9 +54,13 @@ test('production preparation workflow is manual-only and authority-disable prece
   const seed = source.indexOf('Seed durable queue/runtime and activate committed UTC metadata');
 
   assert.ok(deploy >= 0 && inert > deploy && migrations > inert && seed > migrations);
-  assert.match(source, /authorityFlag !== false/);
-  assert.match(source, /livePublication !== false/);
-  assert.match(source, /schedulerAuthority !== false/);
+  assert.match(source, /authorityFlag === false/);
+  assert.match(source, /authorized === false/);
+  assert.match(source, /livePublication === false/);
+  assert.match(source, /schedulerAuthority === false/);
+  assert.match(source, /Date\.now\(\) \+ 120_000/);
+  assert.match(source, /setTimeout\(resolve, 5_000\)/);
+  assert.match(source, /authority_disable_propagation_timeout/);
 });
 
 test('production prep runner requires explicit approval and never calls X', () => {
