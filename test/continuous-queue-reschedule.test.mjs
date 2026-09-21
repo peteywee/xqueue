@@ -678,3 +678,69 @@ test('concurrent plans sharing one frontier cannot both claim scheduling authori
   );
   assert.equal(frontier(db).last_completed_operation_id, first.operation_id);
 });
+
+
+test('losing same-item replacement plan cannot append false evidence', async () => {
+  const { db } = await fixture();
+  const row = pendingDeferrals(db).find((item) => item.content_id === 'P1');
+  const base = {
+    deferral: row,
+    frontier: frontier(db),
+    runtimeState: runtimeState(db),
+    policy: POLICY,
+    occupiedAssignments: occupied(db),
+    now: NOW,
+  };
+
+  const first = planOwnerPlacement({
+    ...base,
+    scheduledDate: '2026-09-23',
+    scheduledTime: '14:30',
+    reason: 'first owner placement',
+  });
+  const losing = planOwnerPlacement({
+    ...base,
+    scheduledDate: '2026-09-24',
+    scheduledTime: '14:30',
+    reason: 'losing owner placement',
+  });
+
+  const firstSql = await buildTransaction(db, first);
+  const losingSql = await buildTransaction(db, losing);
+
+  db.exec(firstSql);
+  const assignmentEventsBefore = db.prepare(
+    "SELECT COUNT(*) n FROM queue_assignment_events",
+  ).get().n;
+  const deferralEventsBefore = db.prepare(
+    "SELECT COUNT(*) n FROM queue_deferral_events",
+  ).get().n;
+
+  db.exec(losingSql);
+
+  assert.equal(
+    db.prepare("SELECT COUNT(*) n FROM queue_assignment_events").get().n,
+    assignmentEventsBefore,
+  );
+  assert.equal(
+    db.prepare("SELECT COUNT(*) n FROM queue_deferral_events").get().n,
+    deferralEventsBefore,
+  );
+  assert.equal(
+    db.prepare(
+      "SELECT COUNT(*) n FROM queue_assignment_events WHERE detail LIKE ?",
+    ).get('%' + losing.operation_id + '%').n,
+    0,
+  );
+  assert.equal(
+    db.prepare(
+      "SELECT COUNT(*) n FROM queue_deferral_events WHERE detail LIKE ?",
+    ).get('%' + losing.operation_id + '%').n,
+    0,
+  );
+
+  const current = db.prepare(
+    "SELECT resolved_at FROM queue_assignments WHERE assignment_id='P1' AND assignment_version=2",
+  ).get();
+  assert.equal(current.resolved_at, first.items[0].resolved_at);
+});
