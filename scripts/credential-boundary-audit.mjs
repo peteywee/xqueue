@@ -21,15 +21,15 @@ function read(relativePath) {
 }
 
 function readJsonc(relativePath) {
-  return JSON.parse(read(relativePath).replace(/^\\s*\\/\\/.*$/gm, ''));
+  return JSON.parse(read(relativePath).replace(/^\s*\/\/.*$/gm, ''));
 }
 
 function localImports(source) {
   const imports = [];
   const patterns = [
-    /\\bimport\\s+(?:[^'"]*?\\s+from\\s+)?['"]([^'"]+)['"]/g,
-    /\\bexport\\s+[^'"]*?\\s+from\\s+['"]([^'"]+)['"]/g,
-    /\\bimport\\s*\\(\\s*['"]([^'"]+)['"]\\s*\\)/g,
+    /\bimport\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g,
+    /\bexport\s+[^'"]*?\s+from\s+['"]([^'"]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
   ];
 
   for (const pattern of patterns) {
@@ -56,7 +56,7 @@ function resolveLocal(fromRelative, specifier) {
     throw new Error('cannot resolve ' + specifier + ' from ' + fromRelative);
   }
 
-  return relative(ROOT, target).replaceAll('\\\\', '/');
+  return relative(ROOT, target).replaceAll('\\', '/');
 }
 
 function collectGraph(entry) {
@@ -82,7 +82,7 @@ function collectGraph(entry) {
 }
 
 function graphText(graph) {
-  return [...graph.files.values()].join('\\n');
+  return [...graph.files.values()].join('\n');
 }
 
 const legacy = readJsonc('wrangler.jsonc');
@@ -156,15 +156,15 @@ gate(
 
 gate(
   'status entrypoint has no scheduled handler',
-  !/\\basync\\s+scheduled\\s*\\(/.test(read(STATUS_ENTRY)) &&
-    !/\\bscheduled\\s*\\(/.test(read(STATUS_ENTRY)),
+  !/\basync\s+scheduled\s*\(/.test(read(STATUS_ENTRY)) &&
+    !/\bscheduled\s*\(/.test(read(STATUS_ENTRY)),
   STATUS_ENTRY,
 );
 
 gate(
   'publisher entrypoint has no HTTP fetch handler',
-  !/\\basync\\s+fetch\\s*\\(/.test(publisherEntryText) &&
-    !/\\bfetch\\s*\\(/.test(publisherEntryText),
+  !/\basync\s+fetch\s*\(/.test(publisherEntryText) &&
+    !/\bfetch\s*\(/.test(publisherEntryText),
   PUBLISHER_ENTRY,
 );
 
@@ -182,9 +182,9 @@ gate(
 );
 
 const credentialRe =
-  /\\b(X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET|consumer_key|consumer_secret|oauth_token|bearer_token)\\b/i;
+  /\b(X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET|consumer_key|consumer_secret|oauth_token|bearer_token)\b/i;
 const publishRe =
-  /\\b(createPostViaClient|uploadMediaBytesViaClient|@xdevplatform\\/xdk|api\\.x\\.com|api\\.twitter\\.com|upload\\.twitter\\.com)\\b/i;
+  /\b(createPostViaClient|uploadMediaBytesViaClient|@xdevplatform\/xdk|api\.x\.com|api\.twitter\.com|upload\.twitter\.com)\b/i;
 
 gate(
   'status graph contains no X credential references',
@@ -206,7 +206,7 @@ gate(
   'publisher-only capability present',
 );
 
-const configText = productionConfigs.map((value) => JSON.stringify(value)).join('\\n');
+const configText = productionConfigs.map((value) => JSON.stringify(value)).join('\n');
 gate(
   'Wrangler configs contain no X credentials or authority secret value',
   !credentialRe.test(configText) &&
