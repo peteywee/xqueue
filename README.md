@@ -35,22 +35,24 @@ Key invariants:
 - Production media validation blocks missing referenced figures.
 - Ordinary Cloudflare code deployment uses only the production Worker/D1 identity and cannot mutate scheduler authority because it declares no triggers.
 - Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
-- Scheduler authority is expressed only by the explicit `wrangler.authority.jsonc` production deployment path.
+- Target Cloudflare publication authority is structurally isolated in `xqueue-publisher-production`; the legacy combined production descriptor remains in place only until #46 activation.
 - Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
 - The independent hourly TSAL observer fails on stale/missing production scheduler liveness, opens one deduplicated GitHub incident, and closes it after recovery.
 - Production deployment is not considered fully verified until TSAL reconciles repository intent with Cloudflare control-plane and runtime evidence.
 
 ### Cloudflare deployment authority boundary
 
-Cloudflare Workers Builds is connected to `xqueue-production`, so the default Wrangler config must identify that production Worker. Authority separation is therefore expressed by what each config is allowed to mutate, not by pretending the default build targets another Worker.
+The target production architecture separates status/read-only execution from publishing execution by Worker identity and module graph.
 
-- `wrangler.jsonc` targets `xqueue-production`, binds only the production D1 identity, and MUST NOT contain a `triggers` property. It is the ordinary Workers Builds/code-deploy config and preserves externally managed Cron Trigger state.
-- `wrangler.authority.jsonc` also targets `xqueue-production` and the same production D1, but is the explicit scheduler-authority surface. It pins exactly one cron: `*/15 * * * *`.
-- `wrangler.preview.jsonc` targets `xqueue-preview`, binds only the preview D1 identity, and declares no scheduler authority. Preview D1 diagnostics must explicitly select this config.
-- Neither production config may contain the preview D1 ID or `preview_database_id`; the preview config may not contain the production D1 ID.
-- An explicit empty scheduler declaration such as `"crons": []` is forbidden in the ordinary config because provider replacement semantics can turn an apparently empty value into deletion of live external state.
+- `wrangler.status.jsonc` targets `xqueue-production` with `cloudflare/src/status-worker.mjs`. It has no scheduled handler, no publisher import, no service binding to the publisher, and must never receive X write credentials.
+- `wrangler.publisher.jsonc` targets the separate `xqueue-publisher-production` Worker with `cloudflare/src/publisher-worker.mjs`. It is intentionally inert and declares no cron.
+- `wrangler.authority.jsonc` is the future explicit scheduler-authority surface for `xqueue-publisher-production`. It pins exactly one cron: `*/15 * * * *`.
+- `wrangler.preview.jsonc` remains the non-authoritative preview surface.
+- `wrangler.jsonc` is retained as the legacy combined `xqueue-production` descriptor until the separately evidenced #46 cutover. Merging the structural split does not change the currently deployed entrypoint or move production secrets.
+- All production-role configs bind the same canonical production D1/R2 truth, while the preview config remains isolated from production D1 identity.
+- X write credentials belong only to `xqueue-publisher-production`. The repository audits and CI bundle inspection fail if X credential references, the X SDK, or publish transport become reachable from the target status-only bundle.
 
-The repository test suite and authority-boundary audit enforce this distinction. TSAL deployment evidence independently verifies the live Cloudflare state after production deployment.
+Activation is deliberately separate from architecture. Under #46, the exact candidate must deploy/prove the publisher inertly, verify live secret inventory, remove X write secrets from `xqueue-production`, place them only on `xqueue-publisher-production`, switch the status Worker to its status-only entrypoint, and only then activate the publisher cron. The local/systemd publisher remains the rollback path until separately approved for retirement.
 
 ### Scheduler liveness boundary
 
