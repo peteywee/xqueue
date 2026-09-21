@@ -100,9 +100,10 @@ function errorStatus(error) {
   return Number.isInteger(status) ? status : null;
 }
 
-function safeTransportError(error, phase) {
+function safeTransportError(error, phase, operation = null) {
   const wrapped = new Error('X transport operation failed');
   wrapped.phase = phase;
+  if (operation) wrapped.operation = operation;
 
   const status = errorStatus(error);
   if (status !== null) wrapped.status = status;
@@ -316,7 +317,7 @@ export async function runScheduledPublication(
             const mediaId = await uploadMediaBytesViaClient(client, media.bytes);
             mediaIds.push(mediaId);
           } catch (error) {
-            throw safeTransportError(error, 'pre_dispatch');
+            throw safeTransportError(error, 'pre_dispatch', 'media_upload');
           }
 
           const leaseStillCurrent = activeLease
