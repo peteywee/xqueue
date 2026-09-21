@@ -172,6 +172,7 @@ function seed180(db) {
   db.exec(renderShadowBackfillSql(model, { recordedAt: AT1 }));
   db.exec(text('cloudflare/migrations/0007_continuous_queue_intake.sql'));
   db.exec(text('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
+  db.exec(text('cloudflare/migrations/0009_deferred_lifecycle.sql'));
   db.exec(renderMediaInsertSql(runtimeMediaRows(), { recordedAt: AT1 }));
 
   return { policy, model };
