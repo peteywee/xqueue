@@ -7,6 +7,7 @@ on:
       - '.github/workflows/preview-continuous-queue-shadow.yml'
       - 'scripts/preview-continuous-queue-shadow-proof.mjs'
       - 'src/d1-preview-shadow-proof.mjs'
+      - 'cloudflare/migrations/0011_global_publication_halt.sql'
       - 'src/continuous-queue-shadow.mjs'
       - 'test/d1-preview-shadow-proof.test.mjs'
       - 'test/continuous-queue-shadow.test.mjs'

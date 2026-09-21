@@ -8,6 +8,7 @@ on:
       - 'cloudflare/migrations/0008_dynamic_runtime_integrity.sql'
       - 'cloudflare/migrations/0009_deferred_lifecycle.sql'
       - 'cloudflare/migrations/0010_publication_fence_identity.sql'
+      - 'cloudflare/migrations/0011_global_publication_halt.sql'
       - 'cloudflare/src/dynamic-runtime-integrity.mjs'
       - 'src/d1-deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
@@ -63,7 +64,8 @@ jobs:
             test/deferred-lifecycle.test.mjs \
             test/cloudflare-media.test.mjs \
             test/cloudflare-migration-lanes.test.mjs \
-            test/d1-preview-shadow-proof.test.mjs
+            test/d1-preview-shadow-proof.test.mjs \
+            test/global-publication-halt.test.mjs
 
       - name: Assert publication authority boundary remains intact
         run: pnpm audit:authority
