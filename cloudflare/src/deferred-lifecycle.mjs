@@ -254,7 +254,7 @@ export function classifyMissedAssignment(
   return Object.freeze({ action: 'defer', reason: MISSED_REASON });
 }
 
-function exactReadback(row, readback, deferredAt) {
+function exactReadback(row, readback, deferredAt, reason) {
   return Boolean(
     readback &&
     readback.assignment_id === row.assignment_id &&
@@ -267,7 +267,7 @@ function exactReadback(row, readback, deferredAt) {
     Number(readback.assignment_generation) === Number(row.assignment_generation) + 1 &&
     Number(readback.prior_assignment_generation) === Number(row.assignment_generation) &&
     readback.prior_resolved_at === row.resolved_at &&
-    readback.reason === MISSED_REASON &&
+    readback.reason === reason &&
     readback.deferred_at === deferredAt &&
     readback.deferral_state === 'pending_replacement' &&
     Number(readback.deferral_generation) === 1
@@ -281,25 +281,19 @@ async function readback(db, row) {
     .first();
 }
 
-export async function deferOneMissedAssignment(
+async function transitionAssignmentToDeferred(
   db,
   row,
   {
     now = new Date(),
-    graceMinutes = 20,
+    reason = MISSED_REASON,
   } = {},
 ) {
   if (!db || typeof db.prepare !== 'function' || typeof db.batch !== 'function') {
     throw new Error('D1 binding DB is unavailable');
   }
-
-  const classification = classifyMissedAssignment(row, { now, graceMinutes });
-  if (classification.action !== 'defer') {
-    return Object.freeze({
-      status: classification.action,
-      reason: classification.reason,
-      contentId: row?.content_id ?? null,
-    });
+  if (typeof reason !== 'string' || reason.length === 0) {
+    throw new Error('deferral reason is required');
   }
 
   const at = isoNow(now);
@@ -322,7 +316,7 @@ export async function deferOneMissedAssignment(
     priorScheduledTime: row.scheduled_time,
     priorTimezone: row.timezone,
     priorSlotLabel: row.slot_label ?? null,
-    reason: MISSED_REASON,
+    reason,
     deferredAt: at,
   });
 
@@ -353,7 +347,7 @@ export async function deferOneMissedAssignment(
         row.scheduled_time,
         row.timezone,
         row.slot_label ?? null,
-        MISSED_REASON,
+        reason,
         at,
       ),
       db.prepare(DIRECT_CHANGES_SQL),
@@ -388,10 +382,10 @@ export async function deferOneMissedAssignment(
   }
 
   const observed = await readback(db, row);
-  if (exactReadback(row, observed, at)) {
+  if (exactReadback(row, observed, at, reason)) {
     return Object.freeze({
       status: 'deferred',
-      reason: MISSED_REASON,
+      reason,
       contentId: row.content_id,
       assignmentId: row.assignment_id,
       assignmentVersion,
@@ -406,7 +400,7 @@ export async function deferOneMissedAssignment(
   ) {
     return Object.freeze({
       status: 'already_deferred',
-      reason: observed.reason ?? MISSED_REASON,
+      reason: observed.reason ?? reason,
       contentId: row.content_id,
     });
   }
@@ -414,6 +408,55 @@ export async function deferOneMissedAssignment(
   throw new Error(
     `deferral outcome for ${row.content_id} is ambiguous or conflicted; manual reconciliation required`,
   );
+}
+
+export async function deferOneMissedAssignment(
+  db,
+  row,
+  {
+    now = new Date(),
+    graceMinutes = 20,
+  } = {},
+) {
+  const classification = classifyMissedAssignment(row, { now, graceMinutes });
+  if (classification.action !== 'defer') {
+    return Object.freeze({
+      status: classification.action,
+      reason: classification.reason,
+      contentId: row?.content_id ?? null,
+    });
+  }
+
+  return transitionAssignmentToDeferred(db, row, {
+    now,
+    reason: MISSED_REASON,
+  });
+}
+
+export function publicationDeferralHandoff(result) {
+  if (!result || typeof result !== 'object') return null;
+
+  if (
+    result.status === 'needs_reconciliation' ||
+    result.evidence?.outcome?.classification === 'needs_reconciliation'
+  ) {
+    return null;
+  }
+
+  if (result.deferRecommended === true && typeof result.deferReason === 'string') {
+    return result.deferReason;
+  }
+
+  const outcome = result.evidence?.outcome;
+  if (
+    outcome?.classification === 'confirmed_not_posted' &&
+    outcome?.deferRecommended === true &&
+    typeof outcome.deferReason === 'string'
+  ) {
+    return outcome.deferReason;
+  }
+
+  return null;
 }
 
 async function promoteRuntimeRevisionIfNeeded(db, recordedAt) {
@@ -486,6 +529,54 @@ async function promoteRuntimeRevisionIfNeeded(db, recordedAt) {
   throw new Error(
     'deferred lifecycle changed runtime truth but canonical revision promotion is ambiguous; publication must remain fail-closed',
   );
+}
+
+export async function deferConfirmedPublicationHandoff(
+  db,
+  row,
+  publicationResult,
+  {
+    now = new Date(),
+  } = {},
+) {
+  const reason = publicationDeferralHandoff(publicationResult);
+  if (!reason) {
+    return Object.freeze({
+      status: 'not_applicable',
+      reason: null,
+      contentId: row?.content_id ?? null,
+    });
+  }
+
+  if (row?.publication_status === 'needs_reconciliation') {
+    return Object.freeze({
+      status: 'protected',
+      reason: 'needs_reconciliation_requires_determination',
+      contentId: row?.content_id ?? null,
+    });
+  }
+
+  if (row?.publication_status !== 'scheduled') {
+    return Object.freeze({
+      status: 'protected',
+      reason: 'publication_state_not_scheduled',
+      contentId: row?.content_id ?? null,
+    });
+  }
+
+  const transition = await transitionAssignmentToDeferred(db, row, {
+    now,
+    reason,
+  });
+  const runtimeRevision = await promoteRuntimeRevisionIfNeeded(
+    db,
+    isoNow(now),
+  );
+
+  return Object.freeze({
+    ...transition,
+    runtimeRevision,
+  });
 }
 
 export async function deferMissedAssignments(
