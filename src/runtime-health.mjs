@@ -49,7 +49,9 @@ export function analyzeRuntime(
     ok: !state?.inflight && overdue.length === 0,
     postedCount: Object.keys(state?.posted ?? {}).length,
     skippedCount: Object.keys(state?.skipped ?? {}).length,
-    deferredCount: Object.keys(state?.deferred ?? {}).length,
+    ...(Object.hasOwn(state ?? {}, 'deferred')
+      ? { deferredCount: Object.keys(state.deferred ?? {}).length }
+      : {}),
     unresolvedCount: unresolved.length,
     due,
     overdue,
