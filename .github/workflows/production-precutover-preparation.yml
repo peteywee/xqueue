@@ -58,20 +58,59 @@ jobs:
       - name: Prove Cloudflare publication is inert before D1 mutation
         run: |
           node --input-type=module <<'NODE'
-          const response = await fetch('https://xqueue-production.patrickcraven.workers.dev/health', {
-            headers: { accept: 'application/json' },
-          });
-          const body = await response.json();
-          if (
-            body?.authorityReadiness?.authorityFlag !== false ||
-            body?.authorityReadiness?.authorized !== false ||
-            body?.livePublication !== false ||
-            body?.schedulerAuthority !== false
-          ) {
-            console.error(JSON.stringify(body, null, 2));
-            process.exit(1);
+          const endpoint = 'https://xqueue-production.patrickcraven.workers.dev/health';
+          const deadline = Date.now() + 120_000;
+          let attempts = 0;
+          let lastBody = null;
+          let lastError = null;
+
+          while (Date.now() < deadline) {
+            attempts += 1;
+            try {
+              const response = await fetch(endpoint, {
+                headers: {
+                  accept: 'application/json',
+                  'cache-control': 'no-cache',
+                },
+              });
+              const body = await response.json();
+              lastBody = body;
+              lastError = null;
+
+              const inert =
+                body?.authorityReadiness?.authorityFlag === false &&
+                body?.authorityReadiness?.authorized === false &&
+                body?.livePublication === false &&
+                body?.schedulerAuthority === false;
+
+              if (inert) {
+                console.log(
+                  'PASS: Cloudflare publication authority is inert after ' +
+                    attempts +
+                    ' observation(s)',
+                );
+                process.exit(0);
+              }
+            } catch (error) {
+              lastError = error instanceof Error ? error.message : String(error);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
           }
-          console.log('PASS: Cloudflare publication authority is inert');
+
+          console.error(
+            JSON.stringify(
+              {
+                error: 'authority_disable_propagation_timeout',
+                attempts,
+                lastError,
+                lastBody,
+              },
+              null,
+              2,
+            ),
+          );
+          process.exit(1);
           NODE
 
       - name: Apply production continuous-queue and recovery schema
