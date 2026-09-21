@@ -69,6 +69,16 @@ function publicationGuard(state, contentId) {
   return { generation: pos(state.generation, 'publication_state generation') };
 }
 
+function runtimeGuard(state) {
+  if (!state || typeof state !== 'object') {
+    throw new Error('runtime state snapshot is required for owner activation');
+  }
+  return Object.freeze({
+    generation: pos(state.generation, 'runtime generation'),
+    revision_digest: sha(state.revision_digest, 'runtime revision digest'),
+  });
+}
+
 function baseGuard(content, assignment) {
   if (!content || typeof content !== 'object') throw new Error('content snapshot is required');
   if (!assignment || typeof assignment !== 'object') throw new Error('active assignment snapshot is required');
@@ -202,9 +212,10 @@ function targetMedia(target, row) {
 
 export function planAssignmentRebind({
   content, activeAssignment, targetRevision: revision, targetMedia: media = null,
-  publicationState = null, reason: why, now = new Date(),
+  publicationState = null, runtimeState = null, reason: why, now = new Date(),
 }) {
   const g = assertFutureOwnerMutable({ content, activeAssignment, publicationState, now });
+  const runtime = runtimeGuard(runtimeState);
   const target = targetRevision(g.contentId, revision);
   if (target.revision <= g.assignmentContentRevision) throw new Error('rebind target must be a newer content revision');
   const boundMedia = targetMedia(target, media);
@@ -216,6 +227,8 @@ export function planAssignmentRebind({
     expected_assignment_generation: g.assignmentGeneration,
     expected_content_generation: g.contentGeneration,
     publication_state_generation: g.publication?.generation ?? null,
+    expected_runtime_generation: runtime.generation,
+    expected_runtime_revision_digest: runtime.revision_digest,
     from_content_revision: g.assignmentContentRevision,
     from_content_digest: g.assignmentDigest,
     to_content_revision: target.revision,
@@ -237,8 +250,16 @@ export function planAssignmentRebind({
   });
 }
 
-export function planAssignmentCancel({ content, activeAssignment, publicationState = null, reason: why, now = new Date() }) {
+export function planAssignmentCancel({
+  content,
+  activeAssignment,
+  publicationState = null,
+  runtimeState = null,
+  reason: why,
+  now = new Date(),
+}) {
   const g = assertFutureOwnerMutable({ content, activeAssignment, publicationState, now });
+  const runtime = runtimeGuard(runtimeState);
   const material = {
     content_id: g.contentId,
     assignment_id: activeAssignment.assignment_id,
@@ -248,6 +269,8 @@ export function planAssignmentCancel({ content, activeAssignment, publicationSta
     content_revision: g.assignmentContentRevision,
     content_digest: g.assignmentDigest,
     publication_state_generation: g.publication?.generation ?? null,
+    expected_runtime_generation: runtime.generation,
+    expected_runtime_revision_digest: runtime.revision_digest,
     reason: reason(why),
   };
   return Object.freeze({
@@ -264,6 +287,15 @@ function pubSql(plan) {
       AND ps.attempt_id IS NULL AND ps.generation=${qi(plan.publication_state_generation)}
   )`;
 }
+function runtimeSql(plan) {
+  return ` AND EXISTS (
+    SELECT 1 FROM queue_runtime_revisions rr
+    WHERE rr.generation=${qi(plan.expected_runtime_generation)}
+      AND rr.revision_digest=${q(plan.expected_runtime_revision_digest)}
+      AND rr.generation=(SELECT MAX(generation) FROM queue_runtime_revisions)
+  )`;
+}
+
 function mediaSql(plan) {
   const m = plan.target_media;
   if (!m) return '';
@@ -349,7 +381,7 @@ WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.fr
   AND EXISTS (SELECT 1 FROM queue_content c WHERE c.content_id=${q(plan.content_id)} AND c.status='active'
     AND c.current_revision=${qi(plan.from_content_revision)} AND c.generation=${qi(plan.expected_content_generation)})
   AND EXISTS (SELECT 1 FROM queue_content_revisions r WHERE r.content_id=${q(plan.content_id)}
-    AND r.revision=${qi(plan.to_content_revision)} AND r.content_digest=${q(plan.to_content_digest)})${mediaSql(plan)}${pubSql(plan)};
+    AND r.revision=${qi(plan.to_content_revision)} AND r.content_digest=${q(plan.to_content_digest)})${mediaSql(plan)}${pubSql(plan)}${runtimeSql(plan)};
 
 INSERT OR IGNORE INTO queue_assignments
 (assignment_id,assignment_version,content_id,content_revision,content_digest,target_account,policy_version,
@@ -428,7 +460,7 @@ WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.as
   AND content_digest=${q(plan.content_digest)} AND generation=${qi(plan.expected_assignment_generation)}
   AND status='active' AND resolved_at>${DB_NOW}
   AND EXISTS (SELECT 1 FROM queue_content c WHERE c.content_id=${q(plan.content_id)} AND c.status='active'
-    AND c.current_revision=${qi(plan.content_revision)} AND c.generation=${qi(plan.expected_content_generation)})${pubSql(plan)};
+    AND c.current_revision=${qi(plan.content_revision)} AND c.generation=${qi(plan.expected_content_generation)})${pubSql(plan)}${runtimeSql(plan)};
 UPDATE queue_content SET status='retired',generation=generation+1,updated_at=${q(t)}
 WHERE content_id=${q(plan.content_id)} AND current_revision=${qi(plan.content_revision)}
   AND generation=${qi(plan.expected_content_generation)}
@@ -493,6 +525,60 @@ export function renderOwnerMutationSuccessGuardSql(plan) {
 
 function same(a, b) { return a === b || (a == null && b == null); }
 function fields(row, expected, names) { return names.every((name) => same(row?.[name], expected?.[name])); }
+
+export function projectOwnerRuntimeRows(plan, rows, {
+  targetRevision: revision = null,
+  targetMedia: media = null,
+} = {}) {
+  if (!plan || !['rebind', 'cancel'].includes(plan.kind)) {
+    throw new Error('rebind or cancel plan is required');
+  }
+  if (!rows || !Array.isArray(rows.assignments) ||
+      !Array.isArray(rows.approvedUnscheduled) || !Array.isArray(rows.media)) {
+    throw new Error('runtime rows are required');
+  }
+
+  const assignments = rows.assignments.map((row) => ({ ...row }));
+  const approvedUnscheduled = rows.approvedUnscheduled.map((row) => ({ ...row }));
+  let mediaRows = rows.media.map((row) => ({ ...row }));
+  const index = assignments.findIndex((row) =>
+    row.content_id === plan.content_id && row.status === 'active');
+  if (index < 0) throw new Error('active runtime assignment is missing');
+
+  if (plan.kind === 'cancel') {
+    assignments.splice(index, 1);
+    mediaRows = mediaRows.filter((row) => row.content_id !== plan.content_id);
+    return { assignments, approvedUnscheduled, media: mediaRows };
+  }
+
+  const target = targetRevision(plan.content_id, revision);
+  if (target.revision !== plan.to_content_revision ||
+      target.content_digest !== plan.to_content_digest) {
+    throw new Error('runtime projection target revision does not match rebind plan');
+  }
+
+  assignments[index] = {
+    ...assignments[index],
+    assignment_version: plan.to_assignment_version,
+    content_revision: plan.to_content_revision,
+    content_digest: plan.to_content_digest,
+    assignment_generation: 1,
+    title: target.title,
+    body: target.body,
+    publication_text: target.publication_text,
+    revision_content_digest: target.content_digest,
+    figure: target.figure,
+    source_ref: target.source_ref ?? null,
+  };
+
+  mediaRows = mediaRows.filter((row) => row.content_id !== plan.content_id);
+  if (target.figure != null) {
+    const exactMedia = targetMedia(target, media);
+    mediaRows.push({ ...exactMedia, media_generation: exactMedia.generation });
+  }
+
+  return { assignments, approvedUnscheduled, media: mediaRows };
+}
 
 export function classifyRevisionReadback(plan, readback) {
   if (plan?.kind !== 'revise') throw new Error('revise plan is required');
