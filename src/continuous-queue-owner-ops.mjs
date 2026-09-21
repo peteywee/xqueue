@@ -279,6 +279,26 @@ function mediaSql(plan) {
 }
 function at(value) { return instant(value, 'recordedAt'); }
 
+function rebindActivatedDetail(plan) {
+  return JSON.stringify({
+    operationId: plan.operation_id,
+    reason: plan.reason,
+    revision: plan.to_content_revision,
+    assignmentVersion: plan.to_assignment_version,
+    contentDigest: plan.to_content_digest,
+  });
+}
+
+function cancelEventDetail(plan) {
+  return JSON.stringify({
+    operationId: plan.operation_id,
+    reason: plan.reason,
+    assignmentVersion: plan.assignment_version,
+    contentRevision: plan.content_revision,
+    contentDigest: plan.content_digest,
+  });
+}
+
 export function renderRevisionCreateSql(plan, { recordedAt = new Date().toISOString() } = {}) {
   if (plan?.kind !== 'revise') throw new Error('revise plan is required');
   const t = at(recordedAt);
@@ -318,9 +338,7 @@ export function renderRebindSql(plan, { recordedAt = new Date().toISOString() } 
   const supersede = JSON.stringify({ operationId: plan.operation_id, reason: plan.reason,
     fromAssignmentVersion: plan.from_assignment_version, toAssignmentVersion: plan.to_assignment_version,
     fromContentDigest: plan.from_content_digest, toContentDigest: plan.to_content_digest });
-  const activate = JSON.stringify({ operationId: plan.operation_id, reason: plan.reason,
-    revision: plan.to_content_revision, assignmentVersion: plan.to_assignment_version,
-    contentDigest: plan.to_content_digest });
+  const activate = rebindActivatedDetail(plan);
   return `
 UPDATE queue_assignments SET status='superseded',superseded_by_version=${qi(plan.to_assignment_version)},
   generation=generation+1,updated_at=${q(t)}
@@ -388,9 +406,7 @@ AND NOT EXISTS (SELECT 1 FROM queue_content_events WHERE content_id=${q(plan.con
 export function renderCancelSql(plan, { recordedAt = new Date().toISOString() } = {}) {
   if (plan?.kind !== 'cancel') throw new Error('cancel plan is required');
   const t = at(recordedAt);
-  const detail = JSON.stringify({ operationId: plan.operation_id, reason: plan.reason,
-    assignmentVersion: plan.assignment_version, contentRevision: plan.content_revision,
-    contentDigest: plan.content_digest });
+  const detail = cancelEventDetail(plan);
   const publicationSql = plan.publication_state_generation == null ? '' : `
 UPDATE publication_state SET status='skipped',skipped_at=${q(t)},skip_reason=${q(plan.reason)},
   updated_at=${q(t)},generation=generation+1
@@ -433,6 +449,46 @@ WHERE EXISTS (SELECT 1 FROM queue_content WHERE content_id=${q(plan.content_id)}
 AND NOT EXISTS (SELECT 1 FROM queue_content_events WHERE content_id=${q(plan.content_id)}
   AND revision=${qi(plan.content_revision)} AND event_type='owner_cancelled' AND detail=${q(detail)});
 `;
+}
+
+export function renderOwnerMutationSuccessGuardSql(plan) {
+  if (!plan || !['rebind', 'cancel'].includes(plan.kind)) {
+    throw new Error('rebind or cancel plan is required for runtime promotion guard');
+  }
+
+  if (plan.kind === 'rebind') {
+    const detail = rebindActivatedDetail(plan);
+    const clauses = [
+      `EXISTS (SELECT 1 FROM queue_assignments WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.from_assignment_version)} AND status='superseded' AND superseded_by_version=${qi(plan.to_assignment_version)} AND generation=${qi(plan.expected_assignment_generation + 1)})`,
+      `EXISTS (SELECT 1 FROM queue_assignments WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.to_assignment_version)} AND content_id=${q(plan.content_id)} AND content_revision=${qi(plan.to_content_revision)} AND content_digest=${q(plan.to_content_digest)} AND status='active')`,
+      `EXISTS (SELECT 1 FROM queue_content WHERE content_id=${q(plan.content_id)} AND status='active' AND current_revision=${qi(plan.to_content_revision)} AND generation=${qi(plan.expected_content_generation + 1)})`,
+      `EXISTS (SELECT 1 FROM queue_assignment_events WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.to_assignment_version)} AND event_type='owner_rebound' AND detail=${q(detail)})`,
+    ];
+
+    if (plan.publication_state_generation != null) {
+      clauses.push(
+        `EXISTS (SELECT 1 FROM publication_state WHERE post_id=${q(plan.content_id)} AND status='scheduled' AND attempt_id IS NULL AND generation=${qi(plan.publication_state_generation)})`,
+      );
+    }
+
+    return clauses.join(' AND ');
+  }
+
+  const detail = cancelEventDetail(plan);
+  const clauses = [
+    `EXISTS (SELECT 1 FROM queue_assignments WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.assignment_version)} AND content_id=${q(plan.content_id)} AND content_revision=${qi(plan.content_revision)} AND content_digest=${q(plan.content_digest)} AND status='cancelled' AND generation=${qi(plan.expected_assignment_generation + 1)})`,
+    `EXISTS (SELECT 1 FROM queue_content WHERE content_id=${q(plan.content_id)} AND status='retired' AND current_revision=${qi(plan.content_revision)} AND generation=${qi(plan.expected_content_generation + 1)})`,
+    `EXISTS (SELECT 1 FROM queue_assignment_events WHERE assignment_id=${q(plan.assignment_id)} AND assignment_version=${qi(plan.assignment_version)} AND event_type='owner_cancelled' AND detail=${q(detail)})`,
+  ];
+
+  if (plan.publication_state_generation != null) {
+    clauses.push(
+      `EXISTS (SELECT 1 FROM publication_state WHERE post_id=${q(plan.content_id)} AND status='skipped' AND skip_reason=${q(plan.reason)} AND generation=${qi(plan.publication_state_generation + 1)})`,
+      `EXISTS (SELECT 1 FROM publication_events WHERE post_id=${q(plan.content_id)} AND event_type='owner_cancelled' AND detail=${q(detail)})`,
+    );
+  }
+
+  return clauses.join(' AND ');
 }
 
 function same(a, b) { return a === b || (a == null && b == null); }
