@@ -208,6 +208,9 @@ test('media mismatch releases owned lease and prevents dispatch', async () => {
   assert.equal(result.stage, 'media');
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'hash_mismatch');
+  assert.equal(result.deferRecommended, true);
+  assert.equal(result.deferReason, 'confirmed_media_handoff');
+  assert.equal(result.automaticRetryAllowed, undefined);
   assert.equal(calls.includes('release'), true);
   assert.equal(calls.includes('dispatch'), false);
 });
