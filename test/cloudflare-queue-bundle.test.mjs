@@ -30,6 +30,8 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const CANONICAL_SHA256 =
+  '1f663cfada29a86ae861adc9f46918e8876b251c0d522517e67e3fdbed45ed7d';
+const LEGACY_CANONICAL_SHA256 =
   'a8cda41f869f4e58d2566e5c558fbbd3f7ce89ae6cbf6d138b1e517f363750b7';
 
 /** A minimal fake D1 binding. `rows` is what the SELECT returns. */
@@ -111,7 +113,7 @@ test('computed sha256 equals the declared and the canonical literal', async () =
   assert.equal(DECLARED_QUEUE_SHA256, CANONICAL_SHA256);
 });
 
-test('live regeneration preserves the exact legacy canonical queue projection', () => {
+test('live regeneration equals the activated committed-UTC bundle without legacy drift', async () => {
   const policy = JSON.parse(
     readFileSync(join(ROOT, 'config', 'schedule-policy.json'), 'utf8'),
   );
@@ -124,19 +126,16 @@ test('live regeneration preserves the exact legacy canonical queue projection', 
     deferToEnd: policy.deferToEnd ?? [],
   });
 
-  // #52 adds committed UTC evidence without activating a changed production
-  // bundle in this PR. Removing only scheduledAt must reproduce the exact
-  // currently-authoritative canonical bytes, proving IDs/content/local slots
-  // did not move.
+  const liveCanonical = `${JSON.stringify(queue, null, 2)}\n`;
+  assert.equal(liveCanonical, CANONICAL_QUEUE_JSON);
+  assert.equal(await sha256Hex(liveCanonical), CANONICAL_SHA256);
+
+  // Removing only the new committed UTC field must reproduce the exact
+  // pre-#52 canonical SHA, proving IDs/content/local slots did not move.
   const legacyProjection = queue.map(({ scheduledAt, ...post }) => post);
   const liveLegacy = `${JSON.stringify(legacyProjection, null, 2)}\n`;
+  assert.equal(await sha256Hex(liveLegacy), LEGACY_CANONICAL_SHA256);
 
-  assert.equal(liveLegacy.length, CANONICAL_QUEUE_JSON.length);
-  assert.equal(liveLegacy, CANONICAL_QUEUE_JSON);
-
-  // Separately prove every newly generated assignment carries a canonical
-  // committed UTC instant. The production bundle activation is a later,
-  // explicit step because adding this field changes canonical queue bytes.
   for (const post of queue) {
     assert.equal(typeof post.scheduledAt, 'string', `${post.id}: scheduledAt missing`);
     const epochMs = Date.parse(post.scheduledAt);
