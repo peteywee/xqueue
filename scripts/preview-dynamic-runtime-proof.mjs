@@ -265,12 +265,27 @@ async function main() {
     '0008_dynamic_runtime_integrity.sql',
     '0009_deferred_lifecycle.sql',
     '0010_publication_fence_identity.sql',
+    '0011_global_publication_halt.sql',
   ];
 
-  if (JSON.stringify(names.slice(-5)) !== JSON.stringify(expectedTail)) {
+  if (JSON.stringify(names.slice(-6)) !== JSON.stringify(expectedTail)) {
     throw new Error(
-      `preview migration tail is not exact 0006-0010: ${JSON.stringify(names)}`,
+      `preview migration tail is not exact 0006-0011: ${JSON.stringify(names)}`,
     );
+  }
+
+  const halt = query(
+    'SELECT halted,generation,reason,actor_class,updated_at ' +
+    'FROM publication_halt_state WHERE singleton_id=1;',
+  )[0] ?? null;
+  if (
+    !halt ||
+    Number(halt.halted) !== 0 ||
+    Number(halt.generation) !== 1 ||
+    halt.reason !== 'initial_unhalted' ||
+    halt.actor_class !== 'migration'
+  ) {
+    throw new Error('preview global publication halt did not initialize fail-safe state exactly');
   }
 
   const mediaExpected = runtimeMediaRows();
@@ -358,6 +373,13 @@ async function main() {
     config: PREVIEW_CONFIG,
     mainCandidate: process.env.GITHUB_SHA ?? null,
     migrationTail: expectedTail,
+    publicationHalt: {
+      halted: Number(halt.halted) === 1,
+      generation: Number(halt.generation),
+      reason: halt.reason,
+      actorClass: halt.actor_class,
+      updatedAt: halt.updated_at,
+    },
     mediaAction,
     revisionAction,
     runtime: {
