@@ -1,0 +1,92 @@
+name: Preview D1 Recovery Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preview-recovery-proof.yml'
+      - 'cloudflare/migrations/0012_reconciliation_determinations.sql'
+      - 'src/d1-publication-reconciliation.mjs'
+      - 'src/d1-logical-backup.mjs'
+      - 'scripts/d1-reconcile.mjs'
+      - 'scripts/d1-logical-backup.mjs'
+      - 'scripts/d1-backup-restore-proof.mjs'
+      - 'test/d1-publication-reconciliation.test.mjs'
+      - 'test/d1-logical-backup.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-schema-mutation
+  cancel-in-progress: false
+
+jobs:
+  prove-preview-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove reconciliation and restore guards locally
+        run: |
+          node --test \
+            test/d1-publication-reconciliation.test.mjs \
+            test/d1-logical-backup.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/d1-preview-shadow-proof.test.mjs
+
+      - name: Assert publication authority boundary remains intact
+        run: pnpm audit:authority
+
+      - name: Apply preview-only schema
+        run: pnpm preview:intake:migrate
+
+      - name: Capture real preview logical backup
+        run: |
+          pnpm d1:backup -- \
+            --environment preview \
+            --output /tmp/xqueue-preview-recovery-backup.json \
+            --evidence /tmp/xqueue-preview-recovery-backup-evidence.json
+
+      - name: Restore into isolated SQLite target and prove parity
+        run: |
+          pnpm d1:restore-proof -- \
+            --backup /tmp/xqueue-preview-recovery-backup.json \
+            --evidence /tmp/xqueue-preview-recovery-restore-evidence.json
+
+      - name: Remove raw backup before artifact upload
+        if: \${{ always() }}
+        run: rm -f /tmp/xqueue-preview-recovery-backup.json
+
+      - name: Upload non-sensitive recovery evidence
+        if: \${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-recovery-\${{ github.sha }}-\${{ github.run_id }}
+          path: |
+            /tmp/xqueue-preview-recovery-backup-evidence.json
+            /tmp/xqueue-preview-recovery-restore-evidence.json
+          if-no-files-found: warn
