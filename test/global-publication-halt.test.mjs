@@ -14,6 +14,7 @@ import {
 import {
   buildWranglerArgs,
   parseArgs,
+  parseOwnerClearResult,
   validateOwnerAction,
 } from '../scripts/publication-halt-owner.mjs';
 
@@ -332,4 +333,43 @@ test('owner control defaults to preview status and production clear requires exp
   assert.equal(args.includes('xqueue-production'), true);
   assert.equal(args.includes('wrangler.jsonc'), true);
   assert.equal(args.includes('xqueue-preview'), false);
+
+  assert.throws(
+    () => parseOwnerClearResult(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [{ direct_changes: 0 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 2,
+        reason: 'still halted',
+        actor_class: 'automation',
+        updated_at: '2026-09-21T16:00:00.000Z',
+      }] },
+    ])),
+    /did not change exactly one row/,
+  );
+
+  assert.deepEqual(
+    parseOwnerClearResult(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 0,
+        generation: 3,
+        reason: 'reviewed',
+        actor_class: 'owner',
+        updated_at: '2026-09-21T16:02:00.000Z',
+      }] },
+    ])),
+    {
+      singleton_id: 1,
+      halted: 0,
+      generation: 3,
+      reason: 'reviewed',
+      actor_class: 'owner',
+      updated_at: '2026-09-21T16:02:00.000Z',
+    },
+  );
 });
