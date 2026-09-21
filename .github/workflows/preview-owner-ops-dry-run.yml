@@ -1,0 +1,99 @@
+name: Preview Owner Ops Dry Run
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/preview-owner-ops-dry-run.yml'
+      - 'src/continuous-queue-owner-ops.mjs'
+      - 'src/continuous-queue-runtime-write.mjs'
+      - 'scripts/continuous-queue-owner-ops.mjs'
+      - 'test/continuous-queue-owner-ops.test.mjs'
+      - 'test/continuous-queue-owner-cli.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-owner-ops-readonly-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prove-preview-owner-ops-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove owner-operation guards locally
+        run: |
+          node --test \
+            test/continuous-queue-owner-ops.test.mjs \
+            test/continuous-queue-owner-cli.test.mjs
+
+      - name: Assert authority boundary
+        run: pnpm audit:authority
+
+      - name: Read-only live preview dry runs
+        run: |
+          pnpm queue:cancel -- \
+            --content-id A59 \
+            --reason "read-only preview proof" \
+            > /tmp/xqueue-owner-cancel-dry-run.json
+
+          pnpm queue:revise -- \
+            --content-id A59 \
+            --title "read-only preview proof title" \
+            --reason "read-only preview proof" \
+            > /tmp/xqueue-owner-revise-dry-run.json
+
+      - name: Validate dry-run evidence
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          for (const [kind, path] of [
+            ['cancel', '/tmp/xqueue-owner-cancel-dry-run.json'],
+            ['revise', '/tmp/xqueue-owner-revise-dry-run.json'],
+          ]) {
+            const proof = JSON.parse(readFileSync(path, 'utf8'));
+            if (proof.mode !== 'dry-run') throw new Error(kind + ': not dry-run');
+            if (proof.environment !== 'preview') throw new Error(kind + ': not preview');
+            if (proof.kind !== kind) throw new Error(kind + ': wrong kind');
+            if (proof.content_id !== 'A59') throw new Error(kind + ': wrong content');
+            if (!proof.operation_id || !proof.payload_digest) {
+              throw new Error(kind + ': missing identity evidence');
+            }
+          }
+          NODE
+
+      - name: Upload read-only proof
+        if: \${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-preview-owner-ops-dry-run-\${{ github.sha }}-\${{ github.run_id }}
+          path: |
+            /tmp/xqueue-owner-cancel-dry-run.json
+            /tmp/xqueue-owner-revise-dry-run.json
+          if-no-files-found: warn
