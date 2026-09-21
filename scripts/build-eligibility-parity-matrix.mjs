@@ -167,7 +167,7 @@ function localProjection(queue, ledger, { now, graceMinutes }) {
       ok: report.ok,
       postedCount: report.postedCount,
       skippedCount: report.skippedCount,
-      deferredCount: report.deferredCount,
+      ...(report.deferredCount === undefined ? {} : { deferredCount: report.deferredCount }),
       unresolvedCount: report.unresolvedCount,
       due: report.due.map((post) => post.id),
       overdue: report.overdue.map((post) => post.id),
