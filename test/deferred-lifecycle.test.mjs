@@ -204,6 +204,10 @@ test('local rollback never transforms an inflight reconciliation item', () => {
 test('0009 durable transition removes dispatch authority and appends exact evidence', async () => {
   const db = new DatabaseSync(':memory:');
   db.exec(migration('cloudflare/migrations/0001_xqueue_runtime.sql'));
+  db.exec(migration('cloudflare/migrations/0002_runtime_evidence.sql'));
+  db.exec(migration('cloudflare/migrations/0003_publication_lease.sql'));
+  db.exec(migration('cloudflare/migrations/0004_authority_ownership.sql'));
+  db.exec(migration('cloudflare/migrations/0005_publication_state_generation.sql'));
   db.exec(migration('cloudflare/migrations/0006_continuous_queue_shadow.sql'));
   db.exec(migration('cloudflare/migrations/0007_continuous_queue_intake.sql'));
   db.exec(migration('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
@@ -289,6 +293,10 @@ test('0009 durable transition removes dispatch authority and appends exact evide
 test('deferral evidence events are append-only', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(migration('cloudflare/migrations/0001_xqueue_runtime.sql'));
+  db.exec(migration('cloudflare/migrations/0002_runtime_evidence.sql'));
+  db.exec(migration('cloudflare/migrations/0003_publication_lease.sql'));
+  db.exec(migration('cloudflare/migrations/0004_authority_ownership.sql'));
+  db.exec(migration('cloudflare/migrations/0005_publication_state_generation.sql'));
   db.exec(migration('cloudflare/migrations/0006_continuous_queue_shadow.sql'));
   db.exec(migration('cloudflare/migrations/0007_continuous_queue_intake.sql'));
   db.exec(migration('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
