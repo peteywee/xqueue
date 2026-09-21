@@ -15,7 +15,6 @@ export function emptyState() {
     version: 1,
     posted: {},
     skipped: {},
-    deferred: {},
     spend: 0,
     inflight: null,
   };
@@ -101,8 +100,12 @@ export function normalizeState(value) {
     if (!['prepared', 'publishing', 'needs_reconciliation'].includes(inflight.status)) {
       throw new Error(`state.json inflight.status is invalid: ${inflight.status}`);
     }
-    if (posted[inflight.postId] || skipped[inflight.postId] || deferred[inflight.postId]) {
-      throw new Error(`state.json inflight ${inflight.postId} cannot also be posted, skipped, or deferred`);
+    if (
+      posted[inflight.postId] ||
+      skipped[inflight.postId] ||
+      Object.hasOwn(deferred, inflight.postId)
+    ) {
+      throw new Error(`state.json inflight ${inflight.postId} cannot also be posted or skipped`);
     }
   }
 
@@ -111,7 +114,7 @@ export function normalizeState(value) {
     version: 1,
     posted,
     skipped,
-    deferred,
+    ...(Object.hasOwn(value, 'deferred') ? { deferred } : {}),
     spend,
     inflight,
   };
