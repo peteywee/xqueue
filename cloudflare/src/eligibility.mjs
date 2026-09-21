@@ -253,7 +253,7 @@ export function isLedgerResolved(ledger, postId) {
   return Boolean(
     ledger?.posted?.[postId] ||
     ledger?.skipped?.[postId] ||
-    ledger?.deferred?.[postId],
+    Object.hasOwn(ledger?.deferred ?? {}, postId),
   );
 }
 
@@ -394,7 +394,11 @@ function checkLedgerShape(ledger) {
     }
     // Same truthiness semantics as normalizeState's
     // `if (posted[inflight.postId] || skipped[inflight.postId])`.
-    if (posted[inflight.postId] || skipped[inflight.postId] || deferred[inflight.postId]) {
+    if (
+      posted[inflight.postId] ||
+      skipped[inflight.postId] ||
+      Object.hasOwn(deferred, inflight.postId)
+    ) {
       return false;
     }
   }
