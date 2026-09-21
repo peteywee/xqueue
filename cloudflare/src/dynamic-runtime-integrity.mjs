@@ -608,6 +608,7 @@ export async function buildDynamicRuntimeSnapshot({
     media_required_count: mediaRequiredCount,
     media_ready_count: mediaReadyCount,
     assignments,
+    deferred,
     approvedUnscheduled,
     media,
   });
