@@ -1,0 +1,77 @@
+name: Production Cutover Readiness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-cutover-readiness.yml'
+      - 'cloudflare/generated/queue-bundle.mjs'
+      - 'cloudflare/src/runtime-readiness.mjs'
+      - 'cloudflare/src/queue-integrity.mjs'
+      - 'cloudflare/migrations-production/**'
+      - 'src/cutover-readiness.mjs'
+      - 'scripts/production-cutover-readiness.mjs'
+      - 'scripts/tsal-runtime-evidence.mjs'
+      - 'scripts/tsal-deployment-evidence.mjs'
+      - 'scripts/authority-boundary-audit.mjs'
+      - 'scripts/credential-boundary-audit.mjs'
+      - 'wrangler.jsonc'
+      - 'wrangler.status.jsonc'
+      - 'wrangler.publisher.jsonc'
+      - 'wrangler.authority.jsonc'
+      - 'test/cutover-readiness.test.mjs'
+      - 'test/cutover-readiness-cli.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-production-cutover-readiness
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XQUEUE_CUTOVER_READINESS_EVIDENCE: /tmp/xqueue-production-cutover-readiness.json
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove diagnostic is fail-closed and read-only
+        run: |
+          node --test \
+            test/cutover-readiness.test.mjs \
+            test/cutover-readiness-cli.test.mjs
+
+      - name: Run exact production pre-cutover observation
+        run: pnpm cutover:readiness
+
+      - name: Upload pre-cutover evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: xqueue-production-cutover-readiness-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-production-cutover-readiness.json
+          if-no-files-found: warn
