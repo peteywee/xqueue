@@ -102,6 +102,7 @@ export function buildWranglerArgs({ environment, sql }) {
     target.config,
     '--remote',
     '--yes',
+    '--json',
     '--command',
     sql,
   ];
@@ -120,17 +121,52 @@ function runWrangler(args) {
     throw new Error('wrangler halt control failed' + (detail ? ': ' + detail : ''));
   }
 
-  process.stdout.write(result.stdout ?? '');
+  return result.stdout ?? '';
+}
+
+export function parseOwnerClearResult(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error('owner clear D1 output is not valid JSON');
+  }
+
+  if (!Array.isArray(parsed) || parsed.length < 3) {
+    throw new Error('owner clear D1 output is incomplete');
+  }
+
+  const changes = parsed
+    .flatMap((statement) => Array.isArray(statement?.results) ? statement.results : [])
+    .find((row) => Object.hasOwn(row ?? {}, 'direct_changes'));
+
+  const state = parsed
+    .flatMap((statement) => Array.isArray(statement?.results) ? statement.results : [])
+    .find((row) => Object.hasOwn(row ?? {}, 'halted') && Object.hasOwn(row ?? {}, 'generation'));
+
+  if (Number(changes?.direct_changes) !== 1) {
+    throw new Error('owner clear compare-and-set did not change exactly one row');
+  }
+  if (
+    !state ||
+    Number(state.halted) !== 0 ||
+    state.actor_class !== 'owner'
+  ) {
+    throw new Error('owner clear readback is not exact');
+  }
+
+  return state;
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
 
   if (options.action === 'status') {
-    runWrangler(buildWranglerArgs({
+    const stdout = runWrangler(buildWranglerArgs({
       environment: options.environment,
       sql: renderPublicationHaltStatusSql(),
     }));
+    process.stdout.write(stdout);
     return;
   }
 
@@ -142,10 +178,12 @@ export async function main(argv = process.argv.slice(2)) {
     at: new Date().toISOString(),
   });
 
-  runWrangler(buildWranglerArgs({
+  const stdout = runWrangler(buildWranglerArgs({
     environment: options.environment,
     sql,
   }));
+  parseOwnerClearResult(stdout);
+  process.stdout.write(stdout);
 }
 
 if (import.meta.url === new URL(process.argv[1], 'file:').href) {
