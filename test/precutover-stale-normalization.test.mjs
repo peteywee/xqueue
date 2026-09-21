@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
+  PRECUTOVER_NORMALIZATION_CANDIDATES_SQL,
   planPrecutoverStaleNormalization,
   renderPrecutoverStaleNormalizationSql,
   verifyPrecutoverNormalizationReadback,
@@ -157,4 +159,57 @@ test('readback requires exact deferred assignment and durable deferral evidence'
     }),
     true,
   );
+});
+
+test('candidate query excludes already-posted and otherwise non-schedulable assignments', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec([
+    'CREATE TABLE queue_assignments (',
+    ' assignment_id TEXT, assignment_version INTEGER, content_id TEXT, content_revision INTEGER,',
+    ' content_digest TEXT, target_account TEXT, policy_version INTEGER, resolved_at TEXT,',
+    ' scheduled_date TEXT, scheduled_time TEXT, timezone TEXT, slot_label TEXT,',
+    ' status TEXT, lifecycle_state TEXT, generation INTEGER);',
+    'CREATE TABLE publication_state (post_id TEXT, status TEXT, attempt_id TEXT, generation INTEGER);',
+    'CREATE TABLE queue_deferrals (content_id TEXT, state TEXT);',
+  ].join(' '));
+
+  const insertAssignment = db.prepare([
+    'INSERT INTO queue_assignments (',
+    'assignment_id,assignment_version,content_id,content_revision,content_digest,',
+    'target_account,policy_version,resolved_at,scheduled_date,scheduled_time,',
+    'timezone,slot_label,status,lifecycle_state,generation',
+    ') VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  ].join(' '));
+  const insertPublication = db.prepare(
+    'INSERT INTO publication_state (post_id,status,attempt_id,generation) VALUES (?,?,?,?)',
+  );
+
+  for (const [id, status, attemptId] of [
+    ['POSTED', 'posted', null],
+    ['READY', 'scheduled', null],
+    ['INFLIGHT', 'scheduled', 'attempt-1'],
+    ['RECON', 'needs_reconciliation', 'attempt-2'],
+  ]) {
+    insertAssignment.run(
+      id, 1, id, 1, 'a'.repeat(64), 'x-primary', 2,
+      '2026-09-21T12:00:00.000Z', '2026-09-21', '07:00',
+      'America/Chicago', 'lull', 'active', 'scheduled', 1,
+    );
+    insertPublication.run(id, status, attemptId, 1);
+  }
+
+  insertAssignment.run(
+    'DEFERRED', 1, 'DEFERRED', 1, 'a'.repeat(64), 'x-primary', 2,
+    '2026-09-21T12:00:00.000Z', '2026-09-21', '07:00',
+    'America/Chicago', 'lull', 'active', 'scheduled', 1,
+  );
+  insertPublication.run('DEFERRED', 'scheduled', null, 1);
+  db.prepare('INSERT INTO queue_deferrals (content_id,state) VALUES (?,?)')
+    .run('DEFERRED', 'pending_replacement');
+
+  const rows = db.prepare(PRECUTOVER_NORMALIZATION_CANDIDATES_SQL).all();
+
+  assert.deepEqual(rows.map((row) => row.content_id), ['READY']);
+  assert.equal(rows[0].publication_status, 'scheduled');
+  assert.equal(rows[0].deferral_state, null);
 });
