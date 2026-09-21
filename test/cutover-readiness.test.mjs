@@ -52,10 +52,10 @@ function readyD1(queue, sha) {
   };
 }
 
-test('current production bundle remains explicitly blocked until #52 scheduledAt activation', () => {
+test('activated production bundle proves #52 committed UTC when D1 metadata matches', () => {
   const queue = decodeBundledQueue();
   assert.equal(queue.length, 180);
-  assert.equal(queue.some((row) => row.scheduledAt != null), false);
+  assert.equal(queue.filter((row) => row.scheduledAt != null).length, 180);
 
   const result = evaluateCutoverReadiness({
     queue,
@@ -63,17 +63,14 @@ test('current production bundle remains explicitly blocked until #52 scheduledAt
     declaredQueueSha256: DECLARED_QUEUE_SHA256,
     health: healthyInertHealth(),
     d1: readyD1(queue, DECLARED_QUEUE_SHA256),
-    controlPlane: { schedules: [], deployments: [], observationErrors: [] },
+    controlPlane: { schedules: [], deployments: [{ id: 'status' }], observationErrors: [] },
     authorityBoundaryIntact: true,
     credentialBoundaryIntact: true,
   });
 
-  assert.equal(result.ready, false);
-  assert.equal(result.checks.scheduleActivation, false);
-  assert.deepEqual(
-    result.blockers.map((row) => row.id),
-    ['schedule_activation'],
-  );
+  assert.equal(result.checks.scheduleActivation, true);
+  assert.equal(result.ready, true);
+  assert.deepEqual(result.blockers, []);
 });
 
 test('a fully observed, technically-ready, safely-inert pre-cutover candidate passes', () => {
