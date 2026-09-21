@@ -80,6 +80,25 @@ test('429 is confirmed refused but never automatically retried', () => {
   );
   assert.equal(result.retryableLater, true);
   assert.equal(result.automaticRetryAllowed, false);
+  assert.equal(result.deferRecommended, true);
+  assert.equal(result.deferReason, 'confirmed_rate_limit_handoff');
+});
+
+test('media upload failure is confirmed no-post and handed to deferred lifecycle', () => {
+  const result = expect(
+    {
+      phase: 'pre_dispatch',
+      error: {
+        operation: 'media_upload',
+        status: 429,
+      },
+    },
+    CONFIRMED_NOT_POSTED,
+    'confirmed_media_handoff',
+  );
+  assert.equal(result.deferRecommended, true);
+  assert.equal(result.deferReason, 'confirmed_rate_limit_handoff');
+  assert.equal(result.automaticRetryAllowed, false);
 });
 
 test('5xx after dispatch is reconciliation-required', () => {

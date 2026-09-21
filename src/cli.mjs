@@ -60,6 +60,10 @@ import {
   analyzeRuntime,
   isResolved,
 } from './runtime-health.mjs';
+import {
+  deferMissedStaticAssignments,
+  isMissedPost,
+} from './deferred-lifecycle.mjs';
 
 const ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -70,6 +74,7 @@ const LIBRARY_DIR = process.env.LIBRARY_DIR ?? join(ROOT, 'content');
 const MEDIA_DIR = process.env.MEDIA_DIR ?? join(ROOT, 'media');
 const QUEUE = join(ROOT, 'queue.json');
 const STATE = join(ROOT, 'state.json');
+const POLICY_FILE = join(ROOT, 'config', 'schedule-policy.json');
 const PUBLISH_LOCK = join(ROOT, '.xqueue-publish.lock');
 
 loadDotenv();
@@ -309,6 +314,7 @@ function cmdRuntimeHealth() {
   console.log('=== XQUEUE RUNTIME HEALTH ===');
   console.log(`posted:      ${report.postedCount}`);
   console.log(`skipped:     ${report.skippedCount}`);
+  console.log(`deferred:    ${report.deferredCount ?? 0}`);
   console.log(`unresolved:  ${report.unresolvedCount}`);
   console.log(`due now:     ${report.due.length}`);
   console.log(`overdue:     ${report.overdue.length} (> ${report.graceMinutes} minute grace)`);
@@ -419,8 +425,34 @@ async function cmdPost() {
     }
 
     const now = new Date();
+    const graceMinutes = 20;
+
+    if (!dry) {
+      const policy = JSON.parse(readFileSync(POLICY_FILE, 'utf8'));
+      const deferral = deferMissedStaticAssignments(queue, state, {
+        now,
+        graceMinutes,
+        policyVersion: Number(policy.version),
+      });
+
+      if (deferral.deferred.length > 0) {
+        writeStateAtomic(STATE, state);
+        console.log(
+          `Deferred ${deferral.deferred.length} missed assignment(s); stale slots cannot authorize catch-up publication.`,
+        );
+        for (const item of deferral.deferred.slice(0, 20)) {
+          console.log(
+            `  deferred ${item.postId}: ${item.resolvedAt} -> replacement required`,
+          );
+        }
+      }
+    }
+
     const due = queue.filter(
-      (post) => !isResolved(state, post.id) && isDue(post, now),
+      (post) =>
+        !isResolved(state, post.id) &&
+        isDue(post, now) &&
+        !isMissedPost(post, { now, graceMinutes }),
     );
 
     if (!due.length) {
@@ -691,7 +723,8 @@ Safety invariants:
   Production media validation blocks missing figures.
   A filesystem lock blocks concurrent live publishers.
   state.json is written atomically.
-  Posted, skipped, and in-flight states are mutually exclusive.
+  Posted, skipped, deferred, and in-flight states are mutually exclusive.
+  Missed assignments become deferred; live mode never catch-up publishes them.
   A publication intent is persisted before the X create call begins.
   Ambiguous create-post outcomes block automatic retries until reconciled.
   Posted and owner-skipped queue IDs are never auto-published again.

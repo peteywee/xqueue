@@ -252,7 +252,8 @@ export function resolveScheduledAt({
 export function isLedgerResolved(ledger, postId) {
   return Boolean(
     ledger?.posted?.[postId] ||
-    ledger?.skipped?.[postId],
+    ledger?.skipped?.[postId] ||
+    Object.hasOwn(ledger?.deferred ?? {}, postId),
   );
 }
 
@@ -361,6 +362,20 @@ function checkLedgerShape(ledger) {
     }
   }
 
+  const deferred = ledger.deferred ?? {};
+  if (!isPlainObject(deferred)) {
+    return false;
+  }
+
+  for (const [postId, record] of Object.entries(deferred)) {
+    if (!isPlainObject(record)) return false;
+    if (!isNonEmptyString(record.at) || !isNonEmptyString(record.reason)) return false;
+    if (!isNonEmptyString(record.assignmentId) || !isNonEmptyString(record.resolvedAt)) return false;
+    if (!Number.isSafeInteger(record.assignmentVersion) || record.assignmentVersion < 1) return false;
+    if (!Number.isSafeInteger(record.policyVersion) || record.policyVersion < 1) return false;
+    if (posted[postId] || skipped[postId]) return false;
+  }
+
   const spend = ledger.spend ?? 0;
   if (!Number.isFinite(spend) || spend < 0) {
     return false;
@@ -379,7 +394,11 @@ function checkLedgerShape(ledger) {
     }
     // Same truthiness semantics as normalizeState's
     // `if (posted[inflight.postId] || skipped[inflight.postId])`.
-    if (posted[inflight.postId] || skipped[inflight.postId]) {
+    if (
+      posted[inflight.postId] ||
+      skipped[inflight.postId] ||
+      Object.hasOwn(deferred, inflight.postId)
+    ) {
       return false;
     }
   }
@@ -543,6 +562,9 @@ export function evaluateEligibility(queue, ledger, options = {}) {
     ok: !inflight && overdueIdx.length === 0,
     postedCount: Object.keys(ledger.posted ?? {}).length,
     skippedCount: Object.keys(ledger.skipped ?? {}).length,
+    ...(Object.hasOwn(ledger, 'deferred')
+      ? { deferredCount: Object.keys(ledger.deferred ?? {}).length }
+      : {}),
     unresolvedCount: unresolvedIdx.length,
     due: dueIdx.map((i) => queue[i].id),
     overdue: overdueIdx.map((i) => queue[i].id),

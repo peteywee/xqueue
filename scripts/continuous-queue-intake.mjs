@@ -40,7 +40,7 @@ import {
 const PREVIEW_DB = 'xqueue-preview';
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const POLICY_FILE = resolve('config/schedule-policy.json');
-const RUNTIME_SCHEMA_MIGRATION = '0008_dynamic_runtime_integrity.sql';
+const RUNTIME_SCHEMA_MIGRATION = '0009_deferred_lifecycle.sql';
 
 const args = process.argv.slice(2);
 

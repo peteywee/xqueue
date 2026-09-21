@@ -263,9 +263,10 @@ async function main() {
     '0006_continuous_queue_shadow.sql',
     '0007_continuous_queue_intake.sql',
     '0008_dynamic_runtime_integrity.sql',
+    '0009_deferred_lifecycle.sql',
   ];
 
-  if (JSON.stringify(names.slice(-3)) !== JSON.stringify(expectedTail)) {
+  if (JSON.stringify(names.slice(-4)) !== JSON.stringify(expectedTail)) {
     throw new Error(
       `preview migration tail is not exact 0006-0008: ${JSON.stringify(names)}`,
     );

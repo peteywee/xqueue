@@ -48,13 +48,14 @@ test('0007 creates durable frontier and generated intake SQL appends without mov
        'active',NULL,1,'${at}','${at}');
   `);
 
+  db.exec(text('cloudflare/migrations/0007_continuous_queue_intake.sql'));
+  db.exec(text('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
+  db.exec(text('cloudflare/migrations/0009_deferred_lifecycle.sql'));
+
   const before = rows(
     db,
     "SELECT * FROM queue_assignments WHERE content_id='OLD-1';",
   );
-
-  db.exec(text('cloudflare/migrations/0007_continuous_queue_intake.sql'));
-  db.exec(text('cloudflare/migrations/0008_dynamic_runtime_integrity.sql'));
 
   const [frontier] = rows(db, 'SELECT * FROM queue_intake_frontier;');
   assert.equal(frontier.generation, 1);
