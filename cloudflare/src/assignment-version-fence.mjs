@@ -104,3 +104,43 @@ export async function verifyCurrentAssignmentFence(db, expected) {
     return Object.freeze({ ok: false, reason: 'assignment_store_unavailable' });
   }
 }
+
+
+export async function readCurrentAssignmentHandle(db, contentId) {
+  if (!db || typeof db.prepare !== 'function') {
+    throw new Error('assignment store is unavailable');
+  }
+  const id = requiredString(contentId, 'content_id');
+
+  const result = await db.prepare(
+    [
+      'SELECT assignment_id,assignment_version,content_id,content_digest,',
+      'target_account,policy_version,resolved_at,status,lifecycle_state,generation',
+      'FROM queue_assignments',
+      "WHERE content_id=?1 AND status='active' AND lifecycle_state='scheduled'",
+      'ORDER BY assignment_version DESC LIMIT 2',
+    ].join(' '),
+  ).bind(id).all();
+
+  const rows = Array.isArray(result) ? result : (result?.results ?? []);
+  if (rows.length === 0) throw new Error('current assignment is missing');
+  if (rows.length !== 1) throw new Error('current assignment multiplicity');
+
+  const row = rows[0];
+  const identity = normalizeAssignmentFence(row);
+
+  const resolvedAt = requiredString(row.resolved_at, 'resolved_at');
+  const ms = Date.parse(resolvedAt);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== resolvedAt) {
+    throw new Error('resolved_at must be canonical UTC');
+  }
+
+  return Object.freeze({
+    ...identity,
+    target_account: requiredString(row.target_account, 'target_account'),
+    resolved_at: resolvedAt,
+    generation: positiveInteger(row.generation, 'assignment generation'),
+    status: row.status,
+    lifecycle_state: row.lifecycle_state,
+  });
+}
