@@ -387,3 +387,21 @@ test('reconciliation refuses unsupported or insufficient owner determinations', 
     /tweet_id is invalid/,
   );
 });
+
+test('reconciliation refuses snapshot and immutable fence identity drift', () => {
+  const { db } = fixture();
+  const source = candidate(db);
+  const snapshot = JSON.parse(source.snapshotRaw);
+  snapshot.inflight.publicationFence.assignmentVersion = 2;
+
+  assert.throws(
+    () => planOwnerReconciliation({
+      ...source,
+      snapshotRaw: JSON.stringify(snapshot),
+      outcome: 'confirmed_not_posted',
+      reason: 'owner verified absence',
+      determinedAt: DETERMINED_AT,
+    }),
+    /does not match immutable D1 evidence/,
+  );
+});
