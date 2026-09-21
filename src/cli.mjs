@@ -314,7 +314,7 @@ function cmdRuntimeHealth() {
   console.log('=== XQUEUE RUNTIME HEALTH ===');
   console.log(`posted:      ${report.postedCount}`);
   console.log(`skipped:     ${report.skippedCount}`);
-  console.log(`deferred:    ${report.deferredCount}`);
+  console.log(`deferred:    ${report.deferredCount ?? 0}`);
   console.log(`unresolved:  ${report.unresolvedCount}`);
   console.log(`due now:     ${report.due.length}`);
   console.log(`overdue:     ${report.overdue.length} (> ${report.graceMinutes} minute grace)`);
