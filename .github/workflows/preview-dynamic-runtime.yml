@@ -8,7 +8,7 @@ on:
       - 'cloudflare/migrations/0008_dynamic_runtime_integrity.sql'
       - 'cloudflare/migrations/0009_deferred_lifecycle.sql'
       - 'cloudflare/src/dynamic-runtime-integrity.mjs'
-      - 'cloudflare/src/deferred-lifecycle.mjs'
+      - 'src/d1-deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
       - 'cloudflare/src/worker.mjs'
       - 'src/continuous-queue-runtime-write.mjs'
