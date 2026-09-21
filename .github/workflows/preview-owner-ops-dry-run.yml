@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: xqueue-preview-owner-ops-readonly-\${{ github.ref }}
+  group: xqueue-preview-owner-ops-readonly-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,13 +26,13 @@ jobs:
 
     env:
       CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
-      CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@v4
         with:
-          ref: \${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -89,10 +89,10 @@ jobs:
           NODE
 
       - name: Upload read-only proof
-        if: \${{ always() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: xqueue-preview-owner-ops-dry-run-\${{ github.sha }}-\${{ github.run_id }}
+          name: xqueue-preview-owner-ops-dry-run-${{ github.sha }}-${{ github.run_id }}
           path: |
             /tmp/xqueue-owner-cancel-dry-run.json
             /tmp/xqueue-owner-revise-dry-run.json
