@@ -52,12 +52,22 @@ test('production preparation workflow is manual-only and authority-disable prece
   const inert = source.indexOf('Prove Cloudflare publication is inert before D1 mutation');
   const migrations = source.indexOf('Apply production continuous-queue and recovery schema');
   const seed = source.indexOf('Seed durable queue/runtime and activate committed UTC metadata');
+  const normalize = source.indexOf('Normalize expired pre-cutover assignments to deferred');
+  const finalHealth = source.indexOf('Prove UTC bundle and dynamic runtime are readable while authority stays disabled');
 
-  assert.ok(deploy >= 0 && inert > deploy && migrations > inert && seed > migrations);
+  assert.ok(
+    deploy >= 0 &&
+    inert > deploy &&
+    migrations > inert &&
+    seed > migrations &&
+    normalize > seed &&
+    finalHealth > normalize
+  );
   assert.match(source, /authorityFlag === false/);
   assert.match(source, /authorized === false/);
   assert.match(source, /livePublication === false/);
   assert.match(source, /schedulerAuthority === false/);
+  assert.match(source, /authorityReadiness\?\.ok !== true/);
   assert.match(source, /Date\.now\(\) \+ 120_000/);
   assert.match(source, /setTimeout\(resolve, 5_000\)/);
   assert.match(source, /authority_disable_propagation_timeout/);

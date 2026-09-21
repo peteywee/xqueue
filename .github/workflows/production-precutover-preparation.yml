@@ -119,6 +119,9 @@ jobs:
       - name: Seed durable queue/runtime and activate committed UTC metadata
         run: node scripts/production-precutover-prepare.mjs
 
+      - name: Normalize expired pre-cutover assignments to deferred
+        run: node scripts/production-precutover-normalize.mjs
+
       - name: Prove UTC bundle and dynamic runtime are readable while authority stays disabled
         run: |
           node --input-type=module <<'NODE'
@@ -129,9 +132,11 @@ jobs:
           const failures = [];
           if (body?.queueIntegrity?.ok !== true) failures.push('queue_integrity');
           if (body?.dynamicRuntimeReadiness?.ok !== true) failures.push('dynamic_runtime');
+          if (body?.authorityReadiness?.ok !== true) failures.push('authority_readiness');
           if (body?.storage?.d1?.reachable !== true) failures.push('d1');
           if (body?.storage?.r2?.reachable !== true) failures.push('r2');
           if (body?.authorityReadiness?.authorityFlag !== false) failures.push('authority_flag');
+          if (body?.authorityReadiness?.authorized !== false) failures.push('authorized');
           if (body?.livePublication !== false) failures.push('live_publication');
           if (body?.schedulerAuthority !== false) failures.push('scheduler_authority');
           if (failures.length) {
