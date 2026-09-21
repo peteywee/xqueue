@@ -6,7 +6,9 @@ on:
     paths:
       - '.github/workflows/preview-dynamic-runtime.yml'
       - 'cloudflare/migrations/0008_dynamic_runtime_integrity.sql'
+      - 'cloudflare/migrations/0009_deferred_lifecycle.sql'
       - 'cloudflare/src/dynamic-runtime-integrity.mjs'
+      - 'cloudflare/src/deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
       - 'cloudflare/src/worker.mjs'
       - 'src/continuous-queue-runtime-write.mjs'
@@ -14,6 +16,7 @@ on:
       - 'scripts/continuous-queue-intake.mjs'
       - 'scripts/preview-dynamic-runtime-proof.mjs'
       - 'test/dynamic-runtime-integrity.test.mjs'
+      - 'test/deferred-lifecycle.test.mjs'
       - 'package.json'
   workflow_dispatch:
 
@@ -56,6 +59,7 @@ jobs:
         run: |
           node --test \
             test/dynamic-runtime-integrity.test.mjs \
+            test/deferred-lifecycle.test.mjs \
             test/cloudflare-media.test.mjs \
             test/cloudflare-migration-lanes.test.mjs \
             test/d1-preview-shadow-proof.test.mjs
