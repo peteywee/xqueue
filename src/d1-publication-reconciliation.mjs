@@ -210,37 +210,43 @@ export function renderOwnerReconciliationSql(plan) {
     throw new Error('owner reconciliation plan is required');
   }
 
-  const determinationInsert = [
-    'INSERT INTO publication_reconciliation_determinations (',
-    'determination_id,post_id,attempt_id,expected_state_generation,outcome,',
-    'tweet_id,reason,actor_class,determined_at',
-    ') SELECT ',
-    [
-      sqlText(plan.determination_id),
-      sqlText(plan.post_id),
-      sqlText(plan.attempt_id),
-      String(plan.expected_state_generation),
-      sqlText(plan.outcome),
-      sqlText(plan.tweet_id),
-      sqlText(plan.reason),
-      sqlText('owner'),
-      sqlText(plan.determined_at),
-    ].join(','),
-    ' WHERE EXISTS (',
-    'SELECT 1 FROM publication_state state ',
+  const eventType = plan.outcome === 'confirmed_posted'
+    ? 'reconciled_posted'
+    : 'reconciled_not_posted';
+
+  const eventDetail = JSON.stringify({
+    determinationId: plan.determination_id,
+    attemptId: plan.attempt_id,
+    outcome: plan.outcome,
+    tweetId: plan.tweet_id,
+    reason: plan.reason,
+    stateGeneration: plan.resulting_state_generation,
+    ownerDetermination: true,
+  });
+
+  const noExistingDetermination = [
+    'NOT EXISTS (SELECT 1 FROM publication_reconciliation_determinations existing ',
+    'WHERE existing.post_id=' + sqlText(plan.post_id) + ' ',
+    'AND existing.attempt_id=' + sqlText(plan.attempt_id) + ')',
+  ].join('');
+
+  const exactAmbiguousState = [
+    'EXISTS (SELECT 1 FROM publication_state state ',
     'WHERE state.post_id=' + sqlText(plan.post_id) + ' ',
     "AND state.status='needs_reconciliation' ",
     'AND state.attempt_id=' + sqlText(plan.attempt_id) + ' ',
-    'AND state.generation=' + plan.expected_state_generation,
-    ') AND EXISTS (',
-    'SELECT 1 FROM publication_fences fence ',
+    'AND state.generation=' + plan.expected_state_generation + ')',
+  ].join('');
+
+  const exactFence = [
+    'EXISTS (SELECT 1 FROM publication_fences fence ',
     'WHERE fence.attempt_id=' + sqlText(plan.attempt_id) + ' ',
-    'AND fence.post_id=' + sqlText(plan.post_id),
-    ') AND NOT EXISTS (',
-    'SELECT 1 FROM publication_reconciliation_determinations existing ',
-    'WHERE existing.post_id=' + sqlText(plan.post_id) + ' ',
-    'AND existing.attempt_id=' + sqlText(plan.attempt_id),
-    ');',
+    'AND fence.post_id=' + sqlText(plan.post_id) + ')',
+  ].join('');
+
+  const exactResultSnapshot = [
+    "EXISTS (SELECT 1 FROM runtime_metadata snapshot WHERE snapshot.key='state.snapshot_json' ",
+    'AND snapshot.value=' + sqlText(plan.resulting_snapshot_raw) + ')',
   ].join('');
 
   const snapshotUpdate = [
@@ -249,16 +255,9 @@ export function renderOwnerReconciliationSql(plan) {
     'updated_at=' + sqlText(plan.determined_at) + ' ',
     "WHERE key='state.snapshot_json' ",
     'AND value=' + sqlText(plan.source_snapshot_raw) + ' ',
-    'AND EXISTS (SELECT 1 FROM publication_reconciliation_determinations d ',
-    'WHERE d.determination_id=' + sqlText(plan.determination_id) + ' ',
-    'AND d.post_id=' + sqlText(plan.post_id) + ' ',
-    'AND d.attempt_id=' + sqlText(plan.attempt_id) + ' ',
-    'AND d.expected_state_generation=' + plan.expected_state_generation + ') ',
-    'AND EXISTS (SELECT 1 FROM publication_state state ',
-    'WHERE state.post_id=' + sqlText(plan.post_id) + ' ',
-    "AND state.status='needs_reconciliation' ",
-    'AND state.attempt_id=' + sqlText(plan.attempt_id) + ' ',
-    'AND state.generation=' + plan.expected_state_generation + ');',
+    'AND ' + exactAmbiguousState + ' ',
+    'AND ' + exactFence + ' ',
+    'AND ' + noExistingDetermination + ';',
   ].join('');
 
   const stateUpdate = plan.outcome === 'confirmed_posted'
@@ -275,13 +274,14 @@ export function renderOwnerReconciliationSql(plan) {
         "AND status='needs_reconciliation' ",
         'AND attempt_id=' + sqlText(plan.attempt_id) + ' ',
         'AND generation=' + plan.expected_state_generation + ' ',
-        'AND EXISTS (SELECT 1 FROM publication_reconciliation_determinations d ',
-        'WHERE d.determination_id=' + sqlText(plan.determination_id) + ');',
+        'AND ' + exactResultSnapshot + ' ',
+        'AND ' + exactFence + ' ',
+        'AND ' + noExistingDetermination + ';',
       ].join('')
     : [
         'UPDATE publication_state SET ',
         "status='scheduled',",
-        'attempt_id=NULL,publishing_at=NULL,',
+        'tweet_id=NULL,attempt_id=NULL,publishing_at=NULL,',
         'updated_at=' + sqlText(plan.determined_at) + ',',
         'last_error=' + sqlText(plan.reason) + ',',
         'failed_at=NULL,reconciled=1,',
@@ -291,50 +291,68 @@ export function renderOwnerReconciliationSql(plan) {
         "AND status='needs_reconciliation' ",
         'AND attempt_id=' + sqlText(plan.attempt_id) + ' ',
         'AND generation=' + plan.expected_state_generation + ' ',
-        'AND EXISTS (SELECT 1 FROM publication_reconciliation_determinations d ',
-        'WHERE d.determination_id=' + sqlText(plan.determination_id) + ');',
+        'AND ' + exactResultSnapshot + ' ',
+        'AND ' + exactFence + ' ',
+        'AND ' + noExistingDetermination + ';',
       ].join('');
 
-  const eventDetail = JSON.stringify({
-    determinationId: plan.determination_id,
-    attemptId: plan.attempt_id,
-    outcome: plan.outcome,
-    tweetId: plan.tweet_id,
-    reason: plan.reason,
-    stateGeneration: plan.resulting_state_generation,
-    ownerDetermination: true,
-  });
-
-  const eventInsert = [
-    'INSERT INTO publication_events (post_id,event_type,event_at,detail) SELECT ',
-    sqlText(plan.post_id) + ',',
-    sqlText(plan.outcome === 'confirmed_posted'
-      ? 'reconciled_posted'
-      : 'reconciled_not_posted') + ',',
-    sqlText(plan.determined_at) + ',',
-    sqlText(eventDetail) + ' ',
-    'WHERE EXISTS (SELECT 1 FROM publication_state state ',
+  const resultingStateGuard = [
+    'EXISTS (SELECT 1 FROM publication_state state ',
     'WHERE state.post_id=' + sqlText(plan.post_id) + ' ',
     'AND state.generation=' + plan.resulting_state_generation + ' ',
     'AND state.reconciled=1 ',
     'AND ' + (
       plan.outcome === 'confirmed_posted'
-        ? "state.status='posted' AND state.tweet_id=" + sqlText(plan.tweet_id)
-        : "state.status='scheduled' AND state.attempt_id IS NULL"
-    ) + ') ',
+        ? "state.status='posted' AND state.tweet_id=" + sqlText(plan.tweet_id) +
+          ' AND state.attempt_id=' + sqlText(plan.attempt_id)
+        : "state.status='scheduled' AND state.attempt_id IS NULL AND state.tweet_id IS NULL"
+    ) + ')',
+  ].join('');
+
+  const determinationInsert = [
+    'INSERT INTO publication_reconciliation_determinations (',
+    'determination_id,post_id,attempt_id,expected_state_generation,outcome,',
+    'tweet_id,reason,actor_class,determined_at',
+    ') SELECT ',
+    [
+      sqlText(plan.determination_id),
+      sqlText(plan.post_id),
+      sqlText(plan.attempt_id),
+      String(plan.expected_state_generation),
+      sqlText(plan.outcome),
+      sqlText(plan.tweet_id),
+      sqlText(plan.reason),
+      sqlText('owner'),
+      sqlText(plan.determined_at),
+    ].join(','),
+    ' WHERE ' + exactResultSnapshot + ' ',
+    'AND ' + resultingStateGuard + ' ',
+    'AND ' + exactFence + ' ',
+    'AND ' + noExistingDetermination + ';',
+  ].join('');
+
+  const eventInsert = [
+    'INSERT INTO publication_events (post_id,event_type,event_at,detail) SELECT ',
+    sqlText(plan.post_id) + ',',
+    sqlText(eventType) + ',',
+    sqlText(plan.determined_at) + ',',
+    sqlText(eventDetail) + ' ',
+    'WHERE EXISTS (SELECT 1 FROM publication_reconciliation_determinations d ',
+    'WHERE d.determination_id=' + sqlText(plan.determination_id) + ' ',
+    'AND d.post_id=' + sqlText(plan.post_id) + ' ',
+    'AND d.attempt_id=' + sqlText(plan.attempt_id) + ' ',
+    'AND d.outcome=' + sqlText(plan.outcome) + ') ',
     'AND NOT EXISTS (SELECT 1 FROM publication_events e ',
     'WHERE e.post_id=' + sqlText(plan.post_id) + ' ',
-    'AND e.event_type=' + sqlText(plan.outcome === 'confirmed_posted'
-      ? 'reconciled_posted'
-      : 'reconciled_not_posted') + ' ',
+    'AND e.event_type=' + sqlText(eventType) + ' ',
     'AND e.detail=' + sqlText(eventDetail) + ');',
   ].join('');
 
   return [
     'BEGIN IMMEDIATE;',
-    determinationInsert,
     snapshotUpdate,
     stateUpdate,
+    determinationInsert,
     eventInsert,
     'COMMIT;',
   ].join('\n');
