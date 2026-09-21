@@ -15,6 +15,7 @@ export function emptyState() {
     version: 1,
     posted: {},
     skipped: {},
+    deferred: {},
     spend: 0,
     inflight: null,
   };
@@ -59,6 +60,31 @@ export function normalizeState(value) {
     }
   }
 
+  const deferred = value.deferred ?? {};
+  if (!deferred || typeof deferred !== 'object' || Array.isArray(deferred)) {
+    throw new Error('state.json deferred must be an object');
+  }
+
+  for (const [postId, record] of Object.entries(deferred)) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      throw new Error(`state.json deferred.${postId} must be an object`);
+    }
+    for (const key of ['at', 'reason', 'assignmentId', 'resolvedAt']) {
+      if (!record[key] || typeof record[key] !== 'string') {
+        throw new Error(`state.json deferred.${postId}.${key} must be a non-empty string`);
+      }
+    }
+    if (!Number.isSafeInteger(record.assignmentVersion) || record.assignmentVersion < 1) {
+      throw new Error(`state.json deferred.${postId}.assignmentVersion is invalid`);
+    }
+    if (!Number.isSafeInteger(record.policyVersion) || record.policyVersion < 1) {
+      throw new Error(`state.json deferred.${postId}.policyVersion is invalid`);
+    }
+    if (posted[postId] || skipped[postId]) {
+      throw new Error(`state.json ${postId} cannot be deferred and posted/skipped`);
+    }
+  }
+
   const spend = value.spend ?? 0;
   if (!Number.isFinite(spend) || spend < 0) {
     throw new Error('state.json spend must be a non-negative finite number');
@@ -75,8 +101,8 @@ export function normalizeState(value) {
     if (!['prepared', 'publishing', 'needs_reconciliation'].includes(inflight.status)) {
       throw new Error(`state.json inflight.status is invalid: ${inflight.status}`);
     }
-    if (posted[inflight.postId] || skipped[inflight.postId]) {
-      throw new Error(`state.json inflight ${inflight.postId} cannot also be posted or skipped`);
+    if (posted[inflight.postId] || skipped[inflight.postId] || deferred[inflight.postId]) {
+      throw new Error(`state.json inflight ${inflight.postId} cannot also be posted, skipped, or deferred`);
     }
   }
 
@@ -85,6 +111,7 @@ export function normalizeState(value) {
     version: 1,
     posted,
     skipped,
+    deferred,
     spend,
     inflight,
   };
