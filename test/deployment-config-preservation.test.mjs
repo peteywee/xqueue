@@ -17,47 +17,89 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('default Workers Builds config is production identity only and preserves scheduler authority', () => {
+test('legacy Workers Builds descriptor remains frozen until #46 activation', () => {
   const config = readJsonc('wrangler.jsonc');
 
   assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.main, 'cloudflare/src/worker.mjs');
+  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
+  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
+});
+
+test('target status deployment is production identity, status-only entrypoint, and scheduler-free', () => {
+  const config = readJsonc('wrangler.status.jsonc');
+
+  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.main, 'cloudflare/src/status-worker.mjs');
   assert.equal(declaresSchedulerMutation(config), false);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
-test('authority deployment is production-only and pins one 15-minute cron', () => {
+test('inert publisher deployment is a separate Worker with no scheduler', () => {
+  const config = readJsonc('wrangler.publisher.jsonc');
+
+  assert.equal(config.name, 'xqueue-publisher-production');
+  assert.equal(config.main, 'cloudflare/src/publisher-worker.mjs');
+  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
+  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
+  assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
+});
+
+test('authority deployment targets only publisher Worker and pins one 15-minute cron', () => {
   const config = readJsonc('wrangler.authority.jsonc');
 
-  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.name, 'xqueue-publisher-production');
+  assert.equal(config.main, 'cloudflare/src/publisher-worker.mjs');
   assert.deepEqual(config.triggers?.crons, ['*/15 * * * *']);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
-test('explicit preview config is the only tracked preview D1 surface', () => {
+test('status and publisher roles share storage but not deployment identity or entrypoint', () => {
+  const status = readJsonc('wrangler.status.jsonc');
+  const publisher = readJsonc('wrangler.publisher.jsonc');
+  const authority = readJsonc('wrangler.authority.jsonc');
+
+  assert.notEqual(status.name, publisher.name);
+  assert.notEqual(status.main, publisher.main);
+  assert.equal(publisher.name, authority.name);
+  assert.equal(publisher.main, authority.main);
+  assert.equal(
+    status.d1_databases?.[0]?.database_id,
+    publisher.d1_databases?.[0]?.database_id,
+  );
+  assert.equal(
+    status.r2_buckets?.[0]?.bucket_name,
+    publisher.r2_buckets?.[0]?.bucket_name,
+  );
+});
+
+test('explicit preview config remains isolated from all production topology configs', () => {
   const preview = readJsonc('wrangler.preview.jsonc');
+  const production = [
+    readJsonc('wrangler.jsonc'),
+    readJsonc('wrangler.status.jsonc'),
+    readJsonc('wrangler.publisher.jsonc'),
+    readJsonc('wrangler.authority.jsonc'),
+  ];
 
   assert.equal(preview.name, 'xqueue-preview');
   assert.equal(declaresSchedulerMutation(preview), false);
   assert.equal(preview.d1_databases?.[0]?.database_id, PREVIEW_DB_ID);
   assert.equal(preview.d1_databases?.[0]?.database_name, 'xqueue-preview');
-  assert.equal(preview.d1_databases?.[0]?.preview_database_id, undefined);
+
+  for (const config of production) {
+    assert.equal(JSON.stringify(config).includes(PREVIEW_DB_ID), false);
+  }
+  assert.equal(JSON.stringify(preview).includes(PRODUCTION_DB_ID), false);
 });
 
-test('ordinary and authority production configs identify the same production Worker/storage', () => {
-  const normal = readJsonc('wrangler.jsonc');
-  const authority = readJsonc('wrangler.authority.jsonc');
-
-  assert.equal(normal.name, authority.name);
-  assert.equal(normal.main, authority.main);
-  assert.equal(normal.d1_databases?.[0]?.database_id, authority.d1_databases?.[0]?.database_id);
-  assert.equal(normal.r2_buckets?.[0]?.bucket_name, authority.r2_buckets?.[0]?.bucket_name);
-});
-
-test('empty cron declarations are treated as destructive authority mutations', () => {
+test('empty cron declarations remain destructive authority mutations', () => {
   const omitted = { name: 'xqueue-production' };
   const destructiveEmpty = {
     name: 'xqueue-production',
@@ -66,14 +108,4 @@ test('empty cron declarations are treated as destructive authority mutations', (
 
   assert.equal(declaresSchedulerMutation(omitted), false);
   assert.equal(declaresSchedulerMutation(destructiveEmpty), true);
-});
-
-test('cross-environment D1 identities cannot be reintroduced into production configs', () => {
-  const normal = JSON.stringify(readJsonc('wrangler.jsonc'));
-  const authority = JSON.stringify(readJsonc('wrangler.authority.jsonc'));
-  const preview = JSON.stringify(readJsonc('wrangler.preview.jsonc'));
-
-  assert.equal(normal.includes(PREVIEW_DB_ID), false);
-  assert.equal(authority.includes(PREVIEW_DB_ID), false);
-  assert.equal(preview.includes(PRODUCTION_DB_ID), false);
 });
