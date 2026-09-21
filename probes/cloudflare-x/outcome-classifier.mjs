@@ -37,6 +37,20 @@ export function classifyPublicationOutcome(input = {}) {
   const status = statusFrom(input);
   const postId = postIdFrom(input);
   const errorCode = typeof input?.error?.code === 'string' ? input.error.code : null;
+  const operation =
+    typeof input?.error?.operation === 'string'
+      ? input.error.operation
+      : (typeof input?.operation === 'string' ? input.operation : null);
+
+  if (phase === 'pre_dispatch' && operation === 'media_upload') {
+    return result(CONFIRMED_NOT_POSTED, 'confirmed_media_handoff', {
+      retryableLater: status === 429,
+      deferRecommended: true,
+      deferReason: status === 429
+        ? 'confirmed_rate_limit_handoff'
+        : 'confirmed_media_handoff',
+    });
+  }
 
   if ((phase === 'pre_dispatch' || phase === 'not_dispatched') && status !== null) {
     return result(NEEDS_RECONCILIATION, 'contradictory_dispatch_evidence');
@@ -56,6 +70,12 @@ export function classifyPublicationOutcome(input = {}) {
   if (status !== null && [400, 401, 403, 404, 409, 413, 422, 429].includes(status)) {
     return result(CONFIRMED_NOT_POSTED, `explicit_http_refusal_${status}`, {
       retryableLater: status === 429,
+      ...(status === 429
+        ? {
+            deferRecommended: true,
+            deferReason: 'confirmed_rate_limit_handoff',
+          }
+        : {}),
     });
   }
 
