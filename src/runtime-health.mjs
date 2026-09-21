@@ -4,7 +4,7 @@ export function isResolved(state, postId) {
   return Boolean(
     state?.posted?.[postId] ||
     state?.skipped?.[postId] ||
-    state?.deferred?.[postId]
+    Object.hasOwn(state?.deferred ?? {}, postId)
   );
 }
 
