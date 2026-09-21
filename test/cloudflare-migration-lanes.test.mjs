@@ -21,6 +21,7 @@ const SHARED = [
   '0009_deferred_lifecycle.sql',
   '0010_publication_fence_identity.sql',
   '0011_global_publication_halt.sql',
+  '0012_reconciliation_determinations.sql',
 ];
 
 test('default production config uses the production-safe migration lane', () => {
