@@ -89,6 +89,7 @@ const legacy = readJsonc('wrangler.jsonc');
 const status = readJsonc('wrangler.status.jsonc');
 const publisher = readJsonc('wrangler.publisher.jsonc');
 const authority = readJsonc('wrangler.authority.jsonc');
+const prep = readJsonc('wrangler.prep.jsonc');
 
 const statusGraph = collectGraph(STATUS_ENTRY);
 const publisherGraph = collectGraph(PUBLISHER_ENTRY);
@@ -127,7 +128,16 @@ gate(
   authority.name + ':' + authority.main + ':' + JSON.stringify(authority.triggers?.crons ?? []),
 );
 
-const productionConfigs = [legacy, status, publisher, authority];
+gate(
+  'prep config keeps combined Worker scheduled but publication-disabled',
+  prep.name === 'xqueue-production' &&
+    prep.main === 'cloudflare/src/worker.mjs' &&
+    JSON.stringify(prep.triggers?.crons) === JSON.stringify(['*/15 * * * *']) &&
+    prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+  prep.name + ':' + prep.main + ':' + String(prep.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing'),
+);
+
+const productionConfigs = [legacy, status, publisher, authority, prep];
 gate(
   'all production topology configs bind the same canonical D1',
   productionConfigs.every(
@@ -143,7 +153,8 @@ gate(
   'status and publisher share the same R2 media truth',
   status.r2_buckets?.[0]?.bucket_name === 'xqueue-media' &&
     publisher.r2_buckets?.[0]?.bucket_name === status.r2_buckets?.[0]?.bucket_name &&
-    authority.r2_buckets?.[0]?.bucket_name === status.r2_buckets?.[0]?.bucket_name,
+    authority.r2_buckets?.[0]?.bucket_name === status.r2_buckets?.[0]?.bucket_name &&
+    prep.r2_buckets?.[0]?.bucket_name === status.r2_buckets?.[0]?.bucket_name,
   status.r2_buckets?.[0]?.bucket_name ?? 'missing',
 );
 
@@ -207,11 +218,15 @@ gate(
 );
 
 const configText = productionConfigs.map((value) => JSON.stringify(value)).join('\n');
+const nonPrepConfigText = [legacy, status, publisher, authority]
+  .map((value) => JSON.stringify(value))
+  .join('\n');
 gate(
-  'Wrangler configs contain no X credentials or authority secret value',
+  'Wrangler configs contain no X credentials; prep carries only disabled authority sentinel',
   !credentialRe.test(configText) &&
-    !/XQUEUE_PUBLISH_AUTHORITY/.test(configText),
-  'secrets remain external bindings',
+    !/XQUEUE_PUBLISH_AUTHORITY/.test(nonPrepConfigText) &&
+    prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+  'secrets remain external bindings; prep authority is disabled',
 );
 
 if (failures.length > 0) {
