@@ -107,6 +107,29 @@ export function planOwnerReconciliation({
     throw new Error('runtime snapshot does not contain the exact ambiguous attempt');
   }
 
+  const snapshotFence = inflight.publicationFence;
+  if (!snapshotFence || typeof snapshotFence !== 'object') {
+    throw new Error('runtime snapshot is missing publication fence evidence');
+  }
+
+  const exactFenceMatch =
+    snapshotFence.attemptId === publicationFence.attempt_id &&
+    Number(snapshotFence.stateGeneration) === Number(publicationFence.state_generation) &&
+    snapshotFence.leaseName === publicationFence.lease_name &&
+    Number(snapshotFence.leaseGeneration) === Number(publicationFence.lease_generation) &&
+    snapshotFence.leaseOwnerToken === publicationFence.lease_owner_token &&
+    snapshotFence.leaseAcquisitionId === publicationFence.lease_acquisition_id &&
+    Number(snapshotFence.leaseAcquiredAtMs) === Number(publicationFence.lease_acquired_at_ms) &&
+    Number(snapshotFence.leaseExpiresAtMs) === Number(publicationFence.lease_expires_at_ms) &&
+    snapshotFence.assignmentId === publicationFence.assignment_id &&
+    Number(snapshotFence.assignmentVersion) === Number(publicationFence.assignment_version) &&
+    Number(snapshotFence.policyVersion) === Number(publicationFence.policy_version) &&
+    snapshotFence.contentDigest === publicationFence.content_digest;
+
+  if (!exactFenceMatch) {
+    throw new Error('runtime snapshot publication fence does not match immutable D1 evidence');
+  }
+
   const material = {
     postId,
     attemptId,
