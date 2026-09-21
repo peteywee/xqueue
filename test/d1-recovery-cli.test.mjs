@@ -32,9 +32,13 @@ test('restore proof uses isolated in-memory SQLite and never calls Wrangler', ()
   assert.doesNotMatch(source, /wrangler|xqueue-production|xqueue-preview/);
 });
 
-test('recovery workflow deletes raw backup before uploading evidence', () => {
+test('recovery workflow runs read-only after dynamic schema proof and deletes raw backup', () => {
   const source = text('.github/workflows/preview-recovery-proof.yml');
 
+  assert.match(source, /workflow_run:/);
+  assert.match(source, /Preview Dynamic Runtime Proof/);
+  assert.match(source, /xqueue-preview-recovery-readonly/);
+  assert.doesNotMatch(source, /preview:intake:migrate/);
   assert.match(source, /Remove raw backup before artifact upload/);
   assert.match(source, /rm -f \/tmp\/xqueue-preview-recovery-backup\.json/);
   assert.doesNotMatch(
