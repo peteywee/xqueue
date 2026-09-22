@@ -312,8 +312,11 @@ export function renderPrecutoverStaleNormalizationSql(plan) {
   if (plan.items.length === 0) return '';
 
   const allExact = plan.items.map(snapshotExactExists).join(' AND ');
+  // Remote D1 file execution owns the atomic execution boundary. D1 rejects
+  // explicit SQL transaction-control statements such as BEGIN/COMMIT on this
+  // path, so keep this payload transaction-control-free and submit it as one
+  // wrangler d1 execute --file operation.
   return [
-    'BEGIN IMMEDIATE;',
     'UPDATE runtime_metadata SET ',
     'value=' + sqlText(plan.nextLedgerRaw) + ',',
     'updated_at=' + sqlText(plan.observedAt) + ' ',
@@ -321,7 +324,6 @@ export function renderPrecutoverStaleNormalizationSql(plan) {
     'AND value=' + sqlText(plan.sourceLedgerRaw) + ' ',
     'AND ' + allExact + ';',
     ...plan.items.map(itemSql),
-    'COMMIT;',
   ].join('\n');
 }
 
