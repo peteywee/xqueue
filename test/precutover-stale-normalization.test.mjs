@@ -82,7 +82,9 @@ test('pre-cutover plan defers only assignments strictly past grace with exact D1
   assert.equal(plan.nextLedger.deferred.P2, undefined);
 
   const sql = renderPrecutoverStaleNormalizationSql(plan);
-  assert.match(sql, /BEGIN IMMEDIATE/);
+  assert.doesNotMatch(sql, /\\bBEGIN(?:\\s+IMMEDIATE|\\s+TRANSACTION)?\\b/i);
+  assert.doesNotMatch(sql, /\\bCOMMIT\\b/i);
+  assert.doesNotMatch(sql, /\\bSAVEPOINT\\b/i);
   assert.match(sql, /state\.snapshot_json/);
   assert.match(sql, /lifecycle_state='deferred'/);
   assert.match(sql, /pending_replacement/);
