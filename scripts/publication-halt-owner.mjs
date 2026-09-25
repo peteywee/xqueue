@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 
 import {
   renderOwnerClearPublicationHaltSql,
+  renderOwnerSetPublicationHaltSql,
   renderPublicationHaltStatusSql,
 } from '../src/publication-halt-owner.mjs';
 
@@ -54,8 +55,8 @@ export function parseArgs(argv) {
     }
   }
 
-  if (!['status', 'clear'].includes(options.action)) {
-    throw new Error('action must be status or clear');
+  if (!['status', 'set', 'clear'].includes(options.action)) {
+    throw new Error('action must be status, set, or clear');
   }
   if (!Object.hasOwn(TARGETS, options.environment)) {
     throw new Error('environment must be preview or production');
@@ -69,7 +70,7 @@ export function validateOwnerAction(options) {
   if (options.action === 'status') return options;
 
   if (!options.apply) {
-    throw new Error('owner clear is dry-run by default; pass --apply to mutate');
+    throw new Error('owner halt mutation is dry-run by default; pass --apply to mutate');
   }
   if (!Number.isSafeInteger(options.expectedGeneration) || options.expectedGeneration < 1) {
     throw new Error('--expected-generation is required for owner clear');
@@ -77,13 +78,17 @@ export function validateOwnerAction(options) {
   if (typeof options.reason !== 'string' || options.reason.trim().length === 0) {
     throw new Error('--reason is required for owner clear');
   }
-  if (
-    options.environment === 'production' &&
-    options.confirm !== 'xqueue-production-owner-clear'
-  ) {
-    throw new Error(
-      'production owner clear requires --confirm xqueue-production-owner-clear',
-    );
+  if (options.environment === 'production') {
+    const expectedConfirm =
+      options.action === 'set'
+        ? 'xqueue-production-owner-set'
+        : 'xqueue-production-owner-clear';
+    if (options.confirm !== expectedConfirm) {
+      throw new Error(
+        'production owner ' + options.action +
+        ' requires --confirm ' + expectedConfirm,
+      );
+    }
   }
 
   return options;
@@ -124,38 +129,53 @@ function runWrangler(args) {
   return result.stdout ?? '';
 }
 
-export function parseOwnerClearResult(stdout) {
+function parseOwnerTransitionResult(stdout, { label, halted }) {
   let parsed;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    throw new Error('owner clear D1 output is not valid JSON');
+    throw new Error(label + ' D1 output is not valid JSON');
   }
 
   if (!Array.isArray(parsed) || parsed.length < 3) {
-    throw new Error('owner clear D1 output is incomplete');
+    throw new Error(label + ' D1 output is incomplete');
   }
 
-  const changes = parsed
-    .flatMap((statement) => Array.isArray(statement?.results) ? statement.results : [])
-    .find((row) => Object.hasOwn(row ?? {}, 'direct_changes'));
-
-  const state = parsed
-    .flatMap((statement) => Array.isArray(statement?.results) ? statement.results : [])
-    .find((row) => Object.hasOwn(row ?? {}, 'halted') && Object.hasOwn(row ?? {}, 'generation'));
+  const rows = parsed.flatMap((statement) =>
+    Array.isArray(statement?.results) ? statement.results : [],
+  );
+  const changes = rows.find((row) => Object.hasOwn(row ?? {}, 'direct_changes'));
+  const state = rows.find((row) =>
+    Object.hasOwn(row ?? {}, 'halted') &&
+    Object.hasOwn(row ?? {}, 'generation'),
+  );
 
   if (Number(changes?.direct_changes) !== 1) {
-    throw new Error('owner clear compare-and-set did not change exactly one row');
+    throw new Error(label + ' compare-and-set did not change exactly one row');
   }
   if (
     !state ||
-    Number(state.halted) !== 0 ||
+    Number(state.halted) !== halted ||
     state.actor_class !== 'owner'
   ) {
-    throw new Error('owner clear readback is not exact');
+    throw new Error(label + ' readback is not exact');
   }
 
   return state;
+}
+
+export function parseOwnerSetResult(stdout) {
+  return parseOwnerTransitionResult(stdout, {
+    label: 'owner set',
+    halted: 1,
+  });
+}
+
+export function parseOwnerClearResult(stdout) {
+  return parseOwnerTransitionResult(stdout, {
+    label: 'owner clear',
+    halted: 0,
+  });
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -172,7 +192,16 @@ export async function main(argv = process.argv.slice(2)) {
 
   validateOwnerAction(options);
 
-  const sql = renderOwnerClearPublicationHaltSql({
+  const render =
+    options.action === 'set'
+      ? renderOwnerSetPublicationHaltSql
+      : renderOwnerClearPublicationHaltSql;
+  const parseResult =
+    options.action === 'set'
+      ? parseOwnerSetResult
+      : parseOwnerClearResult;
+
+  const sql = render({
     expectedGeneration: options.expectedGeneration,
     reason: options.reason,
     at: new Date().toISOString(),
@@ -182,7 +211,7 @@ export async function main(argv = process.argv.slice(2)) {
     environment: options.environment,
     sql,
   }));
-  parseOwnerClearResult(stdout);
+  parseResult(stdout);
   process.stdout.write(stdout);
 }
 
