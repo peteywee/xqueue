@@ -188,7 +188,7 @@ test('systemd service pins a checked runtime and keeps live publication explicit
   assert.match(unit, /EnvironmentFile=%h\/\.config\/xqueue\/runtime\.env/);
   assert.match(unit, /ExecStartPre=.*check-runtime\.sh/);
   assert.match(unit, /\$\$XQUEUE_COREPACK/);
-  assert.match(unit, /post:live/);
+  assert.match(unit, /post:dry/);\n  assert.doesNotMatch(unit, /post:live/);
   assert.doesNotMatch(unit, /bash\s+-lc/);
 });
 
