@@ -2,7 +2,7 @@
 {
   "doc_id": "XQ-CQ-0000",
   "class": "contract-package",
-  "claims_truth_state": "proposed",
+  "claims_truth_state": "declared",
   "written_against": { "head_sha": "8fefc81bddcdcf7e444d26e332dccca232c1939a" },
   "depends_on": [
     "config/schedule-policy.json",
@@ -19,7 +19,7 @@
 
 # Continuous Queue Contract Package
 
-Status: proposed — saved to prevent scope drift; not active until owner review/approval.
+Status: declared — owner-approved normative contract package; implementation verification remains evidence-driven.
 Written against main: 8fefc81bddcdcf7e444d26e332dccca232c1939a
 Owner: Patrick Craven
 Created: 2026-09-19
@@ -52,7 +52,7 @@ All upstream paths converge on the same finished-post ingestion boundary. Source
 
 ## Scope guard
 
-This package does not activate the older v0.2.0 contract set and does not perform the #46 authority cutover.
+This package does not activate the older v0.2.0 contract set. The #46 production cutover is a separate evidence-gated implementation/operations event and has now executed; these contracts remain normative independently of that activation.
 
 It also does not require XQueue Author to be the only way content enters the queue. XQueue Author remains an optional upstream helper.
 
@@ -66,9 +66,9 @@ The following are explicitly outside this package unless referenced by interface
 - automatically reflowing existing assignments;
 - automatically publishing merely because content was ingested.
 
-## Current implementation mismatch recorded, not normalized
+## Historical implementation mismatch recorded, not normalized
 
-At the written-against head, production scheduling is still built around a finite 180-post corpus and the Worker integrity gate pins an expected count/hash. The implementation must eventually change to satisfy this package; these contracts must not be rewritten merely to preserve the finite-campaign implementation.
+At the written-against head, production scheduling was still built around a finite 180-post corpus and the Worker integrity gate pinned an expected count/hash. That mismatch drove the continuous-queue implementation and #46 cutover. The historical note is retained as rationale; current production runtime authority is documented in README.md and docs/RUNBOOK.md.
 
 ## Owner decisions intentionally left open
 
