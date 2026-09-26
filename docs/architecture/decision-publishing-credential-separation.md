@@ -41,8 +41,8 @@ The publisher Worker has no normal HTTP publication route.
 ## Configuration surfaces
 
 - `wrangler.status.jsonc`: target status-only production deployment; explicit `triggers.crons: []` removes any previously deployed cron during #46 cutover.
-- `wrangler.publisher.jsonc`: inert publisher deployment; no triggers.
-- `wrangler.authority.jsonc`: publisher authority activation surface; exactly one 15-minute cron.
+- `wrangler.publisher.jsonc`: inert publisher deployment; no triggers and explicit `XQUEUE_PUBLISH_AUTHORITY=disabled`.
+- `wrangler.authority.jsonc`: publisher authority activation surface; production-safe migration lane, explicit `XQUEUE_PUBLISH_AUTHORITY=enabled`, and exactly one 15-minute cron.
 - `wrangler.jsonc`: legacy compatibility descriptor retained unchanged until #46 so merging #45 does not change the currently deployed production entrypoint.
 - `wrangler.preview.jsonc`: existing non-authoritative preview surface.
 
