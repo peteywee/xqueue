@@ -63,6 +63,7 @@
     "shadow:queue": "node scripts/build-continuous-queue-shadow.mjs",
     "preview:shadow-proof": "node scripts/preview-continuous-queue-shadow-proof.mjs",
     "halt:status": "node scripts/publication-halt-owner.mjs --action status",
+    "halt:set": "node scripts/publication-halt-owner.mjs --action set",
     "halt:clear": "node scripts/publication-halt-owner.mjs --action clear",
     "audit:credentials": "node scripts/credential-boundary-audit.mjs",
     "d1:reconcile": "node scripts/d1-reconcile.mjs",

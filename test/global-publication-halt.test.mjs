@@ -10,11 +10,13 @@ import {
 } from '../cloudflare/src/publication-halt.mjs';
 import {
   renderOwnerClearPublicationHaltSql,
+  renderOwnerSetPublicationHaltSql,
 } from '../src/publication-halt-owner.mjs';
 import {
   buildWranglerArgs,
   parseArgs,
   parseOwnerClearResult,
+  parseOwnerSetResult,
   validateOwnerAction,
 } from '../scripts/publication-halt-owner.mjs';
 
@@ -196,6 +198,49 @@ test('stale automation generation is rejected without state or event mutation', 
   assert.deepEqual(events(sqlite), beforeEvents);
 });
 
+test('owner CAS set succeeds once, is generation-fenced, and is audited', () => {
+  const { sqlite } = fixture();
+
+  sqlite.exec(renderOwnerSetPublicationHaltSql({
+    expectedGeneration: 1,
+    reason: 'owner controlled cutover halt',
+    at: '2026-09-25T20:10:00.000Z',
+  }));
+
+  const halted = row(sqlite);
+  assert.equal(halted.halted, 1);
+  assert.equal(halted.generation, 2);
+  assert.equal(halted.actor_class, 'owner');
+  assert.equal(halted.reason, 'owner controlled cutover halt');
+
+  const audit = events(sqlite);
+  assert.equal(audit.length, 2);
+  assert.deepEqual(
+    {
+      generation: audit[1].generation,
+      action: audit[1].action,
+      actor_class: audit[1].actor_class,
+      reason: audit[1].reason,
+    },
+    {
+      generation: 2,
+      action: 'set',
+      actor_class: 'owner',
+      reason: 'owner controlled cutover halt',
+    },
+  );
+
+  const before = row(sqlite);
+  const beforeEvents = events(sqlite);
+  sqlite.exec(renderOwnerSetPublicationHaltSql({
+    expectedGeneration: 1,
+    reason: 'stale replay',
+    at: '2026-09-25T20:11:00.000Z',
+  }));
+  assert.deepEqual(row(sqlite), before);
+  assert.deepEqual(events(sqlite), beforeEvents);
+});
+
 test('database rejects automation clear while owner CAS clear succeeds and is audited', async () => {
   const { sqlite, db } = fixture();
 
@@ -286,7 +331,7 @@ test('missing or unreadable halt state fails closed', async () => {
   assert.equal(publicationHaltVerdict(unavailable).ok, false);
 });
 
-test('owner control defaults to preview status and production clear requires explicit owner confirmation', () => {
+test('owner control defaults to preview status and production mutations require explicit owner confirmation', () => {
   assert.deepEqual(parseArgs([]), {
     action: 'status',
     environment: 'preview',
@@ -316,6 +361,26 @@ test('owner control defaults to preview status and production clear requires exp
     ])),
     /production owner clear requires/,
   );
+
+  assert.throws(
+    () => validateOwnerAction(parseArgs([
+      '--action', 'set',
+      '--environment', 'production',
+      '--expected-generation', '1',
+      '--reason', 'cutover halt',
+      '--apply',
+    ])),
+    /production owner set requires/,
+  );
+
+  assert.doesNotThrow(() => validateOwnerAction(parseArgs([
+    '--action', 'set',
+    '--environment', 'production',
+    '--expected-generation', '1',
+    '--reason', 'cutover halt',
+    '--apply',
+    '--confirm', 'xqueue-production-owner-set',
+  ])));
 
   assert.doesNotThrow(() => validateOwnerAction(parseArgs([
     '--action', 'clear',
@@ -350,6 +415,70 @@ test('owner control defaults to preview status and production clear requires exp
     /did not change exactly one row/,
   );
 
+  assert.throws(
+    () => parseOwnerSetResult(JSON.stringify([
+      { success: false, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 2,
+        reason: 'cutover halt',
+        actor_class: 'owner',
+        updated_at: '2026-09-25T20:10:00.000Z',
+      }] },
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
+    /did not report success/,
+  );
+
+  assert.throws(
+    () => parseOwnerSetResult(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 9,
+        reason: 'wrong',
+        actor_class: 'owner',
+        updated_at: '2026-09-25T20:10:00.000Z',
+      }] },
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
+    /readback is not exact/,
+  );
+
+  assert.deepEqual(
+    parseOwnerSetResult(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 2,
+        reason: 'cutover halt',
+        actor_class: 'owner',
+        updated_at: '2026-09-25T20:10:00.000Z',
+      }] },
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
+    {
+      singleton_id: 1,
+      halted: 1,
+      generation: 2,
+      reason: 'cutover halt',
+      actor_class: 'owner',
+      updated_at: '2026-09-25T20:10:00.000Z',
+    },
+  );
+
   assert.deepEqual(
     parseOwnerClearResult(JSON.stringify([
       { success: true, results: [] },
@@ -362,7 +491,10 @@ test('owner control defaults to preview status and production clear requires exp
         actor_class: 'owner',
         updated_at: '2026-09-21T16:02:00.000Z',
       }] },
-    ])),
+    ]), {
+      expectedGeneration: 2,
+      reason: 'reviewed',
+    }),
     {
       singleton_id: 1,
       halted: 0,

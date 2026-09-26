@@ -23,6 +23,32 @@ function sqlText(value) {
   return "'" + String(value).replaceAll("'", "''") + "'";
 }
 
+export function renderOwnerSetPublicationHaltSql({
+  expectedGeneration,
+  reason,
+  at = new Date().toISOString(),
+}) {
+  const generation = positiveInteger(expectedGeneration, 'expectedGeneration');
+  const normalizedReason = requiredReason(reason);
+  const timestamp = canonicalIso(at);
+
+  return [
+    'UPDATE publication_halt_state',
+    'SET halted = 1,',
+    '    generation = generation + 1,',
+    '    reason = ' + sqlText(normalizedReason) + ',',
+    "    actor_class = 'owner',",
+    '    updated_at = ' + sqlText(timestamp),
+    'WHERE singleton_id = 1',
+    '  AND halted = 0',
+    '  AND generation = ' + generation + ';',
+    'SELECT changes() AS direct_changes;',
+    'SELECT singleton_id, halted, generation, reason, actor_class, updated_at',
+    'FROM publication_halt_state',
+    'WHERE singleton_id = 1;',
+  ].join('\n');
+}
+
 export function renderOwnerClearPublicationHaltSql({
   expectedGeneration,
   reason,
