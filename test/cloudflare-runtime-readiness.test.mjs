@@ -93,34 +93,78 @@ test('mirrored ledger read is exact JSON evidence and never mutates D1', async (
   assert.deepEqual(result.ledger, ledger);
 });
 
-test('authority readiness stays unauthorized and fails closed across the media-evidence transition', async () => {
+test('authority readiness is D1-runtime based and authority flag remains a separate gate', async () => {
   const result = await evaluateAuthorityReadiness(
     {
       DB: readinessDb(),
       MEDIA: {},
     },
-    { now: new Date('2026-09-02T12:00:00.000Z') },
+    {
+      now: new Date('2026-09-02T12:00:00.000Z'),
+      dependencies: {
+        async verifyDynamicRuntime() {
+          return {
+            ok: true,
+            reason: null,
+            generation: 9,
+            revisionDigest: 'a'.repeat(64),
+            media: {
+              ok: true,
+              requiredCount: 4,
+              verifiedCount: 4,
+              readOnly: true,
+              reason: null,
+              objects: [],
+            },
+            snapshot: {},
+          };
+        },
+        publicationQueueFromSnapshot() {
+          return decodeBundledQueue();
+        },
+      },
+    },
   );
 
   assert.equal(result.authorized, false);
   assert.equal(result.readOnly, true);
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'authority_readiness_incomplete');
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, 'authority_not_enabled');
+  assert.equal(result.gates.dynamicRuntime, true);
   assert.equal(result.gates.mirroredLedger, true);
   assert.equal(result.gates.eligibility, true);
   assert.equal(result.gates.leaseSchema, true);
-  assert.equal(result.gates.media, false);
+  assert.equal(result.gates.media, true);
+  assert.equal(result.dynamicRuntime.generation, 9);
+});
 
-  // Before the real manifest is pinned, the media gate must refuse because there is no evidence.
-  // After it is pinned, this deliberately empty/non-R2 test binding must still fail closed rather
-  // than converting configuration into authority. The same regression test therefore protects
-  // both sides of the milestone transition.
-  assert.equal(
-    result.media.reason,
-    MEDIA_MANIFEST_CONFIGURED
-      ? 'r2_unreachable'
-      : 'media_manifest_not_configured',
+test('authority readiness fails closed when canonical D1 runtime is unavailable', async () => {
+  const result = await evaluateAuthorityReadiness(
+    {
+      DB: readinessDb(),
+      MEDIA: {},
+      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
+    },
+    {
+      now: new Date('2026-09-02T12:00:00.000Z'),
+      dependencies: {
+        async verifyDynamicRuntime() {
+          return {
+            ok: false,
+            reason: 'dynamic_snapshot_unavailable',
+            snapshot: null,
+            media: null,
+          };
+        },
+      },
+    },
   );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.authorized, false);
+  assert.equal(result.reason, 'authority_readiness_incomplete');
+  assert.equal(result.gates.dynamicRuntime, false);
+  assert.equal(result.gates.media, false);
 });
 
 test('Worker health exposes readiness without converting it into authority', async () => {
@@ -134,12 +178,15 @@ test('Worker health exposes readiness without converting it into authority', asy
   };
 
   const response = await worker.fetch(new Request('https://x/health'), env);
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 503);
 
   const body = await response.json();
-  assert.equal(body.status, 'ok');
+  assert.equal(body.status, 'error');
   assert.equal(body.queueIntegrity.ok, true);
-  assert.equal(body.dynamicRuntimeReadiness.authoritative, false);
+  assert.equal(body.queueIntegrity.authoritative, false);
+  assert.equal(body.queueIntegrity.purpose, 'static-rollback-compatibility');
+  assert.equal(body.dynamicRuntimeReadiness.authoritative, true);
+  assert.equal(body.dynamicRuntimeReadiness.source, 'production-d1-r2');
   assert.equal(body.dynamicRuntimeReadiness.ok, false);
   assert.equal(body.dynamicRuntimeReadiness.reason, 'dynamic_schema_unavailable');
   assert.equal(body.authorityReadiness.authorized, false);
