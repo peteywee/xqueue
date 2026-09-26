@@ -1,9 +1,9 @@
 // dynamic-runtime-integrity.mjs — read-only verification of the durable
 // continuous-queue content, assignment, revision, and media model.
 //
-// This module is intentionally NON-AUTHORITATIVE until #46. It can prove that
-// D1 + R2 contain a coherent runtime queue without changing which publication
-// path production uses.
+// This module validates the durable D1 + R2 runtime queue. Production
+// publication consumes the verified snapshot after the #46 authority cutover;
+// preview/status callers may still use the same functions read-only.
 //
 // Worker-compatible: no node: imports. D1 access is SELECT-only and R2 access
 // is delegated to the existing read-only media verifier.
@@ -752,11 +752,87 @@ export async function dynamicMediaManifest(mediaRows) {
   };
 }
 
+export function publicationQueueFromSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.assignments)) {
+    throw new Error('verified dynamic runtime snapshot is required');
+  }
+
+  return Object.freeze(snapshot.assignments.map((row, index) => {
+    const label = `publication assignment ${index + 1}`;
+    const contentId = requiredString(row.content_id, `${label} content_id`);
+    const pillar = requiredString(row.pillar, `${label} pillar`);
+    if (!['A', 'B', 'C', 'D'].includes(pillar)) {
+      throw new Error(`${label} pillar is invalid`);
+    }
+
+    const publicationText = requiredString(
+      row.publication_text,
+      `${label} publication_text`,
+    );
+    const contentDigest = digestString(
+      row.content_digest,
+      `${label} content_digest`,
+    );
+    const revisionDigest = digestString(
+      row.revision_content_digest,
+      `${label} revision_content_digest`,
+    );
+    if (contentDigest !== revisionDigest) {
+      throw new Error(`${label} assignment/content digest mismatch`);
+    }
+
+    const contentRevision = integer(
+      row.content_revision,
+      `${label} content_revision`,
+      { min: 1 },
+    );
+
+    return Object.freeze({
+      id: contentId,
+      pillar,
+      title: requiredString(row.title, `${label} title`),
+      body: requiredString(row.body, `${label} body`),
+      publicationText,
+      figure: row.figure == null
+        ? null
+        : integer(row.figure, `${label} figure`, { min: 1 }),
+      scheduledAt: canonicalInstant(row.resolved_at, `${label} resolved_at`),
+      scheduledDate: requiredString(
+        row.scheduled_date,
+        `${label} scheduled_date`,
+      ),
+      scheduledTime: requiredString(
+        row.scheduled_time,
+        `${label} scheduled_time`,
+      ),
+      timezone: requiredString(row.timezone, `${label} timezone`),
+      slot: row.slot_label ?? null,
+      assignmentId: requiredString(
+        row.assignment_id,
+        `${label} assignment_id`,
+      ),
+      assignmentVersion: integer(
+        row.assignment_version,
+        `${label} assignment_version`,
+        { min: 1 },
+      ),
+      policyVersion: integer(
+        row.policy_version,
+        `${label} policy_version`,
+        { min: 1 },
+      ),
+      contentRevision,
+      contentDigest,
+    });
+  }));
+}
+
 function fail(reason, extra = {}) {
   return Object.freeze({
     ok: false,
     authoritative: false,
     readOnly: true,
+    snapshot: null,
     reason,
     generation: null,
     revisionDigest: null,
@@ -918,6 +994,7 @@ export async function verifyDynamicRuntime(
     ok: true,
     authoritative: false,
     readOnly: true,
+    snapshot,
     reason: null,
     generation: state.generation,
     revisionDigest: state.revisionDigest,
