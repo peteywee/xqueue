@@ -73,6 +73,15 @@ test('production preparation workflow is manual-only and authority-disable prece
   assert.match(source, /authority_disable_propagation_timeout/);
 });
 
+test('production prep runtime snapshot includes already-deferred assignments on rerun', () => {
+  const source = text('scripts/production-precutover-prepare.mjs');
+  assert.match(source, /DEFERRED_ASSIGNMENTS_SQL/);
+  assert.match(
+    source,
+    /buildDynamicRuntimeSnapshot\(\{[\s\S]*deferred:\s*query\(DEFERRED_ASSIGNMENTS_SQL\)/,
+  );
+});
+
 test('production prep runner requires explicit approval and never calls X', () => {
   const source = text('scripts/production-precutover-prepare.mjs');
   assert.match(source, /XQUEUE_PRODUCTION_PREP_APPROVED/);
