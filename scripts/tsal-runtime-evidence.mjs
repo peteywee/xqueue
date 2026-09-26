@@ -19,9 +19,14 @@ export function evaluateRuntimeHealth(health) {
   const authorityFlag = health?.authorityReadiness?.authorityFlag === true;
   const checks = {
     service_identity: health?.service === 'xqueue',
-    status_role: health?.role === 'status-only' && health?.publicationCapable === false,
+    status_role: health?.role === 'status-only' &&
+      health?.publicationCapable === false &&
+      health?.livePublication === false &&
+      health?.schedulerAuthority === false,
     service_status: health?.status === 'ok',
-    dynamic_runtime: health?.dynamicRuntimeReadiness?.ok === true,
+    dynamic_runtime: health?.dynamicRuntimeReadiness?.ok === true &&
+      health?.dynamicRuntimeReadiness?.authoritative === true &&
+      health?.dynamicRuntimeReadiness?.source === 'production-d1-r2',
     authority_readiness: health?.authorityReadiness?.ok === true,
     publisher_authority: health?.publisherAuthority?.ok === true &&
       health?.publisherAuthority?.owner === 'cloudflare' &&
