@@ -223,6 +223,8 @@ export async function observeDeploymentAuthority({
   timeoutMs = 10_000,
 } = {}) {
   const legacyPrecutover = mode === 'legacy-precutover';
+  const effectiveWorkerName = workerName ??
+    (legacyPrecutover ? STATUS_WORKER_NAME : WORKER_NAME);
   if (mode !== 'split' && !legacyPrecutover) {
     return {
       schedules: null,
@@ -240,8 +242,6 @@ export async function observeDeploymentAuthority({
     };
   }
 
-  const effectiveWorkerName = workerName ??
-    (legacyPrecutover ? STATUS_WORKER_NAME : WORKER_NAME);
   if (!accountId || !token) {
     return {
       schedules: null,
@@ -254,6 +254,7 @@ export async function observeDeploymentAuthority({
         account_id_present: Boolean(accountId),
         api_token_present: Boolean(token),
         worker_name: effectiveWorkerName,
+        observation_mode: mode,
       },
     };
   }
@@ -360,6 +361,7 @@ export async function observeDeploymentAuthority({
         account_id_present: true,
         api_token_present: true,
         worker_name: effectiveWorkerName,
+        observation_mode: mode,
       },
     };
   }
