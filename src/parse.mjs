@@ -1,5 +1,6 @@
 // parse.mjs — read the pillar markdown files, emit structured posts.
-// The markdown IS the source of truth. Edit the markdown, rebuild the queue.
+// Markdown is the reviewed authoring/compatibility source. Production runtime
+// publication truth is canonical in D1 after the #46 cutover.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
