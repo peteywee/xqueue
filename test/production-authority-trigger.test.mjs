@@ -79,6 +79,22 @@ test('event append atomically projects bootstrap, transfer, and generic rebind',
   assert.equal(state(db).candidate_sha, candidate2);
   assert.equal(state(db).deployment_id, version2);
   assert.equal(events(db).length, 3);
+
+  db.exec(compileProductionCloudflareRebindSql({
+    candidateSha: candidate1,
+    deploymentId: version1,
+    previousCandidateSha: candidate2,
+    previousDeploymentId: version2,
+    expectedGeneration: 3,
+    transitionId: 'rollback-g4',
+    eventAt: '2026-09-26T00:03:00.000Z',
+  }));
+
+  assert.equal(state(db).owner, 'cloudflare');
+  assert.equal(state(db).generation, 4);
+  assert.equal(state(db).candidate_sha, candidate1);
+  assert.equal(state(db).deployment_id, version1);
+  assert.equal(events(db).length, 4);
 });
 
 test('trigger abort rolls back the event when projection preconditions fail', () => {
