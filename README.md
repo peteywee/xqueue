@@ -44,7 +44,7 @@ Key invariants:
 
 The target production architecture separates status/read-only execution from publishing execution by Worker identity and module graph.
 
-- `wrangler.status.jsonc` targets `xqueue-production` with `cloudflare/src/status-worker.mjs`. It has no scheduled handler, no publisher import, no service binding to the publisher, and must never receive X write credentials.
+- `wrangler.status.jsonc` targets `xqueue-production` with `cloudflare/src/status-worker.mjs`. It explicitly declares `triggers.crons: []` so deployment removes the legacy cron; the Worker has no scheduled handler, no publisher import, no service binding to the publisher, and must never receive X write credentials.
 - `wrangler.publisher.jsonc` targets the separate `xqueue-publisher-production` Worker with `cloudflare/src/publisher-worker.mjs`. It is intentionally inert and declares no cron.
 - `wrangler.authority.jsonc` is the future explicit scheduler-authority surface for `xqueue-publisher-production`. It pins exactly one cron: `*/15 * * * *`.
 - `wrangler.preview.jsonc` remains the non-authoritative preview surface.
