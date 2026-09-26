@@ -122,7 +122,11 @@ The parity workflow is read-only and runs only after the exact upstream recovery
 - [ ] local/systemd routine scheduler is disabled without deleting its rollback configuration.
 - [ ] durable authority ownership is transferred exactly once.
 - [ ] X write credentials exist only on the publisher deployment.
+- [ ] the authority-enabled publisher version is uploaded without changing live traffic or scheduler triggers.
+- [ ] if enabling authority changes the immutable Worker version identity, durable authority is rebound under the global halt from Cloudflare to Cloudflare with an append-only generation and the exact enabled version ID.
+- [ ] the exact rebound publisher version is deployed to 100% before scheduler activation.
 - [ ] publisher authority is enabled only after the old routine publisher is confirmed inactive.
+- [ ] the single publisher Cron Trigger is attached separately after exact-version deployment.
 - [ ] one scheduler invocation source is confirmed.
 - [ ] owner clears global halt only after the preceding gates pass.
 
