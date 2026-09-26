@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { MEDIA_MANIFEST } from '../cloudflare/generated/media-manifest.mjs';
 import {
   buildDynamicRuntimeSnapshot,
+  publicationQueueFromSnapshot,
   readDynamicRuntimeRows,
   verifyDynamicRuntime,
 } from '../cloudflare/src/dynamic-runtime-integrity.mjs';
@@ -209,6 +210,31 @@ test('dynamic runtime accepts canonical 180 and grows to 181 with a new revision
   assert.equal(first.activeAssignmentCount, 180);
   assert.equal(first.mediaRequiredCount, 4);
   assert.equal(first.media.verifiedCount, 4);
+  assert.ok(first.snapshot);
+
+  const publicationQueue = publicationQueueFromSnapshot(first.snapshot);
+  assert.equal(publicationQueue.length, 180);
+  assert.equal(publicationQueue[0].id, first.snapshot.assignments[0].content_id);
+  assert.equal(
+    publicationQueue[0].publicationText,
+    first.snapshot.assignments[0].publication_text,
+  );
+  assert.equal(
+    publicationQueue[0].scheduledAt,
+    first.snapshot.assignments[0].resolved_at,
+  );
+  assert.equal(
+    publicationQueue[0].assignmentVersion,
+    Number(first.snapshot.assignments[0].assignment_version),
+  );
+  assert.equal(
+    publicationQueue[0].policyVersion,
+    Number(first.snapshot.assignments[0].policy_version),
+  );
+  assert.equal(
+    publicationQueue[0].contentDigest,
+    first.snapshot.assignments[0].content_digest,
+  );
 
   const frontier = db.prepare(
     'SELECT * FROM queue_intake_frontier WHERE singleton_id=1;',
@@ -366,6 +392,36 @@ test('dynamic snapshot fails closed on duplicate active content, duplicate slot,
       media: [],
     }),
     /media binding multiplicity/,
+  );
+});
+
+test('publication queue projection refuses malformed authoritative rows', () => {
+  assert.throws(
+    () => publicationQueueFromSnapshot(null),
+    /verified dynamic runtime snapshot is required/,
+  );
+
+  assert.throws(
+    () => publicationQueueFromSnapshot({
+      assignments: [{
+        content_id: 'A1',
+        pillar: 'A',
+        title: 'A1',
+        body: 'body',
+        publication_text: 'body',
+        content_digest: 'a'.repeat(64),
+        revision_content_digest: 'b'.repeat(64),
+        content_revision: 1,
+        resolved_at: '2027-01-08T20:30:00.000Z',
+        scheduled_date: '2027-01-08',
+        scheduled_time: '14:30',
+        timezone: 'America/Chicago',
+        assignment_id: 'A1',
+        assignment_version: 1,
+        policy_version: 1,
+      }],
+    }),
+    /assignment\/content digest mismatch/,
   );
 });
 
