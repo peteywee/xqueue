@@ -761,19 +761,22 @@ const HEALTHY_ROWS = [
   { key: 'queue.count', value: '180' },
 ];
 
-test('/health is 200 and ok only when every check passes', async () => {
+test('/health refuses static-only evidence after D1 runtime becomes canonical', async () => {
   const response = await worker.fetch(new Request('https://x/health'), {
     DB: workerDb(HEALTHY_ROWS),
     MEDIA: { async list() { return { objects: [] }; } },
   });
 
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 503);
 
   const body = await response.json();
-  assert.equal(body.status, 'ok');
+  assert.equal(body.status, 'error');
   assert.equal(body.livePublication, false);
   assert.equal(body.schedulerAuthority, false);
   assert.equal(body.queueIntegrity.ok, true);
+  assert.equal(body.queueIntegrity.authoritative, false);
+  assert.equal(body.dynamicRuntimeReadiness.authoritative, true);
+  assert.equal(body.dynamicRuntimeReadiness.ok, false);
 });
 
 test('/health degrades to 503 error for every broken binding, never claiming authority', async () => {

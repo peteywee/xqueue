@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // cli.mjs — operator surface for building, validating, inspecting, and
-// publishing the X queue. Markdown content is the source of truth; queue.json
-// is a generated local artifact. state.json is the durable publication ledger.
+// publishing the local compatibility queue. Markdown/queue.json/state.json are
+// authoring and compatibility surfaces; production runtime truth is D1/R2.
 
 import {
   existsSync,

@@ -18,8 +18,8 @@
     "cadence_or_condition": "The production authority configuration pins a 15-minute scheduler cadence. Whether that authority is currently deployed and active must be established from runtime or deployment evidence rather than inferred from repository configuration."
   },
   "source_of_truth": {
-    "description": "Authored content and explicit production scheduling policy.",
-    "location": "content/*.md and config/schedule-policy.json",
+    "description": "Canonical production runtime content, assignments, publication state, authority, and revision evidence live in production D1; media bytes live in R2 and are bound by D1 metadata. Repository Markdown/policy are reviewed authoring and compatibility inputs.",
+    "location": "production D1 (queue_content, queue_content_revisions, queue_assignments, publication_state, authority_state/events, runtime revisions) + production R2 media",
     "owner": "Patrick / Top Shelf Service LLC",
     "derived_artifacts_rebuildable": true
   },
@@ -36,10 +36,10 @@
   },
   "authority": {
     "executor": "XQueue production publisher running in the Cloudflare Worker runtime.",
-    "production_authority": "Explicit production scheduler authority configuration must be active before live publication is permitted.",
+    "production_authority": "Exactly one tagged immutable xqueue-publisher-production Worker version must match the stable Cloudflare owner/candidate/deployment recorded in production D1 before live publication is permitted.",
     "concurrency_model": "coordinated_multi",
     "coordination_mechanism": "Publication authority and D1-backed publication lease/fencing prevent concurrent scheduled executions from independently owning the same production publication operation.",
-    "revocation_mechanism": "Disable or remove production scheduler/publication authority configuration so scheduled invocations cannot perform live publication."
+    "revocation_mechanism": "Set the owner-controlled global D1 publication halt. Forward activation or rollback then requires an append-only exact-version Cloudflare authority generation while halted; the local/systemd publisher is not routine production authority."
   },
   "policy": {
     "source": "config/schedule-policy.json and XQueue validation rules",
@@ -57,7 +57,7 @@
     }
   ],
   "state": {
-    "ledger": "Production durable publication ledger; Cloudflare production state is persisted in D1 and the local publisher retains its local durable state model where applicable.",
+    "ledger": "Production D1 is the canonical durable publication ledger. Local state.json is compatibility/evidence only after the #46 canonical cutover.",
     "durable": true,
     "states": [
       "unresolved",
@@ -67,7 +67,7 @@
       "skipped",
       "needs_reconciliation"
     ],
-    "write_safety": "State transitions must be durable and protected against concurrent publication ownership; local state writes are atomic and Cloudflare production execution uses persisted transactional state and publication fencing.",
+    "write_safety": "D1 publication transitions use durable lease/fence/state CAS. Authority changes append one authority event whose singleton projection is performed by a production D1 trigger in the same SQLite statement transaction; projection failure aborts the event.",
     "intent_recorded_before_side_effect": true
   },
   "ambiguity": {
@@ -117,7 +117,7 @@
     "evidence": "Repository tests, docs/evidence artifacts, production runtime logs, Cloudflare invocation telemetry, and provider-side publication identifiers where applicable."
   },
   "recovery": {
-    "procedure": "Follow docs/RUNBOOK.md. Preserve durable state, classify the failure, reconcile ambiguous remote outcomes, disposition stale work explicitly, re-run health/preflight gates, and only then restore production authority.",
+    "procedure": "Follow docs/RUNBOOK.md. Halt first, preserve canonical D1/R2 evidence, reconcile ambiguous outcomes, and choose forward repair or exact tagged Cloudflare version rollback. Never reactivate local/systemd as a second routine publisher and never overwrite newer D1 evidence with an older backup.",
     "fail_closed_conditions": [
       "Ambiguous external outcome",
       "Corrupted or unreadable durable state",
@@ -126,7 +126,7 @@
       "Unable to prove intended account identity",
       "Unable to establish publication concurrency ownership"
     ],
-    "resume_gate": "Production execution resumes only after the blocking condition is resolved and the applicable runtime-health and preflight gates pass."
+    "resume_gate": "Production resumes only when D1 authority and live immutable Worker version/tag match exactly, the canonical runtime is healthy, unresolved/lease/inflight blockers are zero, scheduler topology is singular, and a post-release heartbeat/stable-state proof succeeds."
   },
   "owner_reserved_actions": [
     "Resolve ambiguous external publication outcomes",
@@ -137,7 +137,7 @@
   ],
   "observability": {
     "logs": "Cloudflare Worker invocation logs and applicable local publisher logs.",
-    "metrics": "Runtime health, queue eligibility, posted/skipped/unresolved counts, authority state, and reconciliation state.",
+    "metrics": "Canonical D1 runtime health and revision, queue eligibility, posted/skipped/deferred/unresolved counts, durable authority generation/version identity, halt state, scheduler heartbeat, lease/fence state, and reconciliation state.",
     "alerts": "Blocking runtime-health and scheduler outcomes must remain observable; automated alerting may be added later without changing this contract."
   },
   "lesson_loop": {

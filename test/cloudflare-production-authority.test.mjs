@@ -19,6 +19,36 @@ import {
   classifyPublicationOutcome,
 } from '../probes/cloudflare-x/outcome-classifier.mjs';
 
+const CANDIDATE_SHA = '83c7ffffea11950960cee66b413006db827fec2d';
+const VERSION_ID = '8646c543-65f0-4353-a29b-5c457e914010';
+const DEPLOYMENT_ID =
+  'cloudflare-worker:xqueue-publisher-production:version:' + VERSION_ID;
+
+function publisherEnv() {
+  return {
+    XQUEUE_PUBLISH_AUTHORITY: 'enabled',
+    DB: {},
+    MEDIA: {},
+    CF_VERSION_METADATA: {
+      id: VERSION_ID,
+      tag: CANDIDATE_SHA,
+      timestamp: '2026-09-26T00:00:00.000Z',
+    },
+  };
+}
+
+function dynamicRuntime() {
+  return {
+    ok: true,
+    snapshot: {
+      assignments: [],
+      deferred: [],
+      approvedUnscheduled: [],
+      media: [],
+    },
+  };
+}
+
 function ledger() {
   return {
     version: 1,
@@ -80,8 +110,10 @@ function cloudflareAuthority() {
     reason: null,
     state: {
       owner: 'cloudflare',
-      generation: 2,
+      generation: 3,
       transition_state: 'stable',
+      candidate_sha: CANDIDATE_SHA,
+      deployment_id: DEPLOYMENT_ID,
     },
   };
 }
@@ -204,9 +236,9 @@ test('publisher does nothing before the authority flag is enabled', async () => 
   const result = await runScheduledPublication({}, {
     dependencies: {
       async inspectAuthorityOwnership() { return cloudflareAuthority(); },
-      async verifyQueueIntegrity() {
+      async verifyDynamicRuntime() {
         touched = true;
-        return { ok: true };
+        return dynamicRuntime();
       },
     },
   });
@@ -219,11 +251,7 @@ test('publisher does nothing before the authority flag is enabled', async () => 
 test('enabled publisher refuses before queue work unless durable owner is stable cloudflare', async () => {
   let queueTouched = false;
   const result = await runScheduledPublication(
-    {
-      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
-      DB: {},
-      MEDIA: {},
-    },
+    publisherEnv(),
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
@@ -248,9 +276,9 @@ test('enabled publisher refuses before queue work unless durable owner is stable
             },
           };
         },
-        async verifyQueueIntegrity() {
+        async verifyDynamicRuntime() {
           queueTouched = true;
-          return { ok: true };
+          return dynamicRuntime();
         },
       },
     },
@@ -262,22 +290,60 @@ test('enabled publisher refuses before queue work unless durable owner is stable
   assert.equal(queueTouched, false);
 });
 
+
+test('enabled publisher fails closed when executing Worker version is not the durable authority version', async () => {
+  let runtimeTouched = false;
+
+  const result = await runScheduledPublication(
+    {
+      ...publisherEnv(),
+      CF_VERSION_METADATA: {
+        id: 'ddd904f7-9271-4c6b-9b91-e3da898bc349',
+        tag: CANDIDATE_SHA,
+      },
+    },
+    {
+      now: new Date('2026-09-02T16:00:00.000Z'),
+      dependencies: {
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 5,
+            reason: 'released',
+            actorClass: 'owner',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
+        async inspectAuthorityOwnership() {
+          return cloudflareAuthority();
+        },
+        async verifyDynamicRuntime() {
+          runtimeTouched = true;
+          return dynamicRuntime();
+        },
+      },
+    },
+  );
+
+  assert.equal(result.status, 'idle');
+  assert.equal(result.reason, 'durable_authority_version_mismatch');
+  assert.equal(result.dispatched, false);
+  assert.equal(runtimeTouched, false);
+});
+
 test('enabled publisher runs one real-shaped transaction with one selected post', async () => {
   let evidenceRecorded = null;
   let releaseCalls = 0;
   const source = ledger();
 
   const result = await runScheduledPublication(
-    {
-      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
-      DB: {},
-      MEDIA: {},
-    },
+    publisherEnv(),
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
         async inspectAuthorityOwnership() { return cloudflareAuthority(); },
-        async verifyQueueIntegrity() { return { ok: true }; },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
         },
@@ -292,7 +358,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
           };
         },
         evaluateEligibility() { return eligible(); },
-        decodeBundledQueue() { return queue(); },
+        publicationQueueFromSnapshot() { return queue(); },
         async readCurrentAssignmentHandle() { return assignmentHandle('C99'); },
         async prepareSelectedMedia() {
           return { ok: true, required: false, bytes: null, mediaObject: null };
@@ -552,16 +618,12 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
   let renderedText = null;
 
   await runScheduledPublication(
-    {
-      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
-      DB: {},
-      MEDIA: {},
-    },
+    publisherEnv(),
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
         async inspectAuthorityOwnership() { return cloudflareAuthority(); },
-        async verifyQueueIntegrity() { return { ok: true }; },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
         },
@@ -581,7 +643,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
             selection: { blocked: false, blockReason: null, selected: ['B99'] },
           };
         },
-        decodeBundledQueue() {
+        publicationQueueFromSnapshot() {
           return [{ ...queue()[0], id: 'B99', pillar: 'B' }];
         },
         async readCurrentAssignmentHandle() { return assignmentHandle('B99'); },

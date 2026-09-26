@@ -17,7 +17,7 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('legacy Workers Builds descriptor remains frozen until #46 activation', () => {
+test('legacy Workers Builds descriptor remains compatibility-only and unscheduled', () => {
   const config = readJsonc('wrangler.jsonc');
 
   assert.equal(config.name, 'xqueue-production');
@@ -46,6 +46,7 @@ test('inert publisher deployment is a separate Worker with no scheduler', () => 
   assert.equal(config.main, 'cloudflare/src/publisher-worker.mjs');
   assert.equal(declaresSchedulerMutation(config), false);
   assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
+  assert.equal(config.version_metadata?.binding, 'CF_VERSION_METADATA');
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
@@ -58,6 +59,7 @@ test('authority deployment targets only publisher Worker and pins one 15-minute 
   assert.equal(config.main, 'cloudflare/src/publisher-worker.mjs');
   assert.deepEqual(config.triggers?.crons, ['*/15 * * * *']);
   assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, 'enabled');
+  assert.equal(config.version_metadata?.binding, 'CF_VERSION_METADATA');
   assert.equal(
     config.d1_databases?.[0]?.migrations_dir,
     'cloudflare/migrations-production',

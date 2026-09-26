@@ -1,19 +1,17 @@
-// runtime-readiness.mjs — read-only composition of the Cloudflare runtime lanes.
+// runtime-readiness.mjs — read-only composition of canonical D1/R2 runtime lanes.
 //
-// This module is evidence, not publication machinery. It never writes D1/R2 and never calls X.
-// It answers whether queue, mirrored ledger, media, eligibility and lease evidence are coherent.
-// Publication authority is reported only when those technical gates pass AND the exact runtime
-// authority flag is present; missing or malformed authority always fails closed.
+// This module never writes D1/R2 and never calls X. After the #46 cutover,
+// production queue/content/assignment/media readiness is derived from the
+// verified durable runtime snapshot. Generated static artifacts are rollback
+// compatibility evidence only and are not publication-authority inputs.
 
 import { publicationAuthorityEnabled } from './authority-config.mjs';
-import { evaluateEligibility } from './eligibility.mjs';
-import { verifyMediaObjects } from './media-verify.mjs';
-import { inspectPublicationLease } from './publication-lease.mjs';
-import { decodeBundledQueue } from './queue-integrity.mjs';
 import {
-  MEDIA_MANIFEST,
-  MEDIA_MANIFEST_CONFIGURED,
-} from '../generated/media-manifest.mjs';
+  publicationQueueFromSnapshot,
+  verifyDynamicRuntime,
+} from './dynamic-runtime-integrity.mjs';
+import { evaluateEligibility } from './eligibility.mjs';
+import { inspectPublicationLease } from './publication-lease.mjs';
 
 const STATE_SNAPSHOT_KEY = 'state.snapshot_json';
 
@@ -77,30 +75,13 @@ async function inspectLeaseReadOnly(env, nowMs) {
   }
 }
 
-async function inspectMediaReadOnly(env) {
-  if (MEDIA_MANIFEST_CONFIGURED !== true) {
-    return failure('media_manifest_not_configured', {
-      configured: false,
-      requiredCount: 4,
-      readOnly: true,
-    });
-  }
-
-  try {
-    const verdict = await verifyMediaObjects(env, MEDIA_MANIFEST);
-    return {
-      configured: true,
-      ...verdict,
-    };
-  } catch {
-    return failure('media_verification_failed_closed', {
-      configured: true,
-      readOnly: true,
-    });
-  }
-}
-
-export async function evaluateAuthorityReadiness(env, { now = new Date() } = {}) {
+export async function evaluateAuthorityReadiness(
+  env,
+  {
+    now = new Date(),
+    dependencies = {},
+  } = {},
+) {
   const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
     return {
@@ -108,37 +89,40 @@ export async function evaluateAuthorityReadiness(env, { now = new Date() } = {})
       authorized: false,
       readOnly: true,
       reason: 'invalid_now',
+      gates: null,
+      authorityFlag: publicationAuthorityEnabled(env),
       eligibility: null,
       media: null,
       lease: null,
       mirroredLedger: null,
+      dynamicRuntime: null,
     };
   }
 
-  let queue;
-  try {
-    queue = decodeBundledQueue();
-  } catch {
-    return {
-      ok: false,
-      authorized: false,
-      readOnly: true,
-      reason: 'bundle_decode_failed',
-      eligibility: null,
-      media: null,
-      lease: null,
-      mirroredLedger: null,
-    };
-  }
+  const verifyRuntime =
+    dependencies.verifyDynamicRuntime ?? verifyDynamicRuntime;
+  const buildQueue =
+    dependencies.publicationQueueFromSnapshot ?? publicationQueueFromSnapshot;
 
-  const mirroredLedger = await readMirroredLedger(env);
-  const media = await inspectMediaReadOnly(env);
-  const lease = await inspectLeaseReadOnly(env, nowMs);
+  const [mirroredLedger, lease, dynamicRuntime] = await Promise.all([
+    readMirroredLedger(env),
+    inspectLeaseReadOnly(env, nowMs),
+    verifyRuntime(env, { includeSnapshot: true }),
+  ]);
 
+  let queue = null;
   let eligibility = null;
   let eligibilityReady = false;
 
-  if (mirroredLedger.ok) {
+  if (dynamicRuntime?.ok === true && dynamicRuntime?.snapshot) {
+    try {
+      queue = buildQueue(dynamicRuntime.snapshot);
+    } catch {
+      queue = null;
+    }
+  }
+
+  if (queue && mirroredLedger.ok) {
     eligibility = evaluateEligibility(queue, mirroredLedger.ledger, {
       now,
       graceMinutes: 20,
@@ -152,10 +136,15 @@ export async function evaluateAuthorityReadiness(env, { now = new Date() } = {})
       eligibility.failures.length === 0;
   }
 
+  const mediaReady =
+    dynamicRuntime?.ok === true &&
+    dynamicRuntime?.media?.ok === true;
+
   const gates = {
+    dynamicRuntime: dynamicRuntime?.ok === true,
     mirroredLedger: mirroredLedger.ok === true,
     eligibility: eligibilityReady,
-    media: media.ok === true,
+    media: mediaReady,
     leaseSchema: lease.ok === true,
   };
 
@@ -176,8 +165,14 @@ export async function evaluateAuthorityReadiness(env, { now = new Date() } = {})
       ok: mirroredLedger.ok,
       reason: mirroredLedger.reason,
     },
+    dynamicRuntime: {
+      ok: dynamicRuntime?.ok === true,
+      reason: dynamicRuntime?.reason ?? null,
+      generation: dynamicRuntime?.generation ?? null,
+      revisionDigest: dynamicRuntime?.revisionDigest ?? null,
+    },
     eligibility,
-    media,
+    media: dynamicRuntime?.media ?? null,
     lease,
   };
 }

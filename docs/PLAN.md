@@ -3406,8 +3406,9 @@ node src/cli.mjs post       publish anything due
 node src/cli.mjs whoami     verify credentials
 ```
 
-The markdown is the source of truth. `queue.json` is generated; `state.json`
-records what actually went out.
+Markdown is the reviewed authoring/history source. After the #46 cutover,
+production D1 is the canonical runtime content/assignment/publication ledger;
+`queue.json` and local `state.json` are compatibility artifacts.
 
 **Setup**
 

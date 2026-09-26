@@ -49,16 +49,18 @@ import {
   readPublicationSnapshot,
 } from './publication-ledger.mjs';
 import {
-  decodeBundledQueue,
-  verifyQueueIntegrity,
-} from './queue-integrity.mjs';
-import {
-  MEDIA_MANIFEST,
-  MEDIA_MANIFEST_CONFIGURED,
-} from '../generated/media-manifest.mjs';
+  dynamicMediaManifest,
+  publicationQueueFromSnapshot,
+  verifyDynamicRuntime,
+} from './dynamic-runtime-integrity.mjs';
 
 const EXPECTED_USERNAME = 'PatrickCra94338';
 const LEASE_TTL_MS = 5 * 60 * 1000;
+const VERSION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA40_RE = /^[0-9a-f]{40}$/i;
+const DEPLOYMENT_PREFIX =
+  'cloudflare-worker:xqueue-publisher-production:version:';
 
 const DISCLAIMER =
   'General information, not legal advice. Wage and hour rules vary by\n' +
@@ -67,6 +69,12 @@ const DISCLAIMER =
 const URL_RE = /(?:https?:\/\/|www\.)/i;
 
 function renderPost(post) {
+  if (
+    typeof post?.publicationText === 'string' &&
+    post.publicationText.length > 0
+  ) {
+    return post.publicationText;
+  }
   if (typeof post?.body !== 'string' || post.body.length === 0) {
     throw new Error('selected post has no body');
   }
@@ -76,7 +84,11 @@ function renderPost(post) {
 }
 
 function publicationCost(post) {
-  return URL_RE.test(post.body) ? COST.postWithUrl : COST.post;
+  const text =
+    typeof post?.publicationText === 'string'
+      ? post.publicationText
+      : post?.body;
+  return URL_RE.test(text ?? '') ? COST.postWithUrl : COST.post;
 }
 
 function selectedPost(queue, eligibility) {
@@ -129,7 +141,7 @@ async function sha256Hex(bytes) {
     .join('');
 }
 
-async function prepareSelectedMedia(env, post) {
+async function prepareSelectedMedia(env, post, runtimeSnapshot) {
   if (post.figure === null || post.figure === undefined) {
     return {
       ok: true,
@@ -139,20 +151,29 @@ async function prepareSelectedMedia(env, post) {
     };
   }
 
-  if (MEDIA_MANIFEST_CONFIGURED !== true) {
-    return { ok: false, reason: 'media_manifest_not_configured' };
+  if (!runtimeSnapshot || !Array.isArray(runtimeSnapshot.media)) {
+    return { ok: false, reason: 'dynamic_media_snapshot_unavailable' };
   }
 
-  const matches = MEDIA_MANIFEST.objects.filter(
-    (object) => object.postId === post.id && object.figure === post.figure,
+  const matches = runtimeSnapshot.media.filter(
+    (row) =>
+      row.content_id === post.id &&
+      Number(row.content_revision) === Number(post.contentRevision) &&
+      Number(row.figure) === Number(post.figure) &&
+      row.status === 'ready',
   );
 
   if (matches.length !== 1) {
-    return { ok: false, reason: 'selected_media_manifest_mismatch' };
+    return { ok: false, reason: 'selected_dynamic_media_mismatch' };
   }
 
-  const manifestObject = matches[0];
-  const verdict = await verifyMediaObjects(env, MEDIA_MANIFEST);
+  const manifest = await dynamicMediaManifest(matches);
+  if (!Array.isArray(manifest.objects) || manifest.objects.length !== 1) {
+    return { ok: false, reason: 'selected_dynamic_media_manifest_mismatch' };
+  }
+
+  const manifestObject = manifest.objects[0];
+  const verdict = await verifyMediaObjects(env, manifest);
   const objectVerdict = verdict.objects?.find(
     (object) => object.r2Key === manifestObject.r2Key,
   );
@@ -160,7 +181,10 @@ async function prepareSelectedMedia(env, post) {
   if (!verdict.ok || !objectVerdict?.ok) {
     return {
       ok: false,
-      reason: objectVerdict?.reason ?? verdict.reason ?? 'media_verification_failed',
+      reason:
+        objectVerdict?.reason ??
+        verdict.reason ??
+        'dynamic_media_verification_failed',
     };
   }
 
@@ -185,6 +209,35 @@ async function prepareSelectedMedia(env, post) {
     bytes: new Uint8Array(buffer),
     mediaObject: manifestObject,
   };
+}
+
+function executingVersionIdentity(env) {
+  const versionId = env?.CF_VERSION_METADATA?.id;
+  const candidateTag = env?.CF_VERSION_METADATA?.tag;
+
+  if (
+    typeof versionId !== 'string' ||
+    !VERSION_ID_RE.test(versionId) ||
+    typeof candidateTag !== 'string' ||
+    !SHA40_RE.test(candidateTag)
+  ) {
+    return Object.freeze({
+      ok: false,
+      versionId: null,
+      candidateSha: null,
+      deploymentId: null,
+    });
+  }
+
+  const normalizedVersion = versionId.toLowerCase();
+  const normalizedSha = candidateTag.toLowerCase();
+
+  return Object.freeze({
+    ok: true,
+    versionId: normalizedVersion,
+    candidateSha: normalizedSha,
+    deploymentId: DEPLOYMENT_PREFIX + normalizedVersion,
+  });
 }
 
 function idle(reason, extra = {}) {
@@ -233,10 +286,13 @@ export async function runScheduledPublication(
     return idle('invalid_now');
   }
 
-  const verifyQueue = dependencies.verifyQueueIntegrity ?? verifyQueueIntegrity;
-  const readSnapshot = dependencies.readPublicationSnapshot ?? readPublicationSnapshot;
+  const verifyRuntime =
+    dependencies.verifyDynamicRuntime ?? verifyDynamicRuntime;
+  const buildPublicationQueue =
+    dependencies.publicationQueueFromSnapshot ?? publicationQueueFromSnapshot;
+  const readSnapshot =
+    dependencies.readPublicationSnapshot ?? readPublicationSnapshot;
   const evaluate = dependencies.evaluateEligibility ?? evaluateEligibility;
-  const decodeQueue = dependencies.decodeBundledQueue ?? decodeBundledQueue;
   const prepareMedia = dependencies.prepareSelectedMedia ?? prepareSelectedMedia;
   const createClient = dependencies.makeClient ?? makeClient;
   const simulate = dependencies.simulatePublicationTransaction ?? simulatePublicationTransaction;
@@ -280,15 +336,50 @@ export async function runScheduledPublication(
     });
   }
 
-  const queueIntegrity = await verifyQueue(env);
-  if (!queueIntegrity?.ok) {
-    return idle('queue_integrity_failed', { queueIntegrity });
+  const readVersionIdentity =
+    dependencies.executingVersionIdentity ?? executingVersionIdentity;
+  const versionIdentity = readVersionIdentity(env);
+
+  if (!versionIdentity?.ok) {
+    return idle('worker_version_metadata_unavailable');
+  }
+
+  if (
+    durableAuthority?.state?.deployment_id !== versionIdentity.deploymentId ||
+    String(durableAuthority?.state?.candidate_sha ?? '').toLowerCase() !==
+      versionIdentity.candidateSha
+  ) {
+    return idle('durable_authority_version_mismatch', {
+      authority: {
+        generation: durableAuthority?.state?.generation ?? null,
+        candidateSha: durableAuthority?.state?.candidate_sha ?? null,
+        deploymentId: durableAuthority?.state?.deployment_id ?? null,
+      },
+      executingVersion: versionIdentity,
+    });
+  }
+
+  let dynamicRuntime;
+  try {
+    dynamicRuntime = await verifyRuntime(env, {
+      verifyMedia: false,
+      includeSnapshot: true,
+    });
+  } catch {
+    return idle('dynamic_runtime_unavailable');
+  }
+
+  if (!dynamicRuntime?.ok || !dynamicRuntime?.snapshot) {
+    return idle(
+      dynamicRuntime?.reason ?? 'dynamic_runtime_unavailable',
+      { dynamicRuntime },
+    );
   }
 
   let queue;
   let sourceSnapshot;
   try {
-    queue = decodeQueue();
+    queue = buildPublicationQueue(dynamicRuntime.snapshot);
     sourceSnapshot = await readSnapshot(env.DB);
   } catch {
     return idle('runtime_state_unavailable');
@@ -319,7 +410,11 @@ export async function runScheduledPublication(
     return idle('assignment_identity_unavailable');
   }
 
-  const preparedMedia = await prepareMedia(env, post);
+  const preparedMedia = await prepareMedia(
+    env,
+    post,
+    dynamicRuntime.snapshot,
+  );
   if (!preparedMedia?.ok) {
     return idle(preparedMedia?.reason ?? 'media_not_ready');
   }

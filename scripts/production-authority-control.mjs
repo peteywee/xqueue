@@ -8,13 +8,16 @@ import {
   compileProductionAuthorityBootstrapSql,
   compileProductionCloudflareRebindSql,
   compileProductionNoneToCloudflareSql,
+  parseProductionPublisherDeploymentId,
 } from '../src/production-authority-sql.mjs';
 
 const DB = 'xqueue-production';
 const CONFIG = 'wrangler.prep.jsonc';
+const AUTHORITY_CONFIG = 'wrangler.authority.jsonc';
 const CONFIRM_BOOTSTRAP = 'xqueue-production-authority-bootstrap';
 const CONFIRM_TRANSFER = 'xqueue-production-authority-transfer';
 const CONFIRM_REBIND = 'xqueue-production-authority-rebind';
+const CONFIRM_ROLLBACK = 'xqueue-production-authority-rollback';
 
 function run(invocation) {
   return new Promise((resolvePromise) => {
@@ -91,9 +94,11 @@ async function assertStaticSafety({ expectedHaltGeneration }) {
   if (!/^[0-9a-f]{40}$/i.test(head)) throw new Error('git HEAD is invalid');
 
   const safetySql = `
-SELECT name FROM sqlite_master
-WHERE type='table' AND name IN ('authority_events','authority_state')
-ORDER BY name;
+SELECT type,name FROM sqlite_master
+WHERE
+  (type='table' AND name IN ('authority_events','authority_state'))
+  OR (type='trigger' AND name='authority_events_project_state')
+ORDER BY type,name;
 SELECT halted,generation,actor_class FROM publication_halt_state WHERE singleton_id=1;
 SELECT COUNT(*) AS unresolved FROM publication_state
 WHERE status IN ('prepared','publishing','needs_reconciliation');
@@ -101,11 +106,20 @@ SELECT COUNT(*) AS active_leases FROM publication_leases
 WHERE owner_token IS NOT NULL AND expires_at_ms > ${Date.now()};
 SELECT value FROM runtime_metadata WHERE key='state.snapshot_json' LIMIT 1;
 `;
-  const [schemaRows, haltRows, unresolvedRows, leaseRows, mirrorRows] = parseRows(await d1(safetySql));
+  const [schemaRows, haltRows, unresolvedRows, leaseRows, mirrorRows] =
+    parseRows(await d1(safetySql));
 
-  const names = schemaRows.map(r=>r.name).sort();
-  if (JSON.stringify(names) !== JSON.stringify(['authority_events','authority_state'])) {
-    throw new Error(`authority schema is not exact: ${JSON.stringify(names)}`);
+  const schema = schemaRows
+    .map((row) => `${row.type}:${row.name}`)
+    .sort();
+  const expectedSchema = [
+    'table:authority_events',
+    'table:authority_state',
+    'trigger:authority_events_project_state',
+  ].sort();
+
+  if (JSON.stringify(schema) !== JSON.stringify(expectedSchema)) {
+    throw new Error(`authority schema is not exact: ${JSON.stringify(schema)}`);
   }
 
   const halt = haltRows[0];
@@ -127,9 +141,15 @@ SELECT value FROM runtime_metadata WHERE key='state.snapshot_json' LIMIT 1;
     throw new Error('production mirror is missing');
   }
   const mirror = JSON.parse(mirrorRaw);
-  if (mirror?.inflight !== null) throw new Error('production mirror has inflight publication');
+  if (mirror?.inflight !== null) {
+    throw new Error('production mirror has inflight publication');
+  }
 
-  return { head: head.toLowerCase(), mirrorRaw, haltGeneration:Number(halt.generation) };
+  return {
+    head: head.toLowerCase(),
+    mirrorRaw,
+    haltGeneration:Number(halt.generation),
+  };
 }
 
 async function readAuthority() {
@@ -145,10 +165,15 @@ FROM authority_events ORDER BY generation DESC LIMIT 1;
   return { state: stateRows[0] ?? null, event: eventRows[0] ?? null };
 }
 
-async function executeTwoStatement(sql) {
+async function executeOneStatement(sql) {
   const rows = parseRows(await d1(sql));
-  if (rows.length !== 2) throw new Error('authority mutation returned unexpected statement count');
-  return rows;
+  if (rows.length !== 1) {
+    throw new Error('authority mutation returned unexpected statement count');
+  }
+  if (rows[0].length !== 1) {
+    throw new Error('authority mutation did not append exactly one event');
+  }
+  return rows[0][0];
 }
 
 function exactBootstrap(authority, head, transitionId, eventAt) {
@@ -181,20 +206,79 @@ function exactTransfer(authority, head, deploymentId, transitionId, eventAt) {
   );
 }
 
-
-function exactRebind(authority, head, deploymentId, transitionId, eventAt) {
+function exactRebind(
+  authority,
+  head,
+  deploymentId,
+  transitionId,
+  eventAt,
+  generation,
+) {
   const s=authority.state, e=authority.event;
   return Boolean(
     s && e &&
-    s.owner==='cloudflare' && Number(s.generation)===3 && s.transition_state==='stable' &&
+    s.owner==='cloudflare' && Number(s.generation)===generation &&
+    s.transition_state==='stable' &&
     s.transition_id===transitionId && s.previous_owner==='cloudflare' &&
     String(s.candidate_sha).toLowerCase()===head && s.deployment_id===deploymentId &&
     s.transitioned_at===eventAt &&
-    Number(e.generation)===3 && e.transition_id===transitionId &&
-    e.previous_owner==='cloudflare' && e.next_owner==='cloudflare' && e.transition_state==='stable' &&
+    Number(e.generation)===generation && e.transition_id===transitionId &&
+    e.previous_owner==='cloudflare' && e.next_owner==='cloudflare' &&
+    e.transition_state==='stable' &&
     String(e.candidate_sha).toLowerCase()===head && e.deployment_id===deploymentId &&
     e.event_at===eventAt
   );
+}
+
+async function assertPublisherVersion(deploymentId, expectedCandidateSha) {
+  const parsedIdentity = parseProductionPublisherDeploymentId(deploymentId);
+  const stdout = await checked({
+    command:'pnpm',
+    args:[
+      'wrangler','versions','view',parsedIdentity.versionId,
+      '--config',AUTHORITY_CONFIG,'--json',
+    ],
+  }, 'publisher Worker version inspection');
+
+  let version;
+  try {
+    version = JSON.parse(stdout);
+  } catch {
+    throw new Error('publisher Worker version inspection did not return JSON');
+  }
+
+  if (String(version?.id ?? '').toLowerCase() !== parsedIdentity.versionId) {
+    throw new Error('publisher Worker version ID does not match deployment identity');
+  }
+  if (
+    String(version?.annotations?.['workers/tag'] ?? '').toLowerCase() !==
+    String(expectedCandidateSha).toLowerCase()
+  ) {
+    throw new Error('publisher Worker version tag does not match requested candidate SHA');
+  }
+
+  const bindings = Array.isArray(version?.resources?.bindings)
+    ? version.resources.bindings
+    : [];
+
+  const authorityBinding = bindings.find(
+    (binding) => binding?.name === 'XQUEUE_PUBLISH_AUTHORITY',
+  );
+  if (
+    authorityBinding?.type !== 'plain_text' ||
+    authorityBinding?.text !== 'enabled'
+  ) {
+    throw new Error('publisher Worker version is not authority-enabled');
+  }
+
+  const metadataBinding = bindings.find(
+    (binding) => binding?.name === 'CF_VERSION_METADATA',
+  );
+  if (!metadataBinding) {
+    throw new Error('publisher Worker version lacks CF_VERSION_METADATA binding');
+  }
+
+  return parsedIdentity.versionId;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -210,12 +294,16 @@ export async function main(argv = process.argv.slice(2)) {
   const before=await readAuthority();
 
   if (action==='bootstrap') {
-    if (confirm!==CONFIRM_BOOTSTRAP) throw new Error(`--confirm=${CONFIRM_BOOTSTRAP} is required`);
-    if (before.state || before.event) throw new Error('production authority bootstrap requires empty tables');
+    if (confirm!==CONFIRM_BOOTSTRAP) {
+      throw new Error(`--confirm=${CONFIRM_BOOTSTRAP} is required`);
+    }
+    if (before.state || before.event) {
+      throw new Error('production authority bootstrap requires empty tables');
+    }
 
     const eventAt=new Date().toISOString();
     const transitionId=`production-bootstrap-none-${safety.head}`;
-    await executeTwoStatement(compileProductionAuthorityBootstrapSql({
+    await executeOneStatement(compileProductionAuthorityBootstrapSql({
       candidateSha:safety.head, transitionId, eventAt,
     }));
 
@@ -233,20 +321,23 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   if (action==='transfer') {
-    if (confirm!==CONFIRM_TRANSFER) throw new Error(`--confirm=${CONFIRM_TRANSFER} is required`);
-    const deploymentId=args.get('deployment-id');
-    if (typeof deploymentId!=='string' || deploymentId.length===0) {
-      throw new Error('--deployment-id=<exact publisher version identity> is required');
+    if (confirm!==CONFIRM_TRANSFER) {
+      throw new Error(`--confirm=${CONFIRM_TRANSFER} is required`);
     }
+    const deploymentId=args.get('deployment-id');
+    parseProductionPublisherDeploymentId(deploymentId);
     if (
       before.state?.owner!=='none' || Number(before.state?.generation)!==1 ||
       before.state?.transition_state!=='stable' ||
-      before.event?.next_owner!=='none' || Number(before.event?.generation)!==1
-    ) throw new Error('production authority is not exact stable owner=none generation 1');
+      before.event?.next_owner!=='none' || Number(before.event?.generation)!==1 ||
+      String(before.state?.candidate_sha ?? '').toLowerCase()!==safety.head
+    ) {
+      throw new Error('production authority is not exact stable owner=none generation 1 at HEAD');
+    }
 
     const eventAt=new Date().toISOString();
     const transitionId=`production-none-to-cloudflare-${safety.head}`;
-    await executeTwoStatement(compileProductionNoneToCloudflareSql({
+    await executeOneStatement(compileProductionNoneToCloudflareSql({
       candidateSha:safety.head,deploymentId,transitionId,eventAt,
     }));
 
@@ -264,41 +355,180 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   if (action==='rebind') {
-    if (confirm!==CONFIRM_REBIND) throw new Error(`--confirm=${CONFIRM_REBIND} is required`);
-    const deploymentId=args.get('deployment-id');
-    if (typeof deploymentId!=='string' || deploymentId.length===0) {
-      throw new Error('--deployment-id=<exact publisher version identity> is required');
+    if (confirm!==CONFIRM_REBIND) {
+      throw new Error(`--confirm=${CONFIRM_REBIND} is required`);
     }
+
+    const deploymentId=args.get('deployment-id');
+    parseProductionPublisherDeploymentId(deploymentId);
+
+    const currentGeneration=Number(before.state?.generation);
     if (
-      before.state?.owner!=='cloudflare' || Number(before.state?.generation)!==2 ||
+      before.state?.owner!=='cloudflare' ||
+      !Number.isSafeInteger(currentGeneration) ||
+      currentGeneration < 2 ||
       before.state?.transition_state!=='stable' ||
-      before.event?.next_owner!=='cloudflare' || Number(before.event?.generation)!==2
-    ) throw new Error('production authority is not exact stable owner=cloudflare generation 2');
+      before.event?.next_owner!=='cloudflare' ||
+      Number(before.event?.generation)!==currentGeneration ||
+      before.event?.transition_id!==before.state?.transition_id ||
+      String(before.event?.candidate_sha ?? '').toLowerCase() !==
+        String(before.state?.candidate_sha ?? '').toLowerCase() ||
+      before.event?.deployment_id!==before.state?.deployment_id
+    ) {
+      throw new Error('production authority is not an exact stable Cloudflare projection');
+    }
 
     if (before.state?.deployment_id===deploymentId) {
-      throw new Error('production authority rebind requires a different publisher version identity');
+      throw new Error(
+        'production authority rebind requires a different publisher version identity',
+      );
     }
 
+    await assertPublisherVersion(deploymentId, safety.head);
+
+    const previousCandidateSha=String(before.state.candidate_sha).toLowerCase();
+    const previousDeploymentId=before.state.deployment_id;
+    parseProductionPublisherDeploymentId(
+      previousDeploymentId,
+      'previousDeploymentId',
+    );
+
+    const nextGeneration=currentGeneration+1;
     const eventAt=new Date().toISOString();
-    const transitionId=`production-cloudflare-rebind-${safety.head}`;
-    await executeTwoStatement(compileProductionCloudflareRebindSql({
-      candidateSha:safety.head,deploymentId,transitionId,eventAt,
+    const transitionId=
+      `production-cloudflare-rebind-g${nextGeneration}-${safety.head}`;
+
+    await executeOneStatement(compileProductionCloudflareRebindSql({
+      candidateSha:safety.head,
+      deploymentId,
+      previousCandidateSha,
+      previousDeploymentId,
+      expectedGeneration:currentGeneration,
+      transitionId,
+      eventAt,
     }));
 
     const after=await readAuthority();
-    if (!exactRebind(after,safety.head,deploymentId,transitionId,eventAt)) {
+    if (!exactRebind(
+      after,
+      safety.head,
+      deploymentId,
+      transitionId,
+      eventAt,
+      nextGeneration,
+    )) {
       throw new Error('production authority rebind readback mismatch');
     }
 
     console.log(JSON.stringify({
-      ok:true,status:'confirmed_cloudflare_rebound',owner:'cloudflare',generation:3,
-      candidateSha:safety.head,deploymentId,transitionId,eventAt,
+      ok:true,
+      status:'confirmed_cloudflare_rebound',
+      owner:'cloudflare',
+      generation:nextGeneration,
+      previousGeneration:currentGeneration,
+      previousCandidateSha,
+      candidateSha:safety.head,
+      previousDeploymentId,
+      deploymentId,
+      transitionId,
+      eventAt,
       haltGeneration:safety.haltGeneration,
     },null,2));
     return;
   }
 
-  throw new Error('action must be bootstrap, transfer, or rebind');
+  if (action==='rollback-cloudflare') {
+    if (confirm!==CONFIRM_ROLLBACK) {
+      throw new Error(`--confirm=${CONFIRM_ROLLBACK} is required`);
+    }
+
+    const deploymentId=args.get('deployment-id');
+    const candidateSha=String(args.get('candidate-sha') ?? '').toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(candidateSha)) {
+      throw new Error('--candidate-sha=<exact prior git SHA> is required');
+    }
+    parseProductionPublisherDeploymentId(deploymentId);
+
+    const currentGeneration=Number(before.state?.generation);
+    if (
+      before.state?.owner!=='cloudflare' ||
+      !Number.isSafeInteger(currentGeneration) ||
+      currentGeneration < 2 ||
+      before.state?.transition_state!=='stable' ||
+      before.event?.next_owner!=='cloudflare' ||
+      Number(before.event?.generation)!==currentGeneration ||
+      before.event?.transition_id!==before.state?.transition_id ||
+      String(before.event?.candidate_sha ?? '').toLowerCase() !==
+        String(before.state?.candidate_sha ?? '').toLowerCase() ||
+      before.event?.deployment_id!==before.state?.deployment_id
+    ) {
+      throw new Error('production authority is not an exact stable Cloudflare projection');
+    }
+
+    if (
+      before.state?.deployment_id===deploymentId &&
+      String(before.state?.candidate_sha ?? '').toLowerCase()===candidateSha
+    ) {
+      throw new Error('rollback target is already authoritative');
+    }
+
+    await assertPublisherVersion(deploymentId, candidateSha);
+
+    const previousCandidateSha=String(before.state.candidate_sha).toLowerCase();
+    const previousDeploymentId=before.state.deployment_id;
+    parseProductionPublisherDeploymentId(
+      previousDeploymentId,
+      'previousDeploymentId',
+    );
+
+    const nextGeneration=currentGeneration+1;
+    const eventAt=new Date().toISOString();
+    const transitionId=
+      `production-cloudflare-rollback-g${nextGeneration}-${candidateSha}`;
+
+    await executeOneStatement(compileProductionCloudflareRebindSql({
+      candidateSha,
+      deploymentId,
+      previousCandidateSha,
+      previousDeploymentId,
+      expectedGeneration:currentGeneration,
+      transitionId,
+      eventAt,
+    }));
+
+    const after=await readAuthority();
+    if (!exactRebind(
+      after,
+      candidateSha,
+      deploymentId,
+      transitionId,
+      eventAt,
+      nextGeneration,
+    )) {
+      throw new Error('production authority rollback readback mismatch');
+    }
+
+    console.log(JSON.stringify({
+      ok:true,
+      status:'confirmed_cloudflare_rollback',
+      owner:'cloudflare',
+      generation:nextGeneration,
+      previousGeneration:currentGeneration,
+      previousCandidateSha,
+      candidateSha,
+      previousDeploymentId,
+      deploymentId,
+      transitionId,
+      eventAt,
+      haltGeneration:safety.haltGeneration,
+      operatorHead:safety.head,
+    },null,2));
+    return;
+  }
+
+  throw new Error(
+    'action must be bootstrap, transfer, rebind, or rollback-cloudflare',
+  );
 }
 
 function isDirect() {

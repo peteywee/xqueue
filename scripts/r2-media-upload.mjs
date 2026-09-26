@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r2-media-upload.mjs — deterministic, additive, non-publishing R2 upload helper.
 //
-// UPLOADING MEDIA IS NOT PUBLICATION AUTHORITY. Local systemd remains the sole publisher.
+// UPLOADING MEDIA IS NOT PUBLICATION AUTHORITY. The exact D1-bound Cloudflare publisher is the sole routine production publisher.
 // This script MUST NEVER post to X, must never touch X credentials, and must never trigger a
 // scheduler. All it does is copy the exact bytes named in media-manifest.json into the
 // `xqueue-media` R2 bucket under their manifest keys, then verify the result.

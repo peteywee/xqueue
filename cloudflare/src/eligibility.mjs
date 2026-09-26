@@ -2,11 +2,10 @@
 // xqueue publication-eligibility decision.
 //
 // AUTHORITY BOUNDARY
-//   The local systemd unit (deploy/systemd/xqueue.service -> `pnpm post:live`)
-//   remains the sole publication authority. This module never publishes, never
-//   mutates a ledger, never touches D1, the filesystem, or the network. It only
-//   answers: "given this queue, this ledger, and this instant, what would the
-//   local runtime consider eligible?"
+//   This module is a pure eligibility projection. It never publishes, mutates
+//   a ledger, touches D1, the filesystem, or the network. Production passes it
+//   the verified canonical D1 queue + ledger; local compatibility tooling may
+//   pass the generated static queue. Authority is enforced outside this module.
 //
 // INDEPENDENCE
 //   This file deliberately re-implements the wall-clock -> UTC resolution and

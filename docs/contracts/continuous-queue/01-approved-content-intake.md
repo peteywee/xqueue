@@ -2,7 +2,7 @@
 {
   "doc_id": "XQ-CQ-0002",
   "class": "contract",
-  "claims_truth_state": "proposed",
+  "claims_truth_state": "declared",
   "written_against": { "head_sha": "8fefc81bddcdcf7e444d26e332dccca232c1939a" },
   "depends_on": ["content/", "src/authoring/", "scripts/authoring-cli.mjs", "src/parse.mjs"]
 }

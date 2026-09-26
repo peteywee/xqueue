@@ -53,14 +53,18 @@ test('default production config uses the production-safe migration lane', () => 
   );
 });
 
-test('production-safe lane preserves historical migrations and admits only the #46 authority migration', () => {
+test('production-safe lane preserves history and admits only production authority migrations', () => {
   const files = readdirSync(
     new URL('../cloudflare/migrations-production/', import.meta.url),
   )
     .filter((name) => name.endsWith('.sql'))
     .sort();
 
-  assert.deepEqual(files, [...SHARED, '0013_authority_ownership.sql']);
+  assert.deepEqual(files, [
+    ...SHARED,
+    '0013_authority_ownership.sql',
+    '0014_authority_event_projection.sql',
+  ]);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
   assert.match(
     text('cloudflare/migrations-production/0013_authority_ownership.sql'),
@@ -69,6 +73,14 @@ test('production-safe lane preserves historical migrations and admits only the #
   assert.match(
     text('cloudflare/migrations-production/0013_authority_ownership.sql'),
     /CREATE TABLE authority_events/,
+  );
+  assert.match(
+    text('cloudflare/migrations-production/0014_authority_event_projection.sql'),
+    /CREATE TRIGGER authority_events_project_state/,
+  );
+  assert.match(
+    text('cloudflare/migrations-production/0014_authority_event_projection.sql'),
+    /RAISE\(ABORT, 'authority event projection failed'\)/,
   );
 });
 

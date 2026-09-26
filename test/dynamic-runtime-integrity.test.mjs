@@ -7,8 +7,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { MEDIA_MANIFEST } from '../cloudflare/generated/media-manifest.mjs';
+import statusWorker from '../cloudflare/src/status-worker.mjs';
+import compatibilityWorker from '../cloudflare/src/worker.mjs';
 import {
   buildDynamicRuntimeSnapshot,
+  publicationQueueFromSnapshot,
   readDynamicRuntimeRows,
   verifyDynamicRuntime,
 } from '../cloudflare/src/dynamic-runtime-integrity.mjs';
@@ -202,13 +205,38 @@ test('dynamic runtime accepts canonical 180 and grows to 181 with a new revision
     MEDIA: new MediaStub(),
   };
 
-  const first = await verifyDynamicRuntime(env);
+  const first = await verifyDynamicRuntime(env, { includeSnapshot: true });
   assert.equal(first.ok, true);
   assert.equal(first.authoritative, false);
   assert.equal(first.generation, 1);
   assert.equal(first.activeAssignmentCount, 180);
   assert.equal(first.mediaRequiredCount, 4);
   assert.equal(first.media.verifiedCount, 4);
+  assert.ok(first.snapshot);
+
+  const publicationQueue = publicationQueueFromSnapshot(first.snapshot);
+  assert.equal(publicationQueue.length, 180);
+  assert.equal(publicationQueue[0].id, first.snapshot.assignments[0].content_id);
+  assert.equal(
+    publicationQueue[0].publicationText,
+    first.snapshot.assignments[0].publication_text,
+  );
+  assert.equal(
+    publicationQueue[0].scheduledAt,
+    first.snapshot.assignments[0].resolved_at,
+  );
+  assert.equal(
+    publicationQueue[0].assignmentVersion,
+    Number(first.snapshot.assignments[0].assignment_version),
+  );
+  assert.equal(
+    publicationQueue[0].policyVersion,
+    Number(first.snapshot.assignments[0].policy_version),
+  );
+  assert.equal(
+    publicationQueue[0].contentDigest,
+    first.snapshot.assignments[0].content_digest,
+  );
 
   const frontier = db.prepare(
     'SELECT * FROM queue_intake_frontier WHERE singleton_id=1;',
@@ -291,6 +319,51 @@ test('dynamic runtime accepts canonical 180 and grows to 181 with a new revision
   );
 });
 
+test('public health endpoints report runtime integrity without exposing queued content', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    seed180(db);
+    db.exec(text('cloudflare/migrations/0001_xqueue_runtime.sql'));
+    db.exec(text('cloudflare/migrations/0003_publication_lease.sql'));
+    db.exec(text('cloudflare/migrations/0011_global_publication_halt.sql'));
+    const snapshot = await buildDynamicRuntimeSnapshot(await readDynamicRuntimeRows(db));
+    db.exec(renderRuntimeRevisionInsertSql(nextRuntimeRevision({
+      currentState: null,
+      snapshot,
+      recordedAt: AT1,
+    })));
+
+    const env = {
+      DB: {
+        prepare(sql) {
+          const statement = db.prepare(sql);
+          let params = [];
+          return {
+            bind(...values) { params = values; return this; },
+            async first() { return statement.get(...params) ?? null; },
+            async all() { return { results: statement.all(...params) }; },
+          };
+        },
+      },
+      MEDIA: new MediaStub(),
+    };
+
+    for (const worker of [statusWorker, compatibilityWorker]) {
+      const response = await worker.fetch(new Request('https://x/health'), env);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.dynamicRuntimeReadiness.ok, true);
+      assert.equal(body.dynamicRuntimeReadiness.activeAssignmentCount, 180);
+      assert.equal(body.dynamicRuntimeReadiness.snapshot, null);
+      const serialized = JSON.stringify(body);
+      assert.equal(serialized.includes('publication_text'), false);
+      assert.equal(serialized.includes(snapshot.assignments[0].body), false);
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test('dynamic snapshot fails closed on duplicate active content, duplicate slot, digest drift, and missing media', async () => {
   const base = {
     assignment_id: 'A1',
@@ -366,6 +439,36 @@ test('dynamic snapshot fails closed on duplicate active content, duplicate slot,
       media: [],
     }),
     /media binding multiplicity/,
+  );
+});
+
+test('publication queue projection refuses malformed authoritative rows', () => {
+  assert.throws(
+    () => publicationQueueFromSnapshot(null),
+    /verified dynamic runtime snapshot is required/,
+  );
+
+  assert.throws(
+    () => publicationQueueFromSnapshot({
+      assignments: [{
+        content_id: 'A1',
+        pillar: 'A',
+        title: 'A1',
+        body: 'body',
+        publication_text: 'body',
+        content_digest: 'a'.repeat(64),
+        revision_content_digest: 'b'.repeat(64),
+        content_revision: 1,
+        resolved_at: '2027-01-08T20:30:00.000Z',
+        scheduled_date: '2027-01-08',
+        scheduled_time: '14:30',
+        timezone: 'America/Chicago',
+        assignment_id: 'A1',
+        assignment_version: 1,
+        policy_version: 1,
+      }],
+    }),
+    /assignment\/content digest mismatch/,
   );
 });
 

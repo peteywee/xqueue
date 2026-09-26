@@ -69,8 +69,8 @@ flowchart LR
 
 ## Non-negotiable invariants
 
-1. `content/*.md` remains the authoritative X-post source of truth.
-2. The Context Engine is non-authoritative memory/retrieval support. It cannot approve content or publish.
+1. `content/*.md` remains the repository-controlled authoring/review history. Approved runtime content promoted into production D1 is the canonical publication source after #46.
+2. The Context Engine is non-authoritative memory/retrieval support. It cannot approve content, mutate canonical production D1, or publish.
 3. Generated text is evidence only that a generator produced text; it is not evidence that the contained claims are true.
 4. Every durable source, knowledge unit, candidate, approval, and promotion must carry provenance.
 5. Owner approval is bound to the exact candidate digest. Editing after approval invalidates approval.
