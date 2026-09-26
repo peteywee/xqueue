@@ -11,7 +11,7 @@ import {
 // Keep this fixture deterministically in the future relative to SQLite DB_NOW.
 // The production SQL intentionally refuses owner mutations for due/past-due slots.
 const NOW='2099-01-01T12:00:00.000Z';
-const SLOT='2099-01-02T19:30:00.000Z';
+const SLOT='2099-01-02T20:30:00.000Z';
 const RUNTIME={generation:1,revision_digest:'f'.repeat(64)};
 const exec=(db,sql)=>db.exec(`BEGIN IMMEDIATE;\n${sql}\nCOMMIT;`);
 
