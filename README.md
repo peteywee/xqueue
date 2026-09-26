@@ -21,21 +21,21 @@ ambiguous network outcomes.
 
 Key invariants:
 
-- `content/*.md` is the content source of truth.
-- `config/schedule-policy.json` is the production schedule policy.
-- `queue.json` is generated and gitignored.
-- `state.json` is a local durable publication ledger and is gitignored.
-- Live publication requires explicit `--live` / `pnpm post:live`.
-- A live run publishes at most one overdue post.
-- A filesystem lock blocks concurrent live publishers.
-- State writes are atomic.
+- Production runtime content, assignments, publication state, halt state, authority state, and revision evidence are canonical in production D1.
+- Production media bytes are canonical in R2 and are bound to exact D1 content revisions by digest/size/MIME metadata.
+- `content/*.md` and `config/schedule-policy.json` are repository-controlled authoring/compatibility inputs; they are not the live production publication read source after #46.
+- `queue.json`, generated Worker queue bundles, generated media manifests, and local `state.json` are rebuildable/rollback-compatibility artifacts, not production authority.
+- Routine live publication exists only in `xqueue-publisher-production`.
+- Every live publication requires the durable D1 owner to be stable `cloudflare`, the executing immutable Worker version to match D1 `deployment_id`, and the Worker version tag to match D1 `candidate_sha`.
+- A production invocation publishes at most one eligible post and is protected by D1 lease/fence/state CAS.
+- Authority-event append and the singleton authority projection are one atomic SQLite statement via the production projection trigger.
 - A publication intent is persisted before the X create call begins.
 - `confirmed_posted`, `confirmed_not_posted`, and `needs_reconciliation` remain distinct when publication outcomes are persisted.
 - An ambiguous create-post result blocks automatic retry until the owner reconciles it.
 - Production media validation blocks missing referenced figures.
 - Inert Cloudflare deployment is explicit: the status config removes cron triggers and the publisher config sets `XQUEUE_PUBLISH_AUTHORITY=disabled`; only the authority config enables the capability and adds the cron.
 - Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
-- Target Cloudflare publication authority is structurally isolated in `xqueue-publisher-production`; the legacy combined production descriptor remains in place only until #46 activation.
+- Cloudflare publication authority is structurally isolated in `xqueue-publisher-production`; `xqueue-production` is status-only and has no scheduler or X write credentials.
 - Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
 - The independent hourly TSAL observer fails on stale/missing production scheduler liveness, opens one deduplicated GitHub incident, and closes it after recovery.
 - Production deployment is not considered fully verified until TSAL reconciles repository intent with Cloudflare control-plane and runtime evidence.
@@ -46,13 +46,13 @@ The target production architecture separates status/read-only execution from pub
 
 - `wrangler.status.jsonc` targets `xqueue-production` with `cloudflare/src/status-worker.mjs`. It explicitly declares `triggers.crons: []` so deployment removes the legacy cron; the Worker has no scheduled handler, no publisher import, no service binding to the publisher, and must never receive X write credentials.
 - `wrangler.publisher.jsonc` targets the separate `xqueue-publisher-production` Worker with `cloudflare/src/publisher-worker.mjs`. It is intentionally inert, declares no cron, and explicitly sets `XQUEUE_PUBLISH_AUTHORITY=disabled`.
-- `wrangler.authority.jsonc` is the explicit scheduler-authority surface for `xqueue-publisher-production`. It uses the production-safe D1 migration lane, explicitly sets `XQUEUE_PUBLISH_AUTHORITY=enabled`, and pins exactly one cron: `*/15 * * * *`.
+- `wrangler.authority.jsonc` is the explicit scheduler-authority surface for `xqueue-publisher-production`. It uses the production-safe D1 migration lane, sets `XQUEUE_PUBLISH_AUTHORITY=enabled`, binds `CF_VERSION_METADATA`, and pins exactly one cron: `*/15 * * * *`.
 - `wrangler.preview.jsonc` remains the non-authoritative preview surface.
-- `wrangler.jsonc` is retained as the legacy combined `xqueue-production` descriptor until the separately evidenced #46 cutover. Merging the structural split does not change the currently deployed entrypoint or move production secrets.
+- `wrangler.jsonc` is retained only as a legacy compatibility descriptor. It is not the deployed routine publisher authority after #46.
 - All production-role configs bind the same canonical production D1/R2 truth, while the preview config remains isolated from production D1 identity.
 - X write credentials belong only to `xqueue-publisher-production`. The repository audits and CI bundle inspection fail if X credential references, the X SDK, or publish transport become reachable from the target status-only bundle.
 
-Activation is deliberately separate from architecture. Under #46, the exact candidate must deploy/prove the publisher inertly, verify live secret inventory, remove X write secrets from `xqueue-production`, place them only on `xqueue-publisher-production`, switch the status Worker to its status-only entrypoint, and only then activate the publisher cron. The local/systemd publisher remains the rollback path until separately approved for retirement.
+#46 activated this topology with exact production evidence. New publisher versions are uploaded without moving traffic, tagged with the exact Git SHA, rebound in durable D1 authority under the global halt, promoted to 100%, and only then released. Rollback uses the same append-only Cloudflare-to-Cloudflare rebind to an exact previously tagged version/candidate while halted. The local/systemd publisher remains disabled and is not a routine production rollback authority.
 
 ### Scheduler liveness boundary
 
@@ -69,15 +69,15 @@ This prevents a configured-but-dead scheduler from being represented as healthy.
 ## Layout
 
 ```text
-content/          post library — SOURCE OF TRUTH
-config/           production schedule policy
+content/          authoring library / static compatibility source
+config/           repository-controlled scheduling policy inputs
 src/              parser, validator, scheduler, XDK client, CLI, safety modules
 test/             node:test suite including failure-path hardening tests
 docs/PLAN.md      full content plan
 docs/RUNBOOK.md   production operations and recovery procedures
 media/            deployment-local figure assets (gitignored)
-queue.json        generated local schedule artifact (gitignored)
-state.json        durable local publication ledger (gitignored)
+queue.json        generated local compatibility schedule (gitignored)
+state.json        local compatibility publication ledger (gitignored)
 ```
 
 Generated queue records contain repository-relative `sourceFile` paths so queue
@@ -95,8 +95,8 @@ regeneration is portable across CI and production hosts.
 | `pnpm health` | audit generated schedule against production policy |
 | `pnpm stats` | pillar split, runway, cost projection, publication state |
 | `pnpm next` | show upcoming unpublished posts |
-| `pnpm post` / `pnpm post:dry` | safe dry-run |
-| `pnpm post:live` | explicit live publication; at most oldest due post |
+| `pnpm post` / `pnpm post:dry` | safe local compatibility dry-run; never X mutation |
+| `pnpm post:live` | legacy/local live path; not routine production authority after #46 |
 | `pnpm reconcile -- --posted <tweet-id>` | owner confirms ambiguous attempt did publish |
 | `pnpm reconcile -- --not-posted` | owner confirms ambiguous attempt did not publish |
 | `pnpm cf:preview:d1-diagnostic` | read-only preview D1 check through explicit `wrangler.preview.jsonc` |
