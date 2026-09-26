@@ -52,7 +52,7 @@ test('legacy production descriptor is frozen while target roles are separately a
     {
       name: 'xqueue-production',
       main: 'cloudflare/src/status-worker.mjs',
-      triggers: undefined,
+      triggers: { crons: [] },
     },
   );
 

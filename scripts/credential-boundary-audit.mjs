@@ -108,8 +108,9 @@ gate(
   'target status config is xqueue-production and has no scheduler',
   status.name === 'xqueue-production' &&
     status.main === STATUS_ENTRY &&
-    !Object.hasOwn(status, 'triggers'),
-  status.name + ':' + status.main,
+    Array.isArray(status.triggers?.crons) &&
+    status.triggers.crons.length === 0,
+  status.name + ':' + status.main + ':' + JSON.stringify(status.triggers?.crons ?? null),
 );
 
 gate(

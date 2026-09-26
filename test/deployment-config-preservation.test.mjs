@@ -32,7 +32,8 @@ test('target status deployment is production identity, status-only entrypoint, a
 
   assert.equal(config.name, 'xqueue-production');
   assert.equal(config.main, 'cloudflare/src/status-worker.mjs');
-  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(declaresSchedulerMutation(config), true);
+  assert.deepEqual(config.triggers?.crons, []);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
