@@ -17,6 +17,7 @@ const AUTHORITY_CONFIG = 'wrangler.authority.jsonc';
 const CONFIRM_BOOTSTRAP = 'xqueue-production-authority-bootstrap';
 const CONFIRM_TRANSFER = 'xqueue-production-authority-transfer';
 const CONFIRM_REBIND = 'xqueue-production-authority-rebind';
+const CONFIRM_ROLLBACK = 'xqueue-production-authority-rollback';
 
 function run(invocation) {
   return new Promise((resolvePromise) => {
@@ -229,7 +230,7 @@ function exactRebind(
   );
 }
 
-async function assertPublisherVersion(deploymentId, head) {
+async function assertPublisherVersion(deploymentId, expectedCandidateSha) {
   const parsedIdentity = parseProductionPublisherDeploymentId(deploymentId);
   const stdout = await checked({
     command:'pnpm',
@@ -249,8 +250,11 @@ async function assertPublisherVersion(deploymentId, head) {
   if (String(version?.id ?? '').toLowerCase() !== parsedIdentity.versionId) {
     throw new Error('publisher Worker version ID does not match deployment identity');
   }
-  if (String(version?.annotations?.['workers/tag'] ?? '').toLowerCase() !== head) {
-    throw new Error('publisher Worker version tag does not match exact git HEAD');
+  if (
+    String(version?.annotations?.['workers/tag'] ?? '').toLowerCase() !==
+    String(expectedCandidateSha).toLowerCase()
+  ) {
+    throw new Error('publisher Worker version tag does not match requested candidate SHA');
   }
 
   const bindings = Array.isArray(version?.resources?.bindings)
@@ -433,7 +437,98 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  throw new Error('action must be bootstrap, transfer, or rebind');
+  if (action==='rollback-cloudflare') {
+    if (confirm!==CONFIRM_ROLLBACK) {
+      throw new Error(`--confirm=${CONFIRM_ROLLBACK} is required`);
+    }
+
+    const deploymentId=args.get('deployment-id');
+    const candidateSha=String(args.get('candidate-sha') ?? '').toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(candidateSha)) {
+      throw new Error('--candidate-sha=<exact prior git SHA> is required');
+    }
+    parseProductionPublisherDeploymentId(deploymentId);
+
+    const currentGeneration=Number(before.state?.generation);
+    if (
+      before.state?.owner!=='cloudflare' ||
+      !Number.isSafeInteger(currentGeneration) ||
+      currentGeneration < 2 ||
+      before.state?.transition_state!=='stable' ||
+      before.event?.next_owner!=='cloudflare' ||
+      Number(before.event?.generation)!==currentGeneration ||
+      before.event?.transition_id!==before.state?.transition_id ||
+      String(before.event?.candidate_sha ?? '').toLowerCase() !==
+        String(before.state?.candidate_sha ?? '').toLowerCase() ||
+      before.event?.deployment_id!==before.state?.deployment_id
+    ) {
+      throw new Error('production authority is not an exact stable Cloudflare projection');
+    }
+
+    if (
+      before.state?.deployment_id===deploymentId &&
+      String(before.state?.candidate_sha ?? '').toLowerCase()===candidateSha
+    ) {
+      throw new Error('rollback target is already authoritative');
+    }
+
+    await assertPublisherVersion(deploymentId, candidateSha);
+
+    const previousCandidateSha=String(before.state.candidate_sha).toLowerCase();
+    const previousDeploymentId=before.state.deployment_id;
+    parseProductionPublisherDeploymentId(
+      previousDeploymentId,
+      'previousDeploymentId',
+    );
+
+    const nextGeneration=currentGeneration+1;
+    const eventAt=new Date().toISOString();
+    const transitionId=
+      `production-cloudflare-rollback-g${nextGeneration}-${candidateSha}`;
+
+    await executeOneStatement(compileProductionCloudflareRebindSql({
+      candidateSha,
+      deploymentId,
+      previousCandidateSha,
+      previousDeploymentId,
+      expectedGeneration:currentGeneration,
+      transitionId,
+      eventAt,
+    }));
+
+    const after=await readAuthority();
+    if (!exactRebind(
+      after,
+      candidateSha,
+      deploymentId,
+      transitionId,
+      eventAt,
+      nextGeneration,
+    )) {
+      throw new Error('production authority rollback readback mismatch');
+    }
+
+    console.log(JSON.stringify({
+      ok:true,
+      status:'confirmed_cloudflare_rollback',
+      owner:'cloudflare',
+      generation:nextGeneration,
+      previousGeneration:currentGeneration,
+      previousCandidateSha,
+      candidateSha,
+      previousDeploymentId,
+      deploymentId,
+      transitionId,
+      eventAt,
+      haltGeneration:safety.haltGeneration,
+      operatorHead:safety.head,
+    },null,2));
+    return;
+  }
+
+  throw new Error(
+    'action must be bootstrap, transfer, rebind, or rollback-cloudflare',
+  );
 }
 
 function isDirect() {
