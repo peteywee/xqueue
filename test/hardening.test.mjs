@@ -183,7 +183,7 @@ test('owner can reconcile an ambiguous attempt as not posted', () => {
   assert.deepEqual(state.posted, {});
 });
 
-test('systemd service pins a checked runtime and keeps live publication explicit', () => {
+test('systemd compatibility service pins runtime and cannot publish live', () => {
   const unit = readFileSync(SYSTEMD_SERVICE, 'utf8');
   assert.match(unit, /EnvironmentFile=%h\/\.config\/xqueue\/runtime\.env/);
   assert.match(unit, /ExecStartPre=.*check-runtime\.sh/);
