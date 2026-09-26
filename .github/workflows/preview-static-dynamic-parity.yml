@@ -23,7 +23,7 @@ jobs:
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main'
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     env:
@@ -34,15 +34,15 @@ jobs:
 
     steps:
       - name: Checkout exact recovered main candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -68,7 +68,7 @@ jobs:
 
       - name: Upload parity evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xqueue-preview-static-dynamic-parity-${{ github.event.workflow_run.head_sha || github.sha }}-${{ github.run_id }}
           path: /tmp/xqueue-preview-static-dynamic-parity.json

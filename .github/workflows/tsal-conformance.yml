@@ -13,30 +13,30 @@ permissions:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
       - name: Checkout exact XQueue candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: xqueue
 
       - name: Checkout exact TSAL 0.3.2
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: peteywee/TSAL
           ref: aa3ab7ef7fa1a53d9dd4f7bf3d65d4ebbe27e759
           path: tsal-standard
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.24.0
           run_install: false
 
       - name: Set up Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -211,7 +211,7 @@ jobs:
 
       - name: Upload audit and candidate evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tsal-audit-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
@@ -221,7 +221,7 @@ jobs:
 
       - name: Upload runtime evidence
         if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tsal-runtime-${{ github.sha }}-${{ github.run_id }}
           path: xqueue/docs/evidence/tsal-runtime/runtime-safe.json
@@ -229,7 +229,7 @@ jobs:
 
       - name: Upload deployment evidence
         if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tsal-deployment-${{ github.sha }}-${{ github.run_id }}
           path: xqueue/docs/evidence/tsal-deployment/deployment-authority.json
