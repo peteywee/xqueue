@@ -73,10 +73,10 @@ export function validateOwnerAction(options) {
     throw new Error('owner halt mutation is dry-run by default; pass --apply to mutate');
   }
   if (!Number.isSafeInteger(options.expectedGeneration) || options.expectedGeneration < 1) {
-    throw new Error('--expected-generation is required for owner clear');
+    throw new Error('--expected-generation is required for owner halt mutation');
   }
   if (typeof options.reason !== 'string' || options.reason.trim().length === 0) {
-    throw new Error('--reason is required for owner clear');
+    throw new Error('--reason is required for owner halt mutation');
   }
   if (options.environment === 'production') {
     const expectedConfirm =
@@ -129,7 +129,10 @@ function runWrangler(args) {
   return result.stdout ?? '';
 }
 
-function parseOwnerTransitionResult(stdout, { label, halted }) {
+function parseOwnerTransitionResult(
+  stdout,
+  { label, halted, expectedGeneration, reason },
+) {
   let parsed;
   try {
     parsed = JSON.parse(stdout);
@@ -140,6 +143,9 @@ function parseOwnerTransitionResult(stdout, { label, halted }) {
   if (!Array.isArray(parsed) || parsed.length < 3) {
     throw new Error(label + ' D1 output is incomplete');
   }
+  if (parsed.some((statement) => statement?.success !== true)) {
+    throw new Error(label + ' D1 statement did not report success');
+  }
 
   const rows = parsed.flatMap((statement) =>
     Array.isArray(statement?.results) ? statement.results : [],
@@ -149,14 +155,19 @@ function parseOwnerTransitionResult(stdout, { label, halted }) {
     Object.hasOwn(row ?? {}, 'halted') &&
     Object.hasOwn(row ?? {}, 'generation'),
   );
+  const expectedNextGeneration = Number(expectedGeneration) + 1;
+  const expectedReason = String(reason).trim();
 
   if (Number(changes?.direct_changes) !== 1) {
     throw new Error(label + ' compare-and-set did not change exactly one row');
   }
   if (
     !state ||
+    Number(state.singleton_id) !== 1 ||
     Number(state.halted) !== halted ||
-    state.actor_class !== 'owner'
+    Number(state.generation) !== expectedNextGeneration ||
+    state.actor_class !== 'owner' ||
+    state.reason !== expectedReason
   ) {
     throw new Error(label + ' readback is not exact');
   }
@@ -164,17 +175,19 @@ function parseOwnerTransitionResult(stdout, { label, halted }) {
   return state;
 }
 
-export function parseOwnerSetResult(stdout) {
+export function parseOwnerSetResult(stdout, expected = {}) {
   return parseOwnerTransitionResult(stdout, {
     label: 'owner set',
     halted: 1,
+    ...expected,
   });
 }
 
-export function parseOwnerClearResult(stdout) {
+export function parseOwnerClearResult(stdout, expected = {}) {
   return parseOwnerTransitionResult(stdout, {
     label: 'owner clear',
     halted: 0,
+    ...expected,
   });
 }
 
@@ -211,7 +224,10 @@ export async function main(argv = process.argv.slice(2)) {
     environment: options.environment,
     sql,
   }));
-  parseResult(stdout);
+  parseResult(stdout, {
+    expectedGeneration: options.expectedGeneration,
+    reason: options.reason,
+  });
   process.stdout.write(stdout);
 }
 
