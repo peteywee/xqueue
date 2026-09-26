@@ -1,5 +1,5 @@
 [Unit]
-Description=XQueue live publisher
+Description=XQueue local compatibility dry-run
 Documentation=file:%h/xqueue/docs/RUNBOOK.md
 After=network-online.target
 Wants=network-online.target
@@ -9,7 +9,7 @@ Type=oneshot
 WorkingDirectory=%h/xqueue
 EnvironmentFile=%h/.config/xqueue/runtime.env
 ExecStartPre=/bin/bash %h/xqueue/deploy/systemd/check-runtime.sh
-ExecStart=/bin/bash -c 'exec "$$XQUEUE_COREPACK" pnpm post:live'
+ExecStart=/bin/bash -c 'exec "$$XQUEUE_COREPACK" pnpm post:dry'
 NoNewPrivileges=true
 PrivateTmp=true
 
