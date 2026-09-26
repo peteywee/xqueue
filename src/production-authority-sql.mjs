@@ -5,6 +5,8 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEPLOYMENT_PREFIX =
   'cloudflare-worker:xqueue-publisher-production:version:';
+const LOCAL_DEPLOYMENT_RE =
+  /^systemd-user:xqueue\.service:sha256:[0-9a-f]{64}$/i;
 
 function requireText(value, name) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -62,6 +64,29 @@ export function productionPublisherDeploymentId(versionId) {
     throw new TypeError('versionId must be an exact Worker version UUID');
   }
   return DEPLOYMENT_PREFIX + normalized;
+}
+
+export function parseProductionLocalDeploymentId(
+  value,
+  name = 'deploymentId',
+) {
+  const text = requireText(value, name);
+  if (!LOCAL_DEPLOYMENT_RE.test(text)) {
+    throw new TypeError(
+      `${name} must identify exact xqueue.service systemd deployment`,
+    );
+  }
+  return text.toLowerCase();
+}
+
+function deploymentForOwner(owner, value, name) {
+  if (owner === 'cloudflare') {
+    return parseProductionPublisherDeploymentId(value, name).deploymentId;
+  }
+  if (owner === 'local-systemd') {
+    return parseProductionLocalDeploymentId(value, name);
+  }
+  throw new TypeError('owner transition supports cloudflare or local-systemd only');
 }
 
 export function compileProductionAuthorityBootstrapSql({
@@ -254,6 +279,107 @@ WHERE EXISTS (
     AND s.deployment_id = ${previousDeployment}
     AND e.generation = s.generation
     AND e.next_owner = 'cloudflare'
+    AND e.transition_state = 'stable'
+    AND lower(e.candidate_sha) = lower(s.candidate_sha)
+    AND e.deployment_id = s.deployment_id
+    AND e.event_at = s.transitioned_at
+)
+  AND NOT EXISTS (
+    SELECT 1 FROM authority_events WHERE generation >= ${nextGeneration}
+  )
+RETURNING
+  generation,
+  transition_id,
+  previous_owner,
+  next_owner,
+  transition_state,
+  candidate_sha,
+  deployment_id,
+  event_at,
+  detail;`;
+}
+
+
+export function compileProductionOwnerTransitionSql({
+  previousOwner,
+  nextOwner,
+  previousCandidateSha,
+  candidateSha,
+  previousDeploymentId,
+  deploymentId,
+  expectedGeneration,
+  transitionId,
+  eventAt,
+} = {}) {
+  if (
+    !['cloudflare', 'local-systemd'].includes(previousOwner) ||
+    !['cloudflare', 'local-systemd'].includes(nextOwner) ||
+    previousOwner === nextOwner
+  ) {
+    throw new TypeError(
+      'owner transition must change between cloudflare and local-systemd',
+    );
+  }
+
+  const generation = requireGeneration(expectedGeneration);
+  const nextGeneration = generation + 1;
+  const previousSha = sqlTextLiteral(
+    requireSha(previousCandidateSha, 'previousCandidateSha'),
+  );
+  const nextSha = sqlTextLiteral(requireSha(candidateSha));
+  const previousDeploymentText = deploymentForOwner(
+    previousOwner,
+    previousDeploymentId,
+    'previousDeploymentId',
+  );
+  const deploymentText = deploymentForOwner(
+    nextOwner,
+    deploymentId,
+    'deploymentId',
+  );
+  const previousDeployment = sqlTextLiteral(previousDeploymentText);
+  const deployment = sqlTextLiteral(deploymentText);
+  const transition = sqlTextLiteral(requireText(transitionId, 'transitionId'));
+  const at = sqlTextLiteral(requireIsoInstant(eventAt, 'eventAt'));
+  const detail = sqlTextLiteral(
+    `production authority transition: ${previousOwner} -> ${nextOwner}`,
+  );
+
+  return `INSERT INTO authority_events (
+  generation,
+  transition_id,
+  previous_owner,
+  next_owner,
+  transition_state,
+  candidate_sha,
+  deployment_id,
+  event_at,
+  detail
+)
+SELECT
+  ${nextGeneration},
+  ${transition},
+  ${sqlTextLiteral(previousOwner)},
+  ${sqlTextLiteral(nextOwner)},
+  'stable',
+  ${nextSha},
+  ${deployment},
+  ${at},
+  ${detail}
+WHERE EXISTS (
+  SELECT 1
+  FROM authority_state s
+  JOIN authority_events e
+    ON e.generation = s.generation
+   AND e.transition_id = s.transition_id
+  WHERE s.singleton_id = 1
+    AND s.owner = ${sqlTextLiteral(previousOwner)}
+    AND s.generation = ${generation}
+    AND s.transition_state = 'stable'
+    AND lower(s.candidate_sha) = ${previousSha}
+    AND s.deployment_id = ${previousDeployment}
+    AND e.generation = s.generation
+    AND e.next_owner = s.owner
     AND e.transition_state = 'stable'
     AND lower(e.candidate_sha) = lower(s.candidate_sha)
     AND e.deployment_id = s.deployment_id
