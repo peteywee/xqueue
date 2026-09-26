@@ -16,6 +16,7 @@ test('production cutover readiness probe is hard-pinned read-only', () => {
   assert.doesNotMatch(source, /\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE)\b/);
   assert.doesNotMatch(source, /wrangler\s+deploy/);
   assert.doesNotMatch(source, /post:live|createPostViaClient|uploadMedia/);
+  assert.match(source, /mode: 'legacy-precutover'/);
 });
 
 test('cutover readiness workflow uploads evidence even when the gate is blocked', () => {

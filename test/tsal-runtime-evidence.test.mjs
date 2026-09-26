@@ -22,7 +22,11 @@ function healthyPayload(overrides = {}) {
       lastInvocationAt: '2026-09-06T02:45:00.000Z',
     },
     queueIntegrity: { ok: true },
-    dynamicRuntimeReadiness: { ok: true },
+    dynamicRuntimeReadiness: {
+      ok: true,
+      authoritative: true,
+      source: 'production-d1-r2',
+    },
     publisherAuthority: { ok: true, owner: 'cloudflare', transitionState: 'stable' },
     publicationHalt: { ok: true, halted: false },
     authorityReadiness: {
@@ -60,9 +64,13 @@ test('runtime health proves technical safety without conflating deployment autho
 test('status role cannot waive the publisher heartbeat or replace dynamic truth with a static bundle', () => {
   for (const overrides of [
     { schedulerLiveness: { required: false, ok: true, state: 'not_required' } },
-    { dynamicRuntimeReadiness: { ok: false }, queueIntegrity: { ok: true } },
+    { dynamicRuntimeReadiness: { ok: false, authoritative: true, source: 'production-d1-r2' }, queueIntegrity: { ok: true } },
+    { dynamicRuntimeReadiness: { ok: true, authoritative: false, source: 'production-d1-r2' } },
+    { dynamicRuntimeReadiness: { ok: true, authoritative: true, source: 'static-bundle' } },
     { publisherAuthority: { ok: false } },
     { role: undefined },
+    { livePublication: true },
+    { schedulerAuthority: true },
   ]) {
     assert.equal(evaluateRuntimeHealth(healthyPayload(overrides)).safe, false);
   }
