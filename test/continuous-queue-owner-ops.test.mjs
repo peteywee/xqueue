@@ -8,8 +8,10 @@ import {
   renderCancelSql, renderRebindSql, renderRevisionCreateSql, sha256Hex,
 } from '../src/continuous-queue-owner-ops.mjs';
 
-const NOW='2026-09-21T12:00:00.000Z';
-const SLOT='2026-09-22T19:30:00.000Z';
+// Keep this fixture deterministically in the future relative to SQLite DB_NOW.
+// The production SQL intentionally refuses owner mutations for due/past-due slots.
+const NOW='2099-01-01T12:00:00.000Z';
+const SLOT='2099-01-02T19:30:00.000Z';
 const RUNTIME={generation:1,revision_digest:'f'.repeat(64)};
 const exec=(db,sql)=>db.exec(`BEGIN IMMEDIATE;\n${sql}\nCOMMIT;`);
 
@@ -32,7 +34,7 @@ function fixture() {
   const d=sha256Hex('original body');
   db.prepare("INSERT INTO queue_content VALUES('A1','A',1,'active',1,?,?, 'scheduled')").run(NOW,NOW);
   db.prepare("INSERT INTO queue_content_revisions VALUES('A1',1,'Original','original body','original body',?,NULL,'fixture',?)").run(d,NOW);
-  db.prepare("INSERT INTO queue_assignments VALUES('A1',1,'A1',1,?,'x-primary',2,?,'2026-09-22','14:30','America/Chicago','lull','active',NULL,1,?,?)").run(d,SLOT,NOW,NOW);
+  db.prepare("INSERT INTO queue_assignments VALUES('A1',1,'A1',1,?,'x-primary',2,?,'2099-01-02','14:30','America/Chicago','lull','active',NULL,1,?,?)").run(d,SLOT,NOW,NOW);
   db.prepare("INSERT INTO publication_state(post_id,status,scheduled_at,updated_at,attempt_id,generation) VALUES('A1','scheduled',?,?,NULL,1)").run(SLOT,NOW);
   return db;
 }
@@ -116,7 +118,7 @@ test('stale competing cancel cannot overwrite the winning reason or append evide
   const db=fixture(), s=snap(db);
   const win=planAssignmentCancel({content:s.content,activeAssignment:s.activeAssignment,publicationState:s.publicationState,runtimeState:RUNTIME,reason:'winner',now:NOW});
   const stale=planAssignmentCancel({content:s.content,activeAssignment:s.activeAssignment,publicationState:s.publicationState,runtimeState:RUNTIME,reason:'stale',now:NOW});
-  exec(db,renderCancelSql(win,{recordedAt:NOW})); exec(db,renderCancelSql(stale,{recordedAt:'2026-09-21T12:01:00.000Z'}));
+  exec(db,renderCancelSql(win,{recordedAt:NOW})); exec(db,renderCancelSql(stale,{recordedAt:'2099-01-01T12:01:00.000Z'}));
   assert.equal(db.prepare("SELECT skip_reason FROM publication_state WHERE post_id='A1'").get().skip_reason,'winner');
   for(const table of ['queue_assignment_events','queue_content_events','publication_events']){
     assert.equal(db.prepare(`SELECT COUNT(*) n FROM ${table} WHERE event_type='owner_cancelled'`).get().n,1);
