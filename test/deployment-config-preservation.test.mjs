@@ -23,7 +23,6 @@ test('legacy Workers Builds descriptor remains frozen until #46 activation', () 
   assert.equal(config.name, 'xqueue-production');
   assert.equal(config.main, 'cloudflare/src/worker.mjs');
   assert.equal(declaresSchedulerMutation(config), false);
-  assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
 });
@@ -46,6 +45,7 @@ test('inert publisher deployment is a separate Worker with no scheduler', () => 
   assert.equal(config.name, 'xqueue-publisher-production');
   assert.equal(config.main, 'cloudflare/src/publisher-worker.mjs');
   assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
