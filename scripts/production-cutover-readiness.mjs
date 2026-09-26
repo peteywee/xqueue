@@ -107,6 +107,7 @@ async function main() {
     observeDeploymentAuthority({
       accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? '',
       token: process.env.CLOUDFLARE_API_TOKEN ?? '',
+      mode: 'legacy-precutover',
       healthUrl: HEALTH_URL,
     }),
   ]);
