@@ -53,15 +53,23 @@ test('default production config uses the production-safe migration lane', () => 
   );
 });
 
-test('production-safe lane preserves existing migration names and excludes authority schema', () => {
+test('production-safe lane preserves historical migrations and admits only the #46 authority migration', () => {
   const files = readdirSync(
     new URL('../cloudflare/migrations-production/', import.meta.url),
   )
     .filter((name) => name.endsWith('.sql'))
     .sort();
 
-  assert.deepEqual(files, SHARED);
+  assert.deepEqual(files, [...SHARED, '0013_authority_ownership.sql']);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
+  assert.match(
+    text('cloudflare/migrations-production/0013_authority_ownership.sql'),
+    /CREATE TABLE authority_state/,
+  );
+  assert.match(
+    text('cloudflare/migrations-production/0013_authority_ownership.sql'),
+    /CREATE TABLE authority_events/,
+  );
 });
 
 test('production-safe migrations are byte-identical to their canonical shared counterparts', () => {

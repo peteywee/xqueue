@@ -24,6 +24,9 @@ import {
   readGlobalPublicationHalt,
 } from './publication-halt.mjs';
 import {
+  inspectAuthorityOwnership,
+} from './authority-ownership-read.mjs';
+import {
   readCurrentAssignmentHandle,
 } from './assignment-version-fence.mjs';
 import {
@@ -246,10 +249,35 @@ export async function runScheduledPublication(
     dependencies.readCurrentAssignmentHandle ?? readCurrentAssignmentHandle;
   const readHalt =
     dependencies.readGlobalPublicationHalt ?? readGlobalPublicationHalt;
+  const inspectOwnership =
+    dependencies.inspectAuthorityOwnership ?? inspectAuthorityOwnership;
 
   const initialHalt = await currentHaltVerdict(readHalt, env.DB);
   if (!initialHalt.ok) {
     return idle(initialHalt.reason, { halt: initialHalt.halt });
+  }
+
+  let durableAuthority;
+  try {
+    durableAuthority = await inspectOwnership(env.DB);
+  } catch {
+    return idle('durable_authority_unavailable');
+  }
+
+  if (
+    durableAuthority?.ok !== true ||
+    durableAuthority?.state?.owner !== 'cloudflare' ||
+    durableAuthority?.state?.transition_state !== 'stable'
+  ) {
+    return idle('durable_authority_not_cloudflare', {
+      authority: {
+        ok: durableAuthority?.ok === true,
+        reason: durableAuthority?.reason ?? null,
+        owner: durableAuthority?.state?.owner ?? null,
+        generation: durableAuthority?.state?.generation ?? null,
+        transitionState: durableAuthority?.state?.transition_state ?? null,
+      },
+    });
   }
 
   const queueIntegrity = await verifyQueue(env);

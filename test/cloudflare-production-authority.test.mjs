@@ -74,6 +74,18 @@ function queue() {
   }];
 }
 
+function cloudflareAuthority() {
+  return {
+    ok: true,
+    reason: null,
+    state: {
+      owner: 'cloudflare',
+      generation: 2,
+      transition_state: 'stable',
+    },
+  };
+}
+
 function eligible() {
   return {
     health: {
@@ -191,6 +203,7 @@ test('publisher does nothing before the authority flag is enabled', async () => 
   let touched = false;
   const result = await runScheduledPublication({}, {
     dependencies: {
+      async inspectAuthorityOwnership() { return cloudflareAuthority(); },
       async verifyQueueIntegrity() {
         touched = true;
         return { ok: true };
@@ -201,6 +214,52 @@ test('publisher does nothing before the authority flag is enabled', async () => 
   assert.equal(result.status, 'idle');
   assert.equal(result.reason, 'authority_disabled');
   assert.equal(touched, false);
+});
+
+test('enabled publisher refuses before queue work unless durable owner is stable cloudflare', async () => {
+  let queueTouched = false;
+  const result = await runScheduledPublication(
+    {
+      XQUEUE_PUBLISH_AUTHORITY: 'enabled',
+      DB: {},
+      MEDIA: {},
+    },
+    {
+      now: new Date('2026-09-02T16:00:00.000Z'),
+      dependencies: {
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 1,
+            reason: 'initial_unhalted',
+            actorClass: 'migration',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
+        async inspectAuthorityOwnership() {
+          return {
+            ok: true,
+            reason: null,
+            state: {
+              owner: 'none',
+              generation: 1,
+              transition_state: 'stable',
+            },
+          };
+        },
+        async verifyQueueIntegrity() {
+          queueTouched = true;
+          return { ok: true };
+        },
+      },
+    },
+  );
+
+  assert.equal(result.status, 'idle');
+  assert.equal(result.reason, 'durable_authority_not_cloudflare');
+  assert.equal(result.dispatched, false);
+  assert.equal(queueTouched, false);
 });
 
 test('enabled publisher runs one real-shaped transaction with one selected post', async () => {
@@ -217,6 +276,7 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
         async verifyQueueIntegrity() { return { ok: true }; },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
@@ -500,6 +560,7 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
     {
       now: new Date('2026-09-02T16:00:00.000Z'),
       dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
         async verifyQueueIntegrity() { return { ok: true }; },
         async readPublicationSnapshot() {
           return { raw: JSON.stringify(source), ledger: source };
