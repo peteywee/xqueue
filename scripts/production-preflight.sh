@@ -148,7 +148,7 @@ run_gate 'pnpm stats' pnpm stats
 run_gate 'pnpm next (4)' node src/cli.mjs next 4
 run_gate 'dry-run publication path (zero X mutations)' pnpm post:dry
 
-section 'SCHEDULER AUDIT'
+section 'LOCAL SCHEDULER AUTHORITY AUDIT'
 scheduler_found=0
 scheduler_bad=0
 
@@ -157,15 +157,8 @@ cron_xqueue="$(printf '%s\n' "$cron_text" | grep -Ev '^[[:space:]]*(#|$)' | grep
 if [[ -n "$cron_xqueue" ]]; then
   scheduler_found=1
   printf 'active xqueue cron entries:\n%s\n' "$cron_xqueue"
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    if [[ "$line" == *'post:live'* || "$line" == *'post --live'* ]]; then
-      pass 'cron xqueue entry uses explicit live publication'
-    else
-      fail "cron xqueue entry does not use explicit live publication: $line"
-      scheduler_bad=1
-    fi
-  done <<< "$cron_xqueue"
+  fail 'local xqueue cron is forbidden after the Cloudflare authority cutover'
+  scheduler_bad=1
 fi
 
 unit_text=''
@@ -174,10 +167,14 @@ if command -v systemctl >/dev/null 2>&1; then
   if [[ -n "$unit_text" ]]; then
     scheduler_found=1
     printf '\nxqueue.service:\n%s\n' "$unit_text"
+
     if grep -Eq 'post:live|post[[:space:]]+--live' <<< "$unit_text"; then
-      pass 'systemd xqueue.service uses explicit live publication'
+      fail 'systemd xqueue.service still contains live publication authority'
+      scheduler_bad=1
+    elif grep -Eq 'post:dry|post[[:space:]]+--dry-run' <<< "$unit_text"; then
+      pass 'systemd xqueue.service is compatibility dry-run only'
     else
-      fail 'systemd xqueue.service does not use explicit live publication'
+      fail 'systemd xqueue.service has an unknown execution mode'
       scheduler_bad=1
     fi
 
@@ -199,9 +196,9 @@ if command -v systemctl >/dev/null 2>&1; then
         set +a
         /bin/bash "$runtime_check"
       ); then
-        pass 'installed systemd runtime satisfies production requirements'
+        pass 'installed systemd compatibility runtime is valid'
       else
-        fail 'installed systemd runtime is invalid or incompatible'
+        fail 'installed systemd compatibility runtime is invalid'
         scheduler_bad=1
       fi
     else
@@ -209,15 +206,30 @@ if command -v systemctl >/dev/null 2>&1; then
       scheduler_bad=1
     fi
 
-    printf '\nxqueue.timer status:\n'
-    systemctl --user status xqueue.timer --no-pager 2>/dev/null || true
+    timer_enabled="$(systemctl --user is-enabled xqueue.timer 2>/dev/null || true)"
+    case "$timer_enabled" in
+      enabled|enabled-runtime|linked|linked-runtime)
+        fail "xqueue.timer must remain disabled after #46; got $timer_enabled"
+        scheduler_bad=1
+        ;;
+      *)
+        pass "xqueue.timer is not enabled (${timer_enabled:-not-found})"
+        ;;
+    esac
+
+    if systemctl --user is-active --quiet xqueue.service 2>/dev/null; then
+      fail 'xqueue.service must not be active during normal Cloudflare production'
+      scheduler_bad=1
+    else
+      pass 'xqueue.service is inactive'
+    fi
   fi
 fi
 
 if (( scheduler_found == 0 )); then
-  warn 'no active xqueue cron entry or xqueue.service was detected'
+  pass 'no local xqueue scheduler configuration was detected'
 elif (( scheduler_bad == 0 )); then
-  pass 'detected scheduler configuration is live-enabled explicitly with a verified runtime'
+  pass 'local compatibility path is non-live and inactive'
 fi
 
 section 'RESULT'
