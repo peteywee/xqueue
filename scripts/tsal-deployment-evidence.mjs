@@ -216,11 +216,32 @@ async function healthGet({ url, fetchImpl, timeoutMs }) {
 export async function observeDeploymentAuthority({
   accountId,
   token,
-  workerName = WORKER_NAME,
+  mode = 'split',
+  workerName = null,
   healthUrl = HEALTH_URL,
   fetchImpl = globalThis.fetch,
   timeoutMs = 10_000,
 } = {}) {
+  const legacyPrecutover = mode === 'legacy-precutover';
+  if (mode !== 'split' && !legacyPrecutover) {
+    return {
+      schedules: null,
+      deployments: null,
+      statusSchedules: null,
+      version: null,
+      health: null,
+      observationErrors: [`unsupported_observation_mode:${mode}`],
+      cloudflare: {
+        account_id_present: Boolean(accountId),
+        api_token_present: Boolean(token),
+        worker_name: effectiveWorkerName,
+        observation_mode: mode,
+      },
+    };
+  }
+
+  const effectiveWorkerName = workerName ??
+    (legacyPrecutover ? STATUS_WORKER_NAME : WORKER_NAME);
   if (!accountId || !token) {
     return {
       schedules: null,
@@ -232,13 +253,13 @@ export async function observeDeploymentAuthority({
       cloudflare: {
         account_id_present: Boolean(accountId),
         api_token_present: Boolean(token),
-        worker_name: workerName,
+        worker_name: effectiveWorkerName,
       },
     };
   }
 
   try {
-    const encodedWorker = encodeURIComponent(workerName);
+    const encodedWorker = encodeURIComponent(effectiveWorkerName);
     const encodedAccount = encodeURIComponent(accountId);
     const [scheduleResult, deploymentResult, healthResult, statusScheduleResult] = await Promise.all([
       cloudflareGet({
@@ -256,11 +277,13 @@ export async function observeDeploymentAuthority({
         timeoutMs,
       }),
       healthGet({ url: healthUrl, fetchImpl, timeoutMs }),
-      cloudflareGet({
-        accountId, token,
-        pathname: `/accounts/${encodedAccount}/workers/scripts/${STATUS_WORKER_NAME}/schedules`,
-        fetchImpl, timeoutMs,
-      }),
+      legacyPrecutover
+        ? Promise.resolve(null)
+        : cloudflareGet({
+            accountId, token,
+            pathname: `/accounts/${encodedAccount}/workers/scripts/${STATUS_WORKER_NAME}/schedules`,
+            fetchImpl, timeoutMs,
+          }),
     ]);
 
     const observationErrors = [];
@@ -285,26 +308,28 @@ export async function observeDeploymentAuthority({
 
     if (!healthResult.ok) observationErrors.push(healthResult.error);
 
-    if (statusScheduleResult.ok) {
-      statusSchedules = normalizeSchedules(statusScheduleResult.body);
-      if (!statusSchedules) observationErrors.push('status_schedules_response_malformed');
-    } else {
-      observationErrors.push(statusScheduleResult.error);
-    }
+    if (!legacyPrecutover) {
+      if (statusScheduleResult?.ok) {
+        statusSchedules = normalizeSchedules(statusScheduleResult.body);
+        if (!statusSchedules) observationErrors.push('status_schedules_response_malformed');
+      } else {
+        observationErrors.push(statusScheduleResult?.error ?? 'status_schedules_observation_unavailable');
+      }
 
-    // Read only the immutable version named by the active publisher deployment.
-    const activeVersionId = deployments?.[0]?.versions?.[0]?.version_id;
-    if (typeof activeVersionId === 'string' && activeVersionId.length > 0) {
-      const result = await cloudflareGet({
-        accountId, token,
-        pathname: `/accounts/${encodedAccount}/workers/scripts/${encodedWorker}/versions/${encodeURIComponent(activeVersionId)}`,
-        fetchImpl, timeoutMs,
-      });
-      if (result.ok) version = compactVersion(result.body?.result ?? result.body);
-      else observationErrors.push(result.error);
-    } else if (deployments) {
-      // A readable but empty deployment is a proven mismatch, not an unknown read.
-      version = {};
+      // Read only the immutable version named by the active publisher deployment.
+      const activeVersionId = deployments?.[0]?.versions?.[0]?.version_id;
+      if (typeof activeVersionId === 'string' && activeVersionId.length > 0) {
+        const result = await cloudflareGet({
+          accountId, token,
+          pathname: `/accounts/${encodedAccount}/workers/scripts/${encodedWorker}/versions/${encodeURIComponent(activeVersionId)}`,
+          fetchImpl, timeoutMs,
+        });
+        if (result.ok) version = compactVersion(result.body?.result ?? result.body);
+        else observationErrors.push(result.error);
+      } else if (deployments) {
+        // A readable but empty deployment is a proven mismatch, not an unknown read.
+        version = {};
+      }
     }
 
     return {
@@ -317,9 +342,10 @@ export async function observeDeploymentAuthority({
       cloudflare: {
         account_id_present: true,
         api_token_present: true,
-        worker_name: workerName,
+        worker_name: effectiveWorkerName,
         schedules_http_status: scheduleResult.status,
         deployments_http_status: deploymentResult.status,
+        observation_mode: mode,
       },
     };
   } catch (error) {
@@ -333,7 +359,7 @@ export async function observeDeploymentAuthority({
       cloudflare: {
         account_id_present: true,
         api_token_present: true,
-        worker_name: workerName,
+        worker_name: effectiveWorkerName,
       },
     };
   }
