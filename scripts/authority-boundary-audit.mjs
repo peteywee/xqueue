@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Mechanical proof of XQueue deployment and publication-authority boundaries.
-// #45 adds target status/publisher roles without activating them; wrangler.jsonc
-// remains the legacy production descriptor until the separately evidenced #46 cutover.
+// #46 activated the split production topology. wrangler.jsonc remains only a
+// legacy compatibility descriptor; it is not routine publication authority.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -90,7 +90,7 @@ const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 const prepCrons = prepConfig.value.triggers?.crons ?? [];
 
 gate(
-  'legacy production descriptor remains inert until #46',
+  'legacy production descriptor is compatibility-only and unscheduled',
   defaultConfig.value.name === 'xqueue-production' &&
     defaultConfig.value.main === legacyWorkerPath &&
     defaultDeclaresTriggers === false,
@@ -112,7 +112,8 @@ gate(
   publisherConfig.value.name === 'xqueue-publisher-production' &&
     publisherConfig.value.main === publisherWorkerPath &&
     publisherDeclaresTriggers === false &&
-    publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+    publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
+    publisherConfig.value.version_metadata?.binding === 'CF_VERSION_METADATA',
   publisherConfig.value.name + ':' + publisherConfig.value.main + ':' +
     String(publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing'),
 );
@@ -124,6 +125,7 @@ gate(
     authorityConfig.value.d1_databases?.[0]?.migrations_dir ===
       'cloudflare/migrations-production' &&
     authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled' &&
+    authorityConfig.value.version_metadata?.binding === 'CF_VERSION_METADATA' &&
     Array.isArray(authorityCrons) &&
     authorityCrons.length === 1 &&
     authorityCrons[0] === '*/15 * * * *',
@@ -216,6 +218,17 @@ const publisherText = publisher?.text ?? '';
 gate(
   'production publisher retains runtime authority check',
   /publicationAuthorityEnabled/.test(publisherText),
+  productionPublisherPath,
+);
+
+gate(
+  'production publisher self-binds exact Worker version and D1 runtime',
+  /CF_VERSION_METADATA/.test(publisherText) &&
+    /durable_authority_version_mismatch/.test(publisherText) &&
+    /verifyDynamicRuntime/.test(publisherText) &&
+    /publicationQueueFromSnapshot/.test(publisherText) &&
+    !/decodeBundledQueue/.test(publisherText) &&
+    !/MEDIA_MANIFEST/.test(publisherText),
   productionPublisherPath,
 );
 
@@ -387,13 +400,15 @@ gate(
 const unit = readFileSync(join(ROOT, 'deploy/systemd/xqueue.service'), 'utf8');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 gate(
-  'systemd rollback unit still runs post:live',
-  /ExecStart=.*post:live/.test(unit),
+  'local systemd compatibility unit cannot publish live',
+  /ExecStart=.*post:dry/.test(unit) &&
+    !/post:live/.test(unit),
   'deploy/systemd/xqueue.service',
 );
 gate(
-  'package.json still defines post:live',
-  pkg.scripts?.['post:live'] === 'node src/cli.mjs post --live',
+  'manual legacy post:live exists but no version-controlled scheduler invokes it',
+  pkg.scripts?.['post:live'] === 'node src/cli.mjs post --live' &&
+    !/post:live/.test(unit),
   pkg.scripts?.['post:live'] ?? 'MISSING',
 );
 
