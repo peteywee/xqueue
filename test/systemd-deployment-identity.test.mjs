@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 
 import { deriveSystemdDeploymentIdentity } from '../src/systemd-deployment-identity.mjs';
 
-const unitText = `[Unit]\nDescription=XQueue live publisher\n\n[Service]\nWorkingDirectory=%h/xqueue\nExecStart=/bin/bash -c 'exec "$XQUEUE_COREPACK" pnpm post:live'\n`;
+const unitText = `[Unit]\nDescription=XQueue local compatibility dry-run\n\n[Service]\nWorkingDirectory=%h/xqueue\nExecStart=/bin/bash -c 'exec "$XQUEUE_COREPACK" pnpm post:dry'\n`;
 const unitHash = createHash('sha256').update(Buffer.from(unitText, 'utf8')).digest('hex');
 
 function runner({ loadState = 'loaded', fragmentPath = '/home/patrick/.config/systemd/user/xqueue.service', text = unitText } = {}) {
