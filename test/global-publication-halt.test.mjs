@@ -415,6 +415,44 @@ test('owner control defaults to preview status and production mutations require 
     /did not change exactly one row/,
   );
 
+  assert.throws(
+    () => parseOwnerSetResult(JSON.stringify([
+      { success: false, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 2,
+        reason: 'cutover halt',
+        actor_class: 'owner',
+        updated_at: '2026-09-25T20:10:00.000Z',
+      }] },
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
+    /did not report success/,
+  );
+
+  assert.throws(
+    () => parseOwnerSetResult(JSON.stringify([
+      { success: true, results: [] },
+      { success: true, results: [{ direct_changes: 1 }] },
+      { success: true, results: [{
+        singleton_id: 1,
+        halted: 1,
+        generation: 9,
+        reason: 'wrong',
+        actor_class: 'owner',
+        updated_at: '2026-09-25T20:10:00.000Z',
+      }] },
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
+    /readback is not exact/,
+  );
+
   assert.deepEqual(
     parseOwnerSetResult(JSON.stringify([
       { success: true, results: [] },
@@ -427,7 +465,10 @@ test('owner control defaults to preview status and production mutations require 
         actor_class: 'owner',
         updated_at: '2026-09-25T20:10:00.000Z',
       }] },
-    ])),
+    ]), {
+      expectedGeneration: 1,
+      reason: 'cutover halt',
+    }),
     {
       singleton_id: 1,
       halted: 1,
@@ -450,7 +491,10 @@ test('owner control defaults to preview status and production mutations require 
         actor_class: 'owner',
         updated_at: '2026-09-21T16:02:00.000Z',
       }] },
-    ])),
+    ]), {
+      expectedGeneration: 2,
+      reason: 'reviewed',
+    }),
     {
       singleton_id: 1,
       halted: 0,
