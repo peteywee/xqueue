@@ -36,4 +36,7 @@ test('cutover readiness workflow is an observer, not an authority lane', () => {
   assert.doesNotMatch(source, /XQUEUE_PUBLICATION_AUTHORITY/);
   assert.doesNotMatch(source, /halt:clear|halt:set/);
   assert.doesNotMatch(source, /post:live/);
+  assert.match(source, /workflow_dispatch:/);
+  assert.doesNotMatch(source, /^\s+push:/m);
+  assert.match(text('.github/workflows/tsal-conformance.yml'), /push:\s*\n\s*branches: \[main\]/);
 });

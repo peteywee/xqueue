@@ -87,6 +87,18 @@ For any authority-capable publisher update:
    - current durable authority state/event are coherent and stable;
    - local systemd remains disabled/inactive.
 3. Apply any production-safe D1 migration before running a control action that depends on it.
+   Deploy the matching read-only status Worker under the halt so `/health`
+   exposes canonical readiness, durable publisher identity, and a required
+   publisher heartbeat:
+
+```bash
+pnpm wrangler deploy --config wrangler.status.jsonc
+```
+
+   This configuration has no publisher capability and explicitly has zero
+   Cron Triggers. Its own `livePublication` and `schedulerAuthority` remain
+   false; `publisherAuthority` reports the separate durable D1 owner.
+
 4. Upload, but do not deploy, the authority-enabled Worker version and tag it with the exact Git SHA:
 
 ```bash
@@ -233,6 +245,19 @@ A backup is evidence/recovery material, not permission to overwrite newer canoni
 Every real scheduled invocation writes `scheduler.last_invocation` to D1 before publication processing. A configured Cron Trigger is not considered healthy merely because configuration exists.
 
 The production status/evidence path must use the durable heartbeat to establish liveness. Missing, malformed, or stale heartbeat evidence fails the scheduler-liveness gate when publication authority is expected.
+
+TSAL deployment evidence reads schedules and deployments from
+`xqueue-publisher-production`, checks that `xqueue-production` has no schedules,
+and matches the single 100% Worker version and its Git tag to durable D1
+authority. A status Worker never needs publication credentials or a true
+publication-authority flag for this proof. Runtime evidence uses canonical
+D1/R2 readiness and a fresh publisher heartbeat; static compatibility bundle
+drift cannot substitute for or invalidate canonical runtime integrity.
+
+The historical **Production Cutover Readiness** workflow is manual-only. It
+answers the earlier pre-cutover question and deliberately requires inert
+Cloudflare publication. After cutover, use the automatic **TSAL Conformance**
+runtime/deployment checks and the halted rollout acceptance procedure above.
 
 ## Credential boundary
 

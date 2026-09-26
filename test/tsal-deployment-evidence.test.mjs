@@ -31,13 +31,22 @@ function deployments() {
 function health(overrides = {}) {
   return {
     service: 'xqueue',
+    role: 'status-only',
+    publicationCapable: false,
     status: 'ok',
-    livePublication: true,
-    schedulerAuthority: true,
+    livePublication: false,
+    schedulerAuthority: false,
+    publisherAuthority: {
+      ok: true, owner: 'cloudflare', transitionState: 'stable',
+      candidateSha: 'a'.repeat(40),
+      deploymentId: 'cloudflare-worker:xqueue-publisher-production:version:22222222-2222-2222-2222-222222222222',
+    },
+    publicationHalt: { ok: true, halted: false },
+    schedulerLiveness: { required: true, ok: true, state: 'fresh' },
     authorityReadiness: {
       ok: true,
-      authorityFlag: true,
-      authorized: true,
+      authorityFlag: false,
+      authorized: false,
     },
     ...overrides,
   };
@@ -47,12 +56,18 @@ function observation(overrides = {}) {
   return {
     schedules: schedules(),
     deployments: deployments(),
+    statusSchedules: [],
+    version: {
+      id: '22222222-2222-2222-2222-222222222222',
+      tag: 'a'.repeat(40), authority_enabled: true, version_metadata: true,
+      production_database: true,
+    },
     health: health(),
     observationErrors: [],
     cloudflare: {
       account_id_present: true,
       api_token_present: true,
-      worker_name: 'xqueue-production',
+      worker_name: 'xqueue-publisher-production',
       schedules_http_status: 200,
       deployments_http_status: 200,
     },
@@ -89,23 +104,36 @@ test('missing active deployment is an explicit deployment mismatch', () => {
 test('runtime authority must corroborate Cloudflare control-plane authority', () => {
   const result = evaluateDeploymentAuthority(observation({
     health: health({
-      livePublication: false,
-      schedulerAuthority: false,
-      authorityReadiness: {
-        ok: true,
-        authorityFlag: false,
-        authorized: false,
-      },
+      publisherAuthority: { ...health().publisherAuthority, ok: false },
     }),
   }));
 
   assert.equal(result.authorized, false);
   assert.deepEqual(result.failing, [
-    'runtime_authority_flag',
-    'runtime_authorized',
-    'scheduler_authority',
-    'live_publication_authority',
+    'durable_authority',
   ]);
+});
+
+test('split topology rejects duplicate scheduling, split traffic, wrong version/tag/database, halt, and stale heartbeat', () => {
+  const base = observation();
+  for (const overrides of [
+    { statusSchedules: schedules() },
+    { deployments: [{ ...deployments()[0], versions: [
+      { version_id: base.version.id, percentage: 50 },
+      { version_id: '33333333-3333-3333-3333-333333333333', percentage: 50 },
+    ] }] },
+    { version: { ...base.version, id: '33333333-3333-3333-3333-333333333333' } },
+    { version: { ...base.version, tag: 'b'.repeat(40) } },
+    { version: { ...base.version, tag: null } },
+    { version: { ...base.version, authority_enabled: false } },
+    { version: { ...base.version, version_metadata: false } },
+    { version: { ...base.version, production_database: false } },
+    { health: health({ publicationHalt: { ok: true, halted: true } }) },
+    { health: health({ schedulerLiveness: { required: false, ok: true, state: 'not_required' } }) },
+    { health: health({ role: undefined }) },
+  ]) {
+    assert.equal(evaluateDeploymentAuthority(observation(overrides)).authorized, false);
+  }
 });
 
 test('missing Cloudflare read credentials stays unknown', async () => {
@@ -158,7 +186,7 @@ test('Cloudflare authorization failure stays unknown rather than fabricating a m
 
   assert.equal(evidence.result, 'unknown');
   assert.equal(evidence.details.evaluation.observable, false);
-  assert.equal(evidence.details.observation_errors.length, 2);
+  assert.equal(evidence.details.observation_errors.length, 3);
 });
 
 test('successful Cloudflare reads produce passing deployment evidence without leaking token', async () => {
@@ -168,18 +196,35 @@ test('successful Cloudflare reads produce passing deployment evidence without le
 
     if (String(url).endsWith('/schedules')) {
       assert.equal(init.headers.authorization, `Bearer ${secretToken}`);
+      const status = String(url).includes('/scripts/xqueue-production/');
+      if (!status) assert.ok(String(url).includes('/scripts/xqueue-publisher-production/'));
       return new Response(JSON.stringify({
         success: true,
-        result: { schedules: schedules() },
+        result: { schedules: status ? [] : schedules() },
       }), { status: 200 });
     }
 
     if (String(url).endsWith('/deployments')) {
       assert.equal(init.headers.authorization, `Bearer ${secretToken}`);
+      assert.ok(String(url).includes('/scripts/xqueue-publisher-production/'));
       return new Response(JSON.stringify({
         success: true,
         result: { deployments: deployments() },
       }), { status: 200 });
+    }
+
+    if (String(url).includes('/versions/')) {
+      assert.ok(String(url).endsWith('/xqueue-publisher-production/versions/22222222-2222-2222-2222-222222222222'));
+      return new Response(JSON.stringify({ success: true, result: {
+        id: '22222222-2222-2222-2222-222222222222',
+        annotations: { 'workers/tag': 'a'.repeat(40) },
+        resources: { bindings: [
+          { name: 'XQUEUE_PUBLISH_AUTHORITY', type: 'plain_text', text: 'enabled' },
+          { name: 'CF_VERSION_METADATA', type: 'version_metadata' },
+          { name: 'DB', type: 'd1', id: 'fc85026e-bfc8-435f-8bb0-c60e139178a3' },
+          { name: 'X_API_KEY', type: 'secret_text', text: secretToken },
+        ] },
+      } }), { status: 200 });
     }
 
     if (String(url).includes('workers.dev/health')) {
@@ -209,5 +254,7 @@ test('successful Cloudflare reads produce passing deployment evidence without le
   assert.equal(evidence.claim_id, 'xqueue-publisher.deployment.authority');
   assert.equal(evidence.valid_until, '2026-09-06T04:30:00.000Z');
   assert.equal(JSON.stringify(evidence).includes(secretToken), false);
-  assert.equal(evidence.details.runtime_authority.authorized, true);
+  assert.equal(evidence.details.runtime_authority.authorized, false);
+  assert.equal(evidence.details.durable_authority.owner, 'cloudflare');
+  assert.equal(evidence.details.publisher_version.authority_enabled, true);
 });
