@@ -81,6 +81,17 @@ function baseDependencies(overrides = {}) {
   let recordedOutcome = null;
 
   const dependencies = {
+    async inspectAuthorityOwnership() {
+      return {
+        ok: true,
+        reason: null,
+        state: {
+          owner: 'cloudflare',
+          generation: 2,
+          transition_state: 'stable',
+        },
+      };
+    },
     async verifyQueueIntegrity() {
       return { ok: true };
     },
