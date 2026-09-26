@@ -37,6 +37,10 @@ import {
 } from '../src/continuous-queue-shadow.mjs';
 import { loadLibrary } from '../src/parse.mjs';
 import { schedule } from '../src/schedule.mjs';
+import {
+  compileProductionAuthorityBootstrapSql,
+  compileProductionNoneToCloudflareSql,
+} from '../src/production-authority-sql.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY = join(ROOT, 'config', 'schedule-policy.json');
@@ -326,15 +330,34 @@ test('public health endpoints report runtime integrity without exposing queued c
     db.exec(text('cloudflare/migrations/0001_xqueue_runtime.sql'));
     db.exec(text('cloudflare/migrations/0003_publication_lease.sql'));
     db.exec(text('cloudflare/migrations/0011_global_publication_halt.sql'));
+    db.exec(text('cloudflare/migrations-production/0013_authority_ownership.sql'));
+    db.exec(text('cloudflare/migrations-production/0014_authority_event_projection.sql'));
+    db.exec(compileProductionAuthorityBootstrapSql({
+      candidateSha: 'a'.repeat(40), transitionId: 'bootstrap', eventAt: AT1,
+    }));
+    db.exec(compileProductionNoneToCloudflareSql({
+      candidateSha: 'a'.repeat(40), transitionId: 'transfer', eventAt: AT2,
+      deploymentId: 'cloudflare-worker:xqueue-publisher-production:version:22222222-2222-2222-2222-222222222222',
+    }));
     const snapshot = await buildDynamicRuntimeSnapshot(await readDynamicRuntimeRows(db));
     db.exec(renderRuntimeRevisionInsertSql(nextRuntimeRevision({
       currentState: null,
       snapshot,
       recordedAt: AT1,
     })));
+    const now = new Date().toISOString();
+    const posted = Object.fromEntries(snapshot.assignments.map((row) => [row.content_id, {
+      tweetId: `test-${row.content_id}`, at: now,
+    }]));
+    const metadata = db.prepare('INSERT INTO runtime_metadata (key,value,updated_at) VALUES (?,?,?)');
+    metadata.run('state.snapshot_json', JSON.stringify({
+      version: 1, posted, skipped: {}, spend: 0, inflight: null,
+    }), now);
+    metadata.run('scheduler.last_invocation', JSON.stringify({ observedAt: now }), now);
 
     const env = {
       DB: {
+        async batch(statements) { return Promise.all(statements.map((statement) => statement.all())); },
         prepare(sql) {
           const statement = db.prepare(sql);
           let params = [];
@@ -359,6 +382,17 @@ test('public health endpoints report runtime integrity without exposing queued c
       assert.equal(serialized.includes('publication_text'), false);
       assert.equal(serialized.includes(snapshot.assignments[0].body), false);
     }
+
+    db.prepare("UPDATE runtime_metadata SET value=? WHERE key='scheduler.last_invocation'")
+      .run(JSON.stringify({ observedAt: new Date(Date.now() - 46 * 60_000).toISOString() }));
+    const staleResponse = await statusWorker.fetch(new Request('https://x/health'), env);
+    assert.equal(staleResponse.status, 503);
+    const stale = await staleResponse.json();
+    assert.equal(stale.schedulerLiveness.required, true);
+    assert.equal(stale.schedulerLiveness.state, 'stale');
+    assert.equal(stale.publisherAuthority.owner, 'cloudflare');
+    assert.equal(stale.livePublication, false);
+    assert.equal(stale.publicationCapable, false);
   } finally {
     db.close();
   }

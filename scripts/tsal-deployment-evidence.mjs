@@ -3,7 +3,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
-const WORKER_NAME = 'xqueue-production';
+const WORKER_NAME = 'xqueue-publisher-production';
+const STATUS_WORKER_NAME = 'xqueue-production';
+const PRODUCTION_DB_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
 const EXPECTED_CRON = '*/15 * * * *';
 const HEALTH_URL = 'https://xqueue-production.patrickcraven.workers.dev/health';
 const CLAIM_ID = 'xqueue-publisher.deployment.authority';
@@ -63,23 +65,37 @@ function activeDeploymentLooksValid(deployment) {
   if (!deployment || typeof deployment.id !== 'string' || deployment.id.length === 0) {
     return false;
   }
-  if (!Array.isArray(deployment.versions) || deployment.versions.length === 0) {
+  if (!Array.isArray(deployment.versions) || deployment.versions.length !== 1) {
     return false;
   }
 
-  const percentages = deployment.versions.map((version) => Number(version?.percentage));
-  if (percentages.some((value) => !Number.isFinite(value) || value <= 0)) return false;
-
-  const total = percentages.reduce((sum, value) => sum + value, 0);
-  return total >= 99.99 && total <= 100.01;
+  return Number(deployment.versions[0]?.percentage) === 100 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      .test(deployment.versions[0]?.version_id ?? '');
 }
 
-export function evaluateDeploymentAuthority({ schedules, deployments, health }) {
+function compactVersion(version) {
+  if (!version || typeof version !== 'object') return null;
+  const bindings = Array.isArray(version.resources?.bindings) ? version.resources.bindings : [];
+  return {
+    id: version.id ?? null,
+    tag: version.annotations?.['workers/tag'] ?? null,
+    authority_enabled: bindings.some((binding) => binding.name === 'XQUEUE_PUBLISH_AUTHORITY' &&
+      binding.type === 'plain_text' && binding.text === 'enabled'),
+    version_metadata: bindings.some((binding) => binding.name === 'CF_VERSION_METADATA' &&
+      binding.type === 'version_metadata'),
+    production_database: bindings.some((binding) => binding.name === 'DB' &&
+      binding.type === 'd1' && binding.id === PRODUCTION_DB_ID),
+  };
+}
+
+export function evaluateDeploymentAuthority({ schedules, deployments, health, statusSchedules, version }) {
   const schedulesReadable = Array.isArray(schedules);
   const deploymentsReadable = Array.isArray(deployments);
   const healthReadable = health && typeof health === 'object' && !Array.isArray(health);
 
-  if (!schedulesReadable || !deploymentsReadable || !healthReadable) {
+  if (!schedulesReadable || !deploymentsReadable || !healthReadable ||
+      !Array.isArray(statusSchedules) || !version || typeof version !== 'object') {
     return {
       observable: false,
       authorized: false,
@@ -90,16 +106,29 @@ export function evaluateDeploymentAuthority({ schedules, deployments, health }) 
   }
 
   const activeDeployment = deployments[0] ?? null;
+  const authority = health.publisherAuthority;
+  const activeVersionId = activeDeployment?.versions?.[0]?.version_id;
   const checks = {
     exact_cron:
       schedules.length === 1 &&
       schedules[0]?.cron === EXPECTED_CRON,
     active_deployment_present: activeDeploymentLooksValid(activeDeployment),
+    status_unscheduled: statusSchedules.length === 0,
     worker_identity: health?.service === 'xqueue',
-    runtime_authority_flag: health?.authorityReadiness?.authorityFlag === true,
-    runtime_authorized: health?.authorityReadiness?.authorized === true,
-    scheduler_authority: health?.schedulerAuthority === true,
-    live_publication_authority: health?.livePublication === true,
+    status_role: health?.role === 'status-only' && health?.publicationCapable === false &&
+      health?.livePublication === false && health?.schedulerAuthority === false,
+    durable_authority: authority?.ok === true && authority?.owner === 'cloudflare' &&
+      authority?.transitionState === 'stable',
+    exact_version: typeof activeVersionId === 'string' && version.id === activeVersionId &&
+      authority?.deploymentId === `cloudflare-worker:${WORKER_NAME}:version:${activeVersionId}`,
+    exact_candidate_tag: /^[0-9a-f]{40}$/i.test(version.tag ?? '') &&
+      String(version.tag).toLowerCase() === String(authority?.candidateSha ?? '').toLowerCase(),
+    runtime_authority_flag: version.authority_enabled === true,
+    runtime_version_binding: version.version_metadata === true,
+    production_database: version.production_database === true,
+    halt_cleared: health?.publicationHalt?.ok === true && health?.publicationHalt?.halted === false,
+    scheduler_liveness: health?.schedulerLiveness?.required === true &&
+      health?.schedulerLiveness?.ok === true && health?.schedulerLiveness?.state === 'fresh',
   };
 
   const failing = Object.entries(checks)
@@ -196,6 +225,8 @@ export async function observeDeploymentAuthority({
     return {
       schedules: null,
       deployments: null,
+      statusSchedules: null,
+      version: null,
       health: null,
       observationErrors: ['cloudflare_read_credentials_unavailable'],
       cloudflare: {
@@ -209,7 +240,7 @@ export async function observeDeploymentAuthority({
   try {
     const encodedWorker = encodeURIComponent(workerName);
     const encodedAccount = encodeURIComponent(accountId);
-    const [scheduleResult, deploymentResult, healthResult] = await Promise.all([
+    const [scheduleResult, deploymentResult, healthResult, statusScheduleResult] = await Promise.all([
       cloudflareGet({
         accountId,
         token,
@@ -225,11 +256,18 @@ export async function observeDeploymentAuthority({
         timeoutMs,
       }),
       healthGet({ url: healthUrl, fetchImpl, timeoutMs }),
+      cloudflareGet({
+        accountId, token,
+        pathname: `/accounts/${encodedAccount}/workers/scripts/${STATUS_WORKER_NAME}/schedules`,
+        fetchImpl, timeoutMs,
+      }),
     ]);
 
     const observationErrors = [];
     let schedules = null;
     let deployments = null;
+    let statusSchedules = null;
+    let version = null;
 
     if (scheduleResult.ok) {
       schedules = normalizeSchedules(scheduleResult.body);
@@ -247,9 +285,33 @@ export async function observeDeploymentAuthority({
 
     if (!healthResult.ok) observationErrors.push(healthResult.error);
 
+    if (statusScheduleResult.ok) {
+      statusSchedules = normalizeSchedules(statusScheduleResult.body);
+      if (!statusSchedules) observationErrors.push('status_schedules_response_malformed');
+    } else {
+      observationErrors.push(statusScheduleResult.error);
+    }
+
+    // Read only the immutable version named by the active publisher deployment.
+    const activeVersionId = deployments?.[0]?.versions?.[0]?.version_id;
+    if (typeof activeVersionId === 'string' && activeVersionId.length > 0) {
+      const result = await cloudflareGet({
+        accountId, token,
+        pathname: `/accounts/${encodedAccount}/workers/scripts/${encodedWorker}/versions/${encodeURIComponent(activeVersionId)}`,
+        fetchImpl, timeoutMs,
+      });
+      if (result.ok) version = compactVersion(result.body?.result ?? result.body);
+      else observationErrors.push(result.error);
+    } else if (deployments) {
+      // A readable but empty deployment is a proven mismatch, not an unknown read.
+      version = {};
+    }
+
     return {
       schedules,
       deployments,
+      statusSchedules,
+      version,
       health: healthResult.health,
       observationErrors: observationErrors.filter(Boolean),
       cloudflare: {
@@ -264,6 +326,8 @@ export async function observeDeploymentAuthority({
     return {
       schedules: null,
       deployments: null,
+      statusSchedules: null,
+      version: null,
       health: null,
       observationErrors: [error instanceof Error ? error.message : String(error)],
       cloudflare: {
@@ -288,6 +352,8 @@ export function buildDeploymentEvidence({
     schedules: observation?.schedules ?? null,
     deployments: observation?.deployments ?? null,
     health: observation?.health ?? null,
+    statusSchedules: observation?.statusSchedules ?? null,
+    version: observation?.version ?? null,
   });
 
   const result = !evaluation.observable
@@ -324,6 +390,9 @@ export function buildDeploymentEvidence({
       cloudflare: observation?.cloudflare ?? null,
       schedules: compactSchedules,
       deployments: compactDeployments,
+      status_schedules: observation?.statusSchedules?.map(compactSchedule) ?? null,
+      publisher_version: observation?.version ?? null,
+      durable_authority: health?.publisherAuthority ?? null,
       runtime_authority: health && typeof health === 'object'
         ? {
             service: health.service ?? null,
@@ -334,7 +403,7 @@ export function buildDeploymentEvidence({
           }
         : null,
       observer_commit: observerCommit,
-      note: 'Cloudflare API calls are GET-only. The API token value and secret values are never recorded. Runtime authority corroboration is read from the public health endpoint; no deployment or publication mutation is performed.',
+      note: 'GET-only observations bind the publisher deployment/version/tag to durable D1 authority reported by the separate status Worker. The status Worker must be unscheduled and incapable of publication. No token or secret values are recorded.',
     },
     provenance: {
       producer: 'XQueue TSAL deployment evidence collector',

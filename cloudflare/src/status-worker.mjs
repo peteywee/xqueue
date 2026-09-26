@@ -2,6 +2,8 @@ import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 import { readGlobalPublicationHalt } from './publication-halt.mjs';
 import { verifyQueueIntegrity } from './queue-integrity.mjs';
 import { readSchedulerLiveness } from './scheduler-liveness.mjs';
+import { inspectAuthorityOwnership } from './authority-ownership-read.mjs';
+import { evaluateAuthorityReadiness } from './runtime-readiness.mjs';
 
 function json(value, init = {}) {
   const headers = new Headers(init.headers);
@@ -50,26 +52,48 @@ export default {
     }
 
     try {
+      const runtime = verifyDynamicRuntime(env, { includeSnapshot: true });
       const [
         storage,
         queueIntegrity,
         dynamicRuntimeReadiness,
         publicationHalt,
         schedulerLiveness,
+        durableAuthority,
+        authorityReadiness,
       ] = await Promise.all([
         storageHealth(env),
         verifyQueueIntegrity(env),
-        verifyDynamicRuntime(env),
+        runtime,
         readGlobalPublicationHalt(env.DB),
         readSchedulerLiveness(env.DB, {
-          required: false,
+          required: true,
           now: new Date(),
+        }),
+        inspectAuthorityOwnership(env.DB),
+        evaluateAuthorityReadiness(env, {
+          dependencies: { verifyDynamicRuntime: () => runtime },
         }),
       ]);
 
+      const publisherAuthority = {
+        ok: durableAuthority.ok === true &&
+          durableAuthority.state?.owner === 'cloudflare' &&
+          durableAuthority.state?.transition_state === 'stable',
+        readOnly: true,
+        owner: durableAuthority.state?.owner ?? null,
+        generation: durableAuthority.state?.generation ?? null,
+        transitionState: durableAuthority.state?.transition_state ?? null,
+        candidateSha: durableAuthority.state?.candidate_sha ?? null,
+        deploymentId: durableAuthority.state?.deployment_id ?? null,
+      };
+
       const healthy =
         dynamicRuntimeReadiness.ok === true &&
-        publicationHalt.ok === true;
+        authorityReadiness.ok === true &&
+        publicationHalt.ok === true &&
+        publisherAuthority.ok === true &&
+        schedulerLiveness.ok === true;
 
       const rollbackCompatibility = {
         ...queueIntegrity,
@@ -87,9 +111,12 @@ export default {
           schedulerAuthority: false,
           publicationHalt,
           schedulerLiveness,
+          publisherAuthority,
+          authorityReadiness,
           queueIntegrity: rollbackCompatibility,
           dynamicRuntimeReadiness: {
             ...dynamicRuntimeReadiness,
+            snapshot: null,
             authoritative: true,
             source: 'production-d1-r2',
           },

@@ -19,12 +19,17 @@ export function evaluateRuntimeHealth(health) {
   const authorityFlag = health?.authorityReadiness?.authorityFlag === true;
   const checks = {
     service_identity: health?.service === 'xqueue',
+    status_role: health?.role === 'status-only' && health?.publicationCapable === false,
     service_status: health?.status === 'ok',
-    queue_integrity: health?.queueIntegrity?.ok === true,
+    dynamic_runtime: health?.dynamicRuntimeReadiness?.ok === true,
     authority_readiness: health?.authorityReadiness?.ok === true,
-    scheduler_liveness: authorityFlag
-      ? health?.schedulerLiveness?.ok === true
-      : health?.schedulerLiveness?.ok !== false,
+    publisher_authority: health?.publisherAuthority?.ok === true &&
+      health?.publisherAuthority?.owner === 'cloudflare' &&
+      health?.publisherAuthority?.transitionState === 'stable',
+    halt_readable: health?.publicationHalt?.ok === true,
+    scheduler_liveness: health?.schedulerLiveness?.required === true &&
+      health?.schedulerLiveness?.ok === true &&
+      health?.schedulerLiveness?.state === 'fresh',
     d1_reachable: health?.storage?.d1?.reachable === true,
     r2_reachable: health?.storage?.r2?.reachable === true,
   };

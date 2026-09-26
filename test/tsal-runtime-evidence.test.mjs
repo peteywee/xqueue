@@ -10,9 +10,11 @@ import {
 function healthyPayload(overrides = {}) {
   return {
     service: 'xqueue',
+    role: 'status-only',
+    publicationCapable: false,
     status: 'ok',
-    livePublication: true,
-    schedulerAuthority: true,
+    livePublication: false,
+    schedulerAuthority: false,
     schedulerLiveness: {
       required: true,
       ok: true,
@@ -20,10 +22,13 @@ function healthyPayload(overrides = {}) {
       lastInvocationAt: '2026-09-06T02:45:00.000Z',
     },
     queueIntegrity: { ok: true },
+    dynamicRuntimeReadiness: { ok: true },
+    publisherAuthority: { ok: true, owner: 'cloudflare', transitionState: 'stable' },
+    publicationHalt: { ok: true, halted: false },
     authorityReadiness: {
       ok: true,
-      authorized: true,
-      authorityFlag: true,
+      authorized: false,
+      authorityFlag: false,
     },
     storage: {
       d1: { reachable: true, tables: 8 },
@@ -37,11 +42,6 @@ test('runtime health proves technical safety without conflating deployment autho
   const health = healthyPayload({
     livePublication: false,
     schedulerAuthority: false,
-    schedulerLiveness: {
-      required: false,
-      ok: true,
-      state: 'not_required',
-    },
     authorityReadiness: {
       ok: true,
       authorized: false,
@@ -55,6 +55,18 @@ test('runtime health proves technical safety without conflating deployment autho
   assert.deepEqual(result.failing, []);
   assert.equal(result.authority.authorized, false);
   assert.equal(result.authority.schedulerAuthority, false);
+});
+
+test('status role cannot waive the publisher heartbeat or replace dynamic truth with a static bundle', () => {
+  for (const overrides of [
+    { schedulerLiveness: { required: false, ok: true, state: 'not_required' } },
+    { dynamicRuntimeReadiness: { ok: false }, queueIntegrity: { ok: true } },
+    { publisherAuthority: { ok: false } },
+    { role: undefined },
+  ]) {
+    assert.equal(evaluateRuntimeHealth(healthyPayload(overrides)).safe, false);
+  }
+  assert.equal(evaluateRuntimeHealth(healthyPayload({ queueIntegrity: { ok: false } })).safe, true);
 });
 
 test('healthy runtime creates current passing runtime evidence', () => {
