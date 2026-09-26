@@ -49,7 +49,7 @@ test('default production config uses the production-safe migration lane', () => 
   );
   assert.equal(
     authority.d1_databases[0].migrations_dir,
-    'cloudflare/migrations',
+    'cloudflare/migrations-production',
   );
 });
 
