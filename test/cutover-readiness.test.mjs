@@ -162,5 +162,35 @@ test('pre-cutover report refuses an accidentally active Cloudflare publisher', (
   });
 
   assert.equal(result.checks.cloudflareAuthoritySafelyInert, false);
-  assert.ok(result.blockers.some((row) => row.id === 'cloudflare_authority_not_inert'));
+  assert.ok(result.blockers.some((row) => row.id === 'cloudflare_authority_active'));
+});
+
+
+test('missing authority fields are unknown rather than misclassified as active', () => {
+  const queue = [{ id: 'A1', scheduledAt: '2026-09-22T19:30:00.000Z' }];
+  const canonicalQueueText = JSON.stringify(queue, null, 2) + '\n';
+  const sha = sha256(canonicalQueueText);
+
+  const result = evaluateCutoverReadiness({
+    queue,
+    canonicalQueueText,
+    declaredQueueSha256: sha,
+    health: {
+      ...healthyInertHealth(),
+      schedulerAuthority: undefined,
+    },
+    d1: readyD1(queue, sha),
+    controlPlane: { schedules: [], deployments: [], observationErrors: [] },
+    authorityBoundaryIntact: true,
+    credentialBoundaryIntact: true,
+  });
+
+  assert.equal(result.observed.cloudflareAuthorityState, 'unknown');
+  assert.ok(
+    result.blockers.some((row) => row.id === 'cloudflare_authority_unobserved'),
+  );
+  assert.equal(
+    result.blockers.some((row) => row.id === 'cloudflare_authority_active'),
+    false,
+  );
 });

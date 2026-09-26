@@ -168,6 +168,16 @@ async function main() {
     credentialBoundaryIntact: credentialAudit.ok,
   });
 
+  const authoritySummary = result.observed.cloudflareAuthority;
+  const sanitizeError = (value) => {
+    if (typeof value !== 'string') return value;
+    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? '';
+    return accountId ? value.replaceAll(accountId, '***') : value;
+  };
+  const sanitizedD1Errors = d1Errors.map(sanitizeError);
+  const sanitizedControlPlaneErrors =
+    (controlPlane.observationErrors ?? []).map(sanitizeError);
+
   const evidence = {
     format: 1,
     issue: 46,
@@ -180,9 +190,17 @@ async function main() {
     blockers: result.blockers,
     observed: result.observed,
     observations: {
-      runtimeError: runtimeObservation.observationError,
-      d1Errors,
-      controlPlaneErrors: controlPlane.observationErrors ?? [],
+      runtimeError: sanitizeError(runtimeObservation.observationError),
+      runtimeStatus: runtimeObservation.health?.status ?? null,
+      dynamicRuntimeReason:
+        runtimeObservation.health?.dynamicRuntimeReadiness?.reason ?? null,
+      authorityReadinessReason:
+        runtimeObservation.health?.authorityReadiness?.reason ?? null,
+      authority: authoritySummary,
+      d1Errors: sanitizedD1Errors,
+      migrationNames: d1.migrationNames,
+      haltState: d1.haltState,
+      controlPlaneErrors: sanitizedControlPlaneErrors,
       controlPlane: controlPlane.cloudflare ?? null,
       authorityBoundaryError: authorityAudit.error,
       credentialBoundaryError: credentialAudit.error,
@@ -200,8 +218,17 @@ async function main() {
   console.log('XQUEUE #46 PRE-CUTOVER READINESS: ' + (result.ready ? 'PASS' : 'BLOCKED'));
   console.log('  committed UTC rows  ' + result.observed.committedUtcCount + '/' + result.observed.queueCount);
   console.log('  blockers            ' + (result.blockers.map((row) => row.id).join(', ') || 'none'));
-  console.log('  D1 read errors      ' + (d1Errors.length ? d1Errors.length : 'none'));
-  console.log('  control-plane errors ' + ((controlPlane.observationErrors ?? []).length || 'none'));
+  console.log('  authority state     ' + result.observed.cloudflareAuthorityState);
+  console.log('  authority flag      ' + String(authoritySummary.authorityFlag));
+  console.log('  authorized          ' + String(authoritySummary.authorized));
+  console.log('  live publication    ' + String(authoritySummary.livePublication));
+  console.log('  scheduler authority ' + String(authoritySummary.schedulerAuthority));
+  console.log('  dynamic reason      ' + (runtimeObservation.health?.dynamicRuntimeReadiness?.reason ?? 'none'));
+  console.log('  readiness reason    ' + (runtimeObservation.health?.authorityReadiness?.reason ?? 'none'));
+  console.log('  migration tail      ' + ((d1.migrationNames ?? []).slice(-8).join(',') || 'unavailable'));
+  console.log('  halt state          ' + (d1.haltState ? JSON.stringify(d1.haltState) : 'unavailable'));
+  console.log('  D1 read errors      ' + (sanitizedD1Errors.join(' | ') || 'none'));
+  console.log('  control-plane errors ' + (sanitizedControlPlaneErrors.join(' | ') || 'none'));
   console.log('  evidence            ' + resolve(OUTPUT));
 
   if (!result.ready) process.exitCode = 2;

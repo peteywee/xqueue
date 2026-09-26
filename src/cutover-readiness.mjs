@@ -69,17 +69,29 @@ export function evaluateCutoverReadiness({
     ));
   }
 
-  checks.cloudflareAuthoritySafelyInert = (
-    checks.productionHealthObserved &&
-    health?.authorityReadiness?.authorityFlag === false &&
-    health?.authorityReadiness?.authorized === false &&
-    health?.livePublication === false &&
-    health?.schedulerAuthority === false
-  );
+  const authorityFields = {
+    authorityFlag: health?.authorityReadiness?.authorityFlag,
+    authorized: health?.authorityReadiness?.authorized,
+    livePublication: health?.livePublication,
+    schedulerAuthority: health?.schedulerAuthority,
+  };
+  const authorityObservable = Object.values(authorityFields)
+    .every((value) => typeof value === 'boolean');
+  const authorityState = !authorityObservable
+    ? 'unknown'
+    : Object.values(authorityFields).some((value) => value === true)
+      ? 'active'
+      : 'inert';
+
+  checks.cloudflareAuthoritySafelyInert = authorityState === 'inert';
   if (!checks.cloudflareAuthoritySafelyInert) {
     blockers.push(blocker(
-      'cloudflare_authority_not_inert',
-      'Pre-cutover Cloudflare publication authority is not proven safely disabled.',
+      authorityState === 'active'
+        ? 'cloudflare_authority_active'
+        : 'cloudflare_authority_unobserved',
+      authorityState === 'active'
+        ? 'Cloudflare publication authority is active before the controlled transfer step.'
+        : 'Cloudflare publication authority state is not fully observable from production health.',
     ));
   }
 
@@ -158,6 +170,8 @@ export function evaluateCutoverReadiness({
       d1QueueCount: d1?.queueCount == null ? null : Number(d1.queueCount),
       unresolvedAttemptCount: d1?.unresolvedAttemptCount == null ? null : Number(d1.unresolvedAttemptCount),
       activeLeaseCount: d1?.activeLeaseCount == null ? null : Number(d1.activeLeaseCount),
+      cloudflareAuthorityState: authorityState,
+      cloudflareAuthority: Object.freeze({ ...authorityFields }),
     }),
   });
 }
