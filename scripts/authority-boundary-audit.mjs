@@ -111,18 +111,26 @@ gate(
   'inert publisher config is a separate scheduler-free Worker',
   publisherConfig.value.name === 'xqueue-publisher-production' &&
     publisherConfig.value.main === publisherWorkerPath &&
-    publisherDeclaresTriggers === false,
-  publisherConfig.value.name + ':' + publisherConfig.value.main,
+    publisherDeclaresTriggers === false &&
+    publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+  publisherConfig.value.name + ':' + publisherConfig.value.main + ':' +
+    String(publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing'),
 );
 
 gate(
   'authority config targets publisher-only Worker with exact cron',
   authorityConfig.value.name === 'xqueue-publisher-production' &&
     authorityConfig.value.main === publisherWorkerPath &&
+    authorityConfig.value.d1_databases?.[0]?.migrations_dir ===
+      'cloudflare/migrations-production' &&
+    authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled' &&
     Array.isArray(authorityCrons) &&
     authorityCrons.length === 1 &&
     authorityCrons[0] === '*/15 * * * *',
-  JSON.stringify(authorityCrons),
+  JSON.stringify({
+    crons: authorityCrons,
+    authority: authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? null,
+  }),
 );
 
 gate(
@@ -185,20 +193,19 @@ const allConfigRaw = [
   previewConfig.raw,
 ].join('\n');
 
-const nonPrepConfigRaw = [
-  defaultConfig.raw,
-  statusConfig.raw,
-  publisherConfig.raw,
-  authorityConfig.raw,
-  previewConfig.raw,
-].join('\n');
-
 gate(
-  'publication authority is hard-coded only as disabled in prep config',
-  !/XQUEUE_PUBLISH_AUTHORITY/.test(nonPrepConfigRaw) &&
+  'publication capability is explicit only on publisher cutover surfaces',
+  !/XQUEUE_PUBLISH_AUTHORITY/.test(defaultConfig.raw) &&
+    !/XQUEUE_PUBLISH_AUTHORITY/.test(statusConfig.raw) &&
+    !/XQUEUE_PUBLISH_AUTHORITY/.test(previewConfig.raw) &&
+    publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
     prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
-    !/XQUEUE_PUBLISH_AUTHORITY\s*["']?\s*[:=]\s*["']enabled["']/i.test(prepConfig.raw),
-  prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing',
+    authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled',
+  JSON.stringify({
+    inertPublisher: publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? null,
+    prep: prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? null,
+    authority: authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY ?? null,
+  }),
 );
 
 const publisher = workerFiles.find(

@@ -117,16 +117,22 @@ gate(
   'inert publisher config is separate and has no scheduler',
   publisher.name === 'xqueue-publisher-production' &&
     publisher.main === PUBLISHER_ENTRY &&
-    !Object.hasOwn(publisher, 'triggers'),
-  publisher.name + ':' + publisher.main,
+    !Object.hasOwn(publisher, 'triggers') &&
+    publisher.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+  publisher.name + ':' + publisher.main + ':' +
+    String(publisher.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing'),
 );
 
 gate(
   'authority config targets publisher-only Worker with one cron',
   authority.name === publisher.name &&
     authority.main === PUBLISHER_ENTRY &&
+    authority.d1_databases?.[0]?.migrations_dir === 'cloudflare/migrations-production' &&
+    authority.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled' &&
     JSON.stringify(authority.triggers?.crons) === JSON.stringify(['*/15 * * * *']),
-  authority.name + ':' + authority.main + ':' + JSON.stringify(authority.triggers?.crons ?? []),
+  authority.name + ':' + authority.main + ':' +
+    String(authority.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing') + ':' +
+    JSON.stringify(authority.triggers?.crons ?? []),
 );
 
 gate(
@@ -219,15 +225,15 @@ gate(
 );
 
 const configText = productionConfigs.map((value) => JSON.stringify(value)).join('\n');
-const nonPrepConfigText = [legacy, status, publisher, authority]
-  .map((value) => JSON.stringify(value))
-  .join('\n');
 gate(
-  'Wrangler configs contain no X credentials; prep carries only disabled authority sentinel',
+  'Wrangler configs contain no X credentials and capability vars are exact',
   !credentialRe.test(configText) &&
-    !/XQUEUE_PUBLISH_AUTHORITY/.test(nonPrepConfigText) &&
+    legacy.vars?.XQUEUE_PUBLISH_AUTHORITY === undefined &&
+    status.vars?.XQUEUE_PUBLISH_AUTHORITY === undefined &&
+    publisher.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
+    authority.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled' &&
     prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
-  'secrets remain external bindings; prep authority is disabled',
+  'secrets remain external; authority capability is repository-controlled',
 );
 
 if (failures.length > 0) {

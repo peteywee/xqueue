@@ -26,5 +26,8 @@
       "binding": "MEDIA",
       "bucket_name": "xqueue-media"
     }
-  ]
+  ],
+  "vars": {
+    "XQUEUE_PUBLISH_AUTHORITY": "disabled"
+  }
 }

@@ -33,7 +33,7 @@ Key invariants:
 - `confirmed_posted`, `confirmed_not_posted`, and `needs_reconciliation` remain distinct when publication outcomes are persisted.
 - An ambiguous create-post result blocks automatic retry until the owner reconciles it.
 - Production media validation blocks missing referenced figures.
-- Ordinary Cloudflare code deployment uses only the production Worker/D1 identity and cannot mutate scheduler authority because it declares no triggers.
+- Inert Cloudflare deployment is explicit: the status config removes cron triggers and the publisher config sets `XQUEUE_PUBLISH_AUTHORITY=disabled`; only the authority config enables the capability and adds the cron.
 - Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
 - Target Cloudflare publication authority is structurally isolated in `xqueue-publisher-production`; the legacy combined production descriptor remains in place only until #46 activation.
 - Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
@@ -45,8 +45,8 @@ Key invariants:
 The target production architecture separates status/read-only execution from publishing execution by Worker identity and module graph.
 
 - `wrangler.status.jsonc` targets `xqueue-production` with `cloudflare/src/status-worker.mjs`. It explicitly declares `triggers.crons: []` so deployment removes the legacy cron; the Worker has no scheduled handler, no publisher import, no service binding to the publisher, and must never receive X write credentials.
-- `wrangler.publisher.jsonc` targets the separate `xqueue-publisher-production` Worker with `cloudflare/src/publisher-worker.mjs`. It is intentionally inert and declares no cron.
-- `wrangler.authority.jsonc` is the future explicit scheduler-authority surface for `xqueue-publisher-production`. It pins exactly one cron: `*/15 * * * *`.
+- `wrangler.publisher.jsonc` targets the separate `xqueue-publisher-production` Worker with `cloudflare/src/publisher-worker.mjs`. It is intentionally inert, declares no cron, and explicitly sets `XQUEUE_PUBLISH_AUTHORITY=disabled`.
+- `wrangler.authority.jsonc` is the explicit scheduler-authority surface for `xqueue-publisher-production`. It uses the production-safe D1 migration lane, explicitly sets `XQUEUE_PUBLISH_AUTHORITY=enabled`, and pins exactly one cron: `*/15 * * * *`.
 - `wrangler.preview.jsonc` remains the non-authoritative preview surface.
 - `wrangler.jsonc` is retained as the legacy combined `xqueue-production` descriptor until the separately evidenced #46 cutover. Merging the structural split does not change the currently deployed entrypoint or move production secrets.
 - All production-role configs bind the same canonical production D1/R2 truth, while the preview config remains isolated from production D1 identity.

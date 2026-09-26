@@ -57,16 +57,27 @@ test('legacy production descriptor is frozen while target roles are separately a
   );
 
   assert.deepEqual(
-    { name: publisher.name, main: publisher.main, triggers: publisher.triggers },
+    {
+      name: publisher.name,
+      main: publisher.main,
+      triggers: publisher.triggers,
+      authority: publisher.vars?.XQUEUE_PUBLISH_AUTHORITY,
+    },
     {
       name: 'xqueue-publisher-production',
       main: 'cloudflare/src/publisher-worker.mjs',
       triggers: undefined,
+      authority: 'disabled',
     },
   );
 
   assert.equal(authority.name, publisher.name);
   assert.equal(authority.main, publisher.main);
+  assert.equal(authority.vars?.XQUEUE_PUBLISH_AUTHORITY, 'enabled');
+  assert.equal(
+    authority.d1_databases?.[0]?.migrations_dir,
+    'cloudflare/migrations-production',
+  );
   assert.deepEqual(authority.triggers?.crons, ['*/15 * * * *']);
 });
 
