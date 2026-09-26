@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   compileProductionAuthorityBootstrapSql,
+  compileProductionCloudflareRebindSql,
   compileProductionNoneToCloudflareSql,
 } from '../src/production-authority-sql.mjs';
 
@@ -50,6 +51,41 @@ test('production transfer rejects non-publisher deployment identities', () => {
       candidateSha: sha,
       deploymentId: 'cloudflare:wrong-worker',
       transitionId: 'bad',
+      eventAt: at,
+    }),
+    /exact Worker version/,
+  );
+});
+
+
+test('production cloudflare rebind is single same-owner generation 3 CAS', () => {
+  const deploymentId =
+    'cloudflare-worker:xqueue-publisher-production:version:' +
+    '41e43df4-c5d3-46eb-bf0d-d4e6d3103892';
+
+  const sql = compileProductionCloudflareRebindSql({
+    candidateSha: sha,
+    deploymentId,
+    transitionId: 'production-cloudflare-rebind-test',
+    eventAt: at,
+  });
+
+  assert.match(sql, /previous_owner[\s\S]*'cloudflare'/);
+  assert.match(sql, /next_owner[\s\S]*'cloudflare'/);
+  assert.match(sql, /owner = 'cloudflare'/);
+  assert.match(sql, /generation = 3/);
+  assert.match(sql, /deployment_id <>/);
+  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM authority_events WHERE generation >= 3\)/);
+  assert.match(sql, /xqueue-publisher-production/);
+  assert.doesNotMatch(sql, /runtime_metadata|publication_state|publication_events/);
+});
+
+test('production rebind rejects non-publisher deployment identities', () => {
+  assert.throws(
+    () => compileProductionCloudflareRebindSql({
+      candidateSha: sha,
+      deploymentId: 'cloudflare:wrong-worker',
+      transitionId: 'bad-rebind',
       eventAt: at,
     }),
     /exact Worker version/,

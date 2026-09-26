@@ -240,3 +240,121 @@ RETURNING
   transitioned_at,
   updated_at;`;
 }
+
+
+export function compileProductionCloudflareRebindSql({
+  candidateSha,
+  deploymentId,
+  transitionId,
+  eventAt,
+} = {}) {
+  const sha = sqlTextLiteral(requireSha(candidateSha));
+  const deploymentText = requireText(deploymentId, 'deploymentId');
+  if (!DEPLOYMENT_RE.test(deploymentText)) {
+    throw new TypeError(
+      'deploymentId must identify xqueue-publisher-production exact Worker version',
+    );
+  }
+  const deployment = sqlTextLiteral(deploymentText);
+  const transition = sqlTextLiteral(requireText(transitionId, 'transitionId'));
+  const at = sqlTextLiteral(requireIsoInstant(eventAt, 'eventAt'));
+  const detail = sqlTextLiteral(
+    'production authority deployment rebind: cloudflare -> cloudflare',
+  );
+
+  return `INSERT INTO authority_events (
+  generation,
+  transition_id,
+  previous_owner,
+  next_owner,
+  transition_state,
+  candidate_sha,
+  deployment_id,
+  event_at,
+  detail
+)
+SELECT
+  3,
+  ${transition},
+  'cloudflare',
+  'cloudflare',
+  'stable',
+  ${sha},
+  ${deployment},
+  ${at},
+  ${detail}
+WHERE EXISTS (
+  SELECT 1
+  FROM authority_state s
+  JOIN authority_events e
+    ON e.generation = s.generation
+   AND e.transition_id = s.transition_id
+  WHERE s.singleton_id = 1
+    AND s.owner = 'cloudflare'
+    AND s.generation = 2
+    AND s.transition_state = 'stable'
+    AND s.previous_owner = 'none'
+    AND s.deployment_id IS NOT NULL
+    AND s.deployment_id <> ${deployment}
+    AND e.previous_owner = 'none'
+    AND e.next_owner = 'cloudflare'
+    AND e.transition_state = 'stable'
+    AND lower(e.candidate_sha) = lower(s.candidate_sha)
+    AND e.deployment_id = s.deployment_id
+    AND e.event_at = s.transitioned_at
+)
+  AND NOT EXISTS (SELECT 1 FROM authority_events WHERE generation >= 3)
+RETURNING
+  generation,
+  transition_id,
+  previous_owner,
+  next_owner,
+  transition_state,
+  candidate_sha,
+  deployment_id,
+  event_at,
+  detail;
+
+UPDATE authority_state
+SET
+  owner = 'cloudflare',
+  generation = 3,
+  transition_state = 'stable',
+  transition_id = ${transition},
+  previous_owner = 'cloudflare',
+  candidate_sha = ${sha},
+  deployment_id = ${deployment},
+  transitioned_at = ${at},
+  updated_at = ${at}
+WHERE changes() = 1
+  AND singleton_id = 1
+  AND owner = 'cloudflare'
+  AND generation = 2
+  AND transition_state = 'stable'
+  AND previous_owner = 'none'
+  AND deployment_id IS NOT NULL
+  AND deployment_id <> ${deployment}
+  AND EXISTS (
+    SELECT 1
+    FROM authority_events
+    WHERE generation = 3
+      AND transition_id = ${transition}
+      AND previous_owner = 'cloudflare'
+      AND next_owner = 'cloudflare'
+      AND transition_state = 'stable'
+      AND lower(candidate_sha) = ${sha}
+      AND deployment_id = ${deployment}
+      AND event_at = ${at}
+  )
+RETURNING
+  singleton_id,
+  owner,
+  generation,
+  transition_state,
+  transition_id,
+  previous_owner,
+  candidate_sha,
+  deployment_id,
+  transitioned_at,
+  updated_at;`;
+}
