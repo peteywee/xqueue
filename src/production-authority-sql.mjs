@@ -1,8 +1,10 @@
 import { sqlTextLiteral } from './d1-mirror-sync-sql.mjs';
 
 const SHA40_RE = /^[0-9a-f]{40}$/i;
-const DEPLOYMENT_RE =
-  /^cloudflare-worker:xqueue-publisher-production:version:[0-9a-f-]{36}$/i;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEPLOYMENT_PREFIX =
+  'cloudflare-worker:xqueue-publisher-production:version:';
 
 function requireText(value, name) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -14,11 +16,19 @@ function requireText(value, name) {
   return value.trim();
 }
 
-function requireSha(value) {
+function requireSha(value, name = 'candidateSha') {
   if (typeof value !== 'string' || !SHA40_RE.test(value)) {
-    throw new TypeError('candidateSha must be a 40-hex commit SHA');
+    throw new TypeError(`${name} must be a 40-hex commit SHA`);
   }
   return value.toLowerCase();
+}
+
+function requireGeneration(value, name = 'expectedGeneration') {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new TypeError(`${name} must be a positive integer`);
+  }
+  return number;
 }
 
 function requireIsoInstant(value, name) {
@@ -28,6 +38,30 @@ function requireIsoInstant(value, name) {
     throw new TypeError(`${name} must be an exact ISO-8601 instant`);
   }
   return text;
+}
+
+export function parseProductionPublisherDeploymentId(value, name = 'deploymentId') {
+  const text = requireText(value, name);
+  if (!text.startsWith(DEPLOYMENT_PREFIX)) {
+    throw new TypeError(
+      `${name} must identify xqueue-publisher-production exact Worker version`,
+    );
+  }
+  const versionId = text.slice(DEPLOYMENT_PREFIX.length);
+  if (!UUID_RE.test(versionId)) {
+    throw new TypeError(
+      `${name} must identify xqueue-publisher-production exact Worker version`,
+    );
+  }
+  return Object.freeze({ deploymentId: text, versionId: versionId.toLowerCase() });
+}
+
+export function productionPublisherDeploymentId(versionId) {
+  const normalized = requireText(versionId, 'versionId').toLowerCase();
+  if (!UUID_RE.test(normalized)) {
+    throw new TypeError('versionId must be an exact Worker version UUID');
+  }
+  return DEPLOYMENT_PREFIX + normalized;
 }
 
 export function compileProductionAuthorityBootstrapSql({
@@ -74,56 +108,7 @@ RETURNING
   candidate_sha,
   deployment_id,
   event_at,
-  detail;
-
-INSERT INTO authority_state (
-  singleton_id,
-  owner,
-  generation,
-  transition_state,
-  transition_id,
-  previous_owner,
-  candidate_sha,
-  deployment_id,
-  transitioned_at,
-  updated_at
-)
-SELECT
-  1,
-  'none',
-  1,
-  'stable',
-  ${transition},
-  NULL,
-  ${sha},
-  NULL,
-  ${at},
-  ${at}
-WHERE changes() = 1
-  AND NOT EXISTS (SELECT 1 FROM authority_state)
-  AND EXISTS (
-    SELECT 1
-    FROM authority_events
-    WHERE generation = 1
-      AND transition_id = ${transition}
-      AND previous_owner IS NULL
-      AND next_owner = 'none'
-      AND transition_state = 'stable'
-      AND lower(candidate_sha) = ${sha}
-      AND deployment_id IS NULL
-      AND event_at = ${at}
-  )
-RETURNING
-  singleton_id,
-  owner,
-  generation,
-  transition_state,
-  transition_id,
-  previous_owner,
-  candidate_sha,
-  deployment_id,
-  transitioned_at,
-  updated_at;`;
+  detail;`;
 }
 
 export function compileProductionNoneToCloudflareSql({
@@ -133,12 +118,8 @@ export function compileProductionNoneToCloudflareSql({
   eventAt,
 } = {}) {
   const sha = sqlTextLiteral(requireSha(candidateSha));
-  const deploymentText = requireText(deploymentId, 'deploymentId');
-  if (!DEPLOYMENT_RE.test(deploymentText)) {
-    throw new TypeError(
-      'deploymentId must identify xqueue-publisher-production exact Worker version',
-    );
-  }
+  const deploymentText =
+    parseProductionPublisherDeploymentId(deploymentId).deploymentId;
   const deployment = sqlTextLiteral(deploymentText);
   const transition = sqlTextLiteral(requireText(transitionId, 'transitionId'));
   const at = sqlTextLiteral(requireIsoInstant(eventAt, 'eventAt'));
@@ -178,6 +159,7 @@ WHERE EXISTS (
     AND s.generation = 1
     AND s.transition_state = 'stable'
     AND s.previous_owner IS NULL
+    AND lower(s.candidate_sha) = ${sha}
     AND s.deployment_id IS NULL
     AND e.previous_owner IS NULL
     AND e.next_owner = 'none'
@@ -196,66 +178,41 @@ RETURNING
   candidate_sha,
   deployment_id,
   event_at,
-  detail;
-
-UPDATE authority_state
-SET
-  owner = 'cloudflare',
-  generation = 2,
-  transition_state = 'stable',
-  transition_id = ${transition},
-  previous_owner = 'none',
-  candidate_sha = ${sha},
-  deployment_id = ${deployment},
-  transitioned_at = ${at},
-  updated_at = ${at}
-WHERE changes() = 1
-  AND singleton_id = 1
-  AND owner = 'none'
-  AND generation = 1
-  AND transition_state = 'stable'
-  AND previous_owner IS NULL
-  AND deployment_id IS NULL
-  AND EXISTS (
-    SELECT 1
-    FROM authority_events
-    WHERE generation = 2
-      AND transition_id = ${transition}
-      AND previous_owner = 'none'
-      AND next_owner = 'cloudflare'
-      AND transition_state = 'stable'
-      AND lower(candidate_sha) = ${sha}
-      AND deployment_id = ${deployment}
-      AND event_at = ${at}
-  )
-RETURNING
-  singleton_id,
-  owner,
-  generation,
-  transition_state,
-  transition_id,
-  previous_owner,
-  candidate_sha,
-  deployment_id,
-  transitioned_at,
-  updated_at;`;
+  detail;`;
 }
-
 
 export function compileProductionCloudflareRebindSql({
   candidateSha,
   deploymentId,
+  previousCandidateSha,
+  previousDeploymentId,
+  expectedGeneration,
   transitionId,
   eventAt,
 } = {}) {
   const sha = sqlTextLiteral(requireSha(candidateSha));
-  const deploymentText = requireText(deploymentId, 'deploymentId');
-  if (!DEPLOYMENT_RE.test(deploymentText)) {
-    throw new TypeError(
-      'deploymentId must identify xqueue-publisher-production exact Worker version',
-    );
+  const previousSha = sqlTextLiteral(
+    requireSha(previousCandidateSha, 'previousCandidateSha'),
+  );
+  const deploymentText =
+    parseProductionPublisherDeploymentId(deploymentId).deploymentId;
+  const previousDeploymentText =
+    parseProductionPublisherDeploymentId(
+      previousDeploymentId,
+      'previousDeploymentId',
+    ).deploymentId;
+  if (deploymentText === previousDeploymentText) {
+    throw new TypeError('deploymentId must differ from previousDeploymentId');
   }
+
+  const generation = requireGeneration(expectedGeneration);
+  if (generation < 2) {
+    throw new TypeError('expectedGeneration must be >= 2 for Cloudflare rebind');
+  }
+  const nextGeneration = generation + 1;
+
   const deployment = sqlTextLiteral(deploymentText);
+  const previousDeployment = sqlTextLiteral(previousDeploymentText);
   const transition = sqlTextLiteral(requireText(transitionId, 'transitionId'));
   const at = sqlTextLiteral(requireIsoInstant(eventAt, 'eventAt'));
   const detail = sqlTextLiteral(
@@ -274,7 +231,7 @@ export function compileProductionCloudflareRebindSql({
   detail
 )
 SELECT
-  3,
+  ${nextGeneration},
   ${transition},
   'cloudflare',
   'cloudflare',
@@ -291,19 +248,20 @@ WHERE EXISTS (
    AND e.transition_id = s.transition_id
   WHERE s.singleton_id = 1
     AND s.owner = 'cloudflare'
-    AND s.generation = 2
+    AND s.generation = ${generation}
     AND s.transition_state = 'stable'
-    AND s.previous_owner = 'none'
-    AND s.deployment_id IS NOT NULL
-    AND s.deployment_id <> ${deployment}
-    AND e.previous_owner = 'none'
+    AND lower(s.candidate_sha) = ${previousSha}
+    AND s.deployment_id = ${previousDeployment}
+    AND e.generation = s.generation
     AND e.next_owner = 'cloudflare'
     AND e.transition_state = 'stable'
     AND lower(e.candidate_sha) = lower(s.candidate_sha)
     AND e.deployment_id = s.deployment_id
     AND e.event_at = s.transitioned_at
 )
-  AND NOT EXISTS (SELECT 1 FROM authority_events WHERE generation >= 3)
+  AND NOT EXISTS (
+    SELECT 1 FROM authority_events WHERE generation >= ${nextGeneration}
+  )
 RETURNING
   generation,
   transition_id,
@@ -313,48 +271,5 @@ RETURNING
   candidate_sha,
   deployment_id,
   event_at,
-  detail;
-
-UPDATE authority_state
-SET
-  owner = 'cloudflare',
-  generation = 3,
-  transition_state = 'stable',
-  transition_id = ${transition},
-  previous_owner = 'cloudflare',
-  candidate_sha = ${sha},
-  deployment_id = ${deployment},
-  transitioned_at = ${at},
-  updated_at = ${at}
-WHERE changes() = 1
-  AND singleton_id = 1
-  AND owner = 'cloudflare'
-  AND generation = 2
-  AND transition_state = 'stable'
-  AND previous_owner = 'none'
-  AND deployment_id IS NOT NULL
-  AND deployment_id <> ${deployment}
-  AND EXISTS (
-    SELECT 1
-    FROM authority_events
-    WHERE generation = 3
-      AND transition_id = ${transition}
-      AND previous_owner = 'cloudflare'
-      AND next_owner = 'cloudflare'
-      AND transition_state = 'stable'
-      AND lower(candidate_sha) = ${sha}
-      AND deployment_id = ${deployment}
-      AND event_at = ${at}
-  )
-RETURNING
-  singleton_id,
-  owner,
-  generation,
-  transition_state,
-  transition_id,
-  previous_owner,
-  candidate_sha,
-  deployment_id,
-  transitioned_at,
-  updated_at;`;
+  detail;`;
 }
