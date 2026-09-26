@@ -1,3 +1,5 @@
+
+> Historical status: this reverse-engineered roadmap drove the continuous-queue program. The implementation has now passed the #46 production cutover; current production authority and rollback instructions live in `docs/RUNBOOK.md`, while #48 tracks remaining program closeout. Future-tense descriptions below are retained as design history and are not current operator instructions.
 # XQueue Continuous Queue — Reverse Plan from End Goal to Current State
 
 Status: planning baseline
