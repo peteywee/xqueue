@@ -29,13 +29,14 @@ test('parity workflow is downstream of successful recovery and read-only', () =>
   assert.doesNotMatch(source, /wrangler d1 migrations/);
 });
 
-test('cutover preparation explicitly preserves authority isolation and rollback state', () => {
+test('cutover record preserves single authority and exact-version rollback safety', () => {
   const source = text('docs/recovery/static-dynamic-cutover-prep.md');
 
   assert.match(source, /#46 may not change publication authority/i);
   assert.match(source, /halt first/i);
   assert.match(source, /exactly one publication authority/i);
-  assert.match(source, /never restore an older D1 backup/i);
-  assert.match(source, /static path remains a \*\*rollback compatibility path\*\*/i);
-  assert.match(source, /production-publisher\.mjs.*bundled static queue/i);
+  assert.match(source, /never overwrites newer D1 evidence with an older backup/i);
+  assert.match(source, /local\/static publisher is no longer a safe routine rollback authority/i);
+  assert.match(source, /Cloudflare exact-version rollback/i);
+  assert.match(source, /verified D1\/R2 runtime truth/i);
 });
