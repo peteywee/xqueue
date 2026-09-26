@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   compileProductionAuthorityBootstrapSql,
+  compileProductionCloudflareRebindSql,
   compileProductionNoneToCloudflareSql,
 } from '../src/production-authority-sql.mjs';
 
@@ -13,6 +14,7 @@ const DB = 'xqueue-production';
 const CONFIG = 'wrangler.prep.jsonc';
 const CONFIRM_BOOTSTRAP = 'xqueue-production-authority-bootstrap';
 const CONFIRM_TRANSFER = 'xqueue-production-authority-transfer';
+const CONFIRM_REBIND = 'xqueue-production-authority-rebind';
 
 function run(invocation) {
   return new Promise((resolvePromise) => {
@@ -179,6 +181,22 @@ function exactTransfer(authority, head, deploymentId, transitionId, eventAt) {
   );
 }
 
+
+function exactRebind(authority, head, deploymentId, transitionId, eventAt) {
+  const s=authority.state, e=authority.event;
+  return Boolean(
+    s && e &&
+    s.owner==='cloudflare' && Number(s.generation)===3 && s.transition_state==='stable' &&
+    s.transition_id===transitionId && s.previous_owner==='cloudflare' &&
+    String(s.candidate_sha).toLowerCase()===head && s.deployment_id===deploymentId &&
+    s.transitioned_at===eventAt &&
+    Number(e.generation)===3 && e.transition_id===transitionId &&
+    e.previous_owner==='cloudflare' && e.next_owner==='cloudflare' && e.transition_state==='stable' &&
+    String(e.candidate_sha).toLowerCase()===head && e.deployment_id===deploymentId &&
+    e.event_at===eventAt
+  );
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const args=argsMap(argv);
   const action=args.get('action');
@@ -245,7 +263,42 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  throw new Error('action must be bootstrap or transfer');
+  if (action==='rebind') {
+    if (confirm!==CONFIRM_REBIND) throw new Error(`--confirm=${CONFIRM_REBIND} is required`);
+    const deploymentId=args.get('deployment-id');
+    if (typeof deploymentId!=='string' || deploymentId.length===0) {
+      throw new Error('--deployment-id=<exact publisher version identity> is required');
+    }
+    if (
+      before.state?.owner!=='cloudflare' || Number(before.state?.generation)!==2 ||
+      before.state?.transition_state!=='stable' ||
+      before.event?.next_owner!=='cloudflare' || Number(before.event?.generation)!==2
+    ) throw new Error('production authority is not exact stable owner=cloudflare generation 2');
+
+    if (before.state?.deployment_id===deploymentId) {
+      throw new Error('production authority rebind requires a different publisher version identity');
+    }
+
+    const eventAt=new Date().toISOString();
+    const transitionId=`production-cloudflare-rebind-${safety.head}`;
+    await executeTwoStatement(compileProductionCloudflareRebindSql({
+      candidateSha:safety.head,deploymentId,transitionId,eventAt,
+    }));
+
+    const after=await readAuthority();
+    if (!exactRebind(after,safety.head,deploymentId,transitionId,eventAt)) {
+      throw new Error('production authority rebind readback mismatch');
+    }
+
+    console.log(JSON.stringify({
+      ok:true,status:'confirmed_cloudflare_rebound',owner:'cloudflare',generation:3,
+      candidateSha:safety.head,deploymentId,transitionId,eventAt,
+      haltGeneration:safety.haltGeneration,
+    },null,2));
+    return;
+  }
+
+  throw new Error('action must be bootstrap, transfer, or rebind');
 }
 
 function isDirect() {
