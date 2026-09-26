@@ -1,6 +1,6 @@
 # Decision: Structural publishing credential separation
 
-Status: **approved by owner on 2026-09-21**
+Status: **approved 2026-09-21; production-activated by #46 on 2026-09-26**
 
 Issue: #45  
 Decision scope: AUTH-5 / OQ-AUTH-6
@@ -42,8 +42,8 @@ The publisher Worker has no normal HTTP publication route.
 
 - `wrangler.status.jsonc`: target status-only production deployment; explicit `triggers.crons: []` removes any previously deployed cron during #46 cutover.
 - `wrangler.publisher.jsonc`: inert publisher deployment; no triggers and explicit `XQUEUE_PUBLISH_AUTHORITY=disabled`.
-- `wrangler.authority.jsonc`: publisher authority activation surface; production-safe migration lane, explicit `XQUEUE_PUBLISH_AUTHORITY=enabled`, and exactly one 15-minute cron.
-- `wrangler.jsonc`: legacy compatibility descriptor retained unchanged until #46 so merging #45 does not change the currently deployed production entrypoint.
+- `wrangler.authority.jsonc`: publisher authority surface; production-safe migration lane, explicit `XQUEUE_PUBLISH_AUTHORITY=enabled`, exact Worker version metadata binding, and exactly one 15-minute cron.
+- `wrangler.jsonc`: legacy compatibility descriptor; it is not routine publication authority after #46.
 - `wrangler.preview.jsonc`: existing non-authoritative preview surface.
 
 ## Credential rule
@@ -52,8 +52,8 @@ X write secrets belong only to `xqueue-publisher-production`.
 
 The status-only module graph must not contain X credential names, X SDK imports, transport calls, the production publisher, or any scheduled handler.
 
-## Activation boundary
+## Activated boundary
 
-#45 creates and proves the structural boundary in repository artifacts. It does **not** deploy the new publisher, move production secrets, replace the current production entrypoint, activate the cron, or retire local/systemd rollback.
+#46 completed the control-plane transition: `xqueue-production` is status-only and scheduler-free, X write secrets exist only on `xqueue-publisher-production`, and the publisher has the single routine Cron authority.
 
-Those control-plane actions are reserved for the exact-candidate #46 cutover. Before activation, #46 must independently verify secret inventory and prove that `xqueue-production` has no X write secrets and `xqueue-publisher-production` is the only Cloudflare deployment that does.
+Post-cutover hardening requires every authority-capable Worker version to carry exact version metadata and a Git-SHA tag that matches durable D1 authority. Local/systemd is compatibility-only and must not regain routine production authority.
