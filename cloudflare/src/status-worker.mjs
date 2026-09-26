@@ -68,9 +68,14 @@ export default {
       ]);
 
       const healthy =
-        queueIntegrity.ok === true &&
         dynamicRuntimeReadiness.ok === true &&
         publicationHalt.ok === true;
+
+      const rollbackCompatibility = {
+        ...queueIntegrity,
+        authoritative: false,
+        purpose: 'static-rollback-compatibility',
+      };
 
       return json(
         {
@@ -82,8 +87,12 @@ export default {
           schedulerAuthority: false,
           publicationHalt,
           schedulerLiveness,
-          queueIntegrity,
-          dynamicRuntimeReadiness,
+          queueIntegrity: rollbackCompatibility,
+          dynamicRuntimeReadiness: {
+            ...dynamicRuntimeReadiness,
+            authoritative: true,
+            source: 'production-d1-r2',
+          },
           storage,
         },
         healthy ? {} : { status: 503 },
