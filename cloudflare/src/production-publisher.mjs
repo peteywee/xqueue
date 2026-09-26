@@ -361,7 +361,10 @@ export async function runScheduledPublication(
 
   let dynamicRuntime;
   try {
-    dynamicRuntime = await verifyRuntime(env, { verifyMedia: false });
+    dynamicRuntime = await verifyRuntime(env, {
+      verifyMedia: false,
+      includeSnapshot: true,
+    });
   } catch {
     return idle('dynamic_runtime_unavailable');
   }

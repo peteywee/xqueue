@@ -107,7 +107,7 @@ export async function evaluateAuthorityReadiness(
   const [mirroredLedger, lease, dynamicRuntime] = await Promise.all([
     readMirroredLedger(env),
     inspectLeaseReadOnly(env, nowMs),
-    verifyRuntime(env),
+    verifyRuntime(env, { includeSnapshot: true }),
   ]);
 
   let queue = null;

@@ -852,6 +852,7 @@ export async function verifyDynamicRuntime(
     expectedGeneration = null,
     expectedRevisionDigest = null,
     verifyMedia = true,
+    includeSnapshot = false,
   } = {},
 ) {
   const db = env?.DB;
@@ -994,7 +995,8 @@ export async function verifyDynamicRuntime(
     ok: true,
     authoritative: false,
     readOnly: true,
-    snapshot,
+    // HTTP health callers receive integrity evidence without unpublished text.
+    snapshot: includeSnapshot === true ? snapshot : null,
     reason: null,
     generation: state.generation,
     revisionDigest: state.revisionDigest,

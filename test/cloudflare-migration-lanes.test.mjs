@@ -60,7 +60,11 @@ test('production-safe lane preserves history and admits only production authorit
     .filter((name) => name.endsWith('.sql'))
     .sort();
 
-  assert.deepEqual(files, [\n    ...SHARED,\n    '0013_authority_ownership.sql',\n    '0014_authority_event_projection.sql',\n  ]);
+  assert.deepEqual(files, [
+    ...SHARED,
+    '0013_authority_ownership.sql',
+    '0014_authority_event_projection.sql',
+  ]);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
   assert.match(
     text('cloudflare/migrations-production/0013_authority_ownership.sql'),

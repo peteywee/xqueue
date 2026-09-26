@@ -7,6 +7,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { MEDIA_MANIFEST } from '../cloudflare/generated/media-manifest.mjs';
+import statusWorker from '../cloudflare/src/status-worker.mjs';
+import compatibilityWorker from '../cloudflare/src/worker.mjs';
 import {
   buildDynamicRuntimeSnapshot,
   publicationQueueFromSnapshot,
@@ -203,7 +205,7 @@ test('dynamic runtime accepts canonical 180 and grows to 181 with a new revision
     MEDIA: new MediaStub(),
   };
 
-  const first = await verifyDynamicRuntime(env);
+  const first = await verifyDynamicRuntime(env, { includeSnapshot: true });
   assert.equal(first.ok, true);
   assert.equal(first.authoritative, false);
   assert.equal(first.generation, 1);
@@ -315,6 +317,51 @@ test('dynamic runtime accepts canonical 180 and grows to 181 with a new revision
     false,
     'dynamic verifier must not pin lifetime queue capacity to 180',
   );
+});
+
+test('public health endpoints report runtime integrity without exposing queued content', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    seed180(db);
+    db.exec(text('cloudflare/migrations/0001_xqueue_runtime.sql'));
+    db.exec(text('cloudflare/migrations/0003_publication_lease.sql'));
+    db.exec(text('cloudflare/migrations/0011_global_publication_halt.sql'));
+    const snapshot = await buildDynamicRuntimeSnapshot(await readDynamicRuntimeRows(db));
+    db.exec(renderRuntimeRevisionInsertSql(nextRuntimeRevision({
+      currentState: null,
+      snapshot,
+      recordedAt: AT1,
+    })));
+
+    const env = {
+      DB: {
+        prepare(sql) {
+          const statement = db.prepare(sql);
+          let params = [];
+          return {
+            bind(...values) { params = values; return this; },
+            async first() { return statement.get(...params) ?? null; },
+            async all() { return { results: statement.all(...params) }; },
+          };
+        },
+      },
+      MEDIA: new MediaStub(),
+    };
+
+    for (const worker of [statusWorker, compatibilityWorker]) {
+      const response = await worker.fetch(new Request('https://x/health'), env);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.dynamicRuntimeReadiness.ok, true);
+      assert.equal(body.dynamicRuntimeReadiness.activeAssignmentCount, 180);
+      assert.equal(body.dynamicRuntimeReadiness.snapshot, null);
+      const serialized = JSON.stringify(body);
+      assert.equal(serialized.includes('publication_text'), false);
+      assert.equal(serialized.includes(snapshot.assignments[0].body), false);
+    }
+  } finally {
+    db.close();
+  }
 });
 
 test('dynamic snapshot fails closed on duplicate active content, duplicate slot, digest drift, and missing media', async () => {

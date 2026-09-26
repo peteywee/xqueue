@@ -37,6 +37,6 @@ test('cutover record preserves single authority and exact-version rollback safet
   assert.match(source, /exactly one publication authority/i);
   assert.match(source, /never overwrites newer D1 evidence with an older backup/i);
   assert.match(source, /local\/static publisher is no longer a safe routine rollback authority/i);
-  assert.match(source, /Cloudflare exact-version rollback/i);
+  assert.match(source, /Cloudflare exact-version\s+rollback/i);
   assert.match(source, /verified D1\/R2 runtime truth/i);
 });
