@@ -136,6 +136,52 @@ test('split topology rejects duplicate scheduling, split traffic, wrong version/
   }
 });
 
+
+test('legacy pre-cutover observation reads only the combined worker control plane', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init = {}) => {
+    seen.push(String(url));
+    assert.equal(init.method, 'GET');
+
+    if (String(url).endsWith('/schedules')) {
+      assert.ok(String(url).includes('/scripts/xqueue-production/schedules'));
+      return new Response(JSON.stringify({
+        success: true,
+        result: { schedules: [] },
+      }), { status: 200 });
+    }
+
+    if (String(url).endsWith('/deployments')) {
+      assert.ok(String(url).includes('/scripts/xqueue-production/deployments'));
+      return new Response(JSON.stringify({
+        success: true,
+        result: { deployments: deployments() },
+      }), { status: 200 });
+    }
+
+    if (String(url).includes('workers.dev/health')) {
+      return new Response(JSON.stringify(health()), { status: 200 });
+    }
+
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const observed = await observeDeploymentAuthority({
+    accountId: 'account-1',
+    token: 'read-token',
+    mode: 'legacy-precutover',
+    fetchImpl,
+  });
+
+  assert.deepEqual(observed.observationErrors, []);
+  assert.equal(observed.cloudflare.worker_name, 'xqueue-production');
+  assert.equal(observed.cloudflare.observation_mode, 'legacy-precutover');
+  assert.equal(observed.statusSchedules, null);
+  assert.equal(observed.version, null);
+  assert.equal(seen.some((url) => url.includes('/versions/')), false);
+  assert.equal(seen.filter((url) => url.endsWith('/schedules')).length, 1);
+});
+
 test('missing Cloudflare read credentials stays unknown', async () => {
   const observed = await observeDeploymentAuthority({
     accountId: '',
