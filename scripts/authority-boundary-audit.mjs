@@ -83,6 +83,7 @@ const previewConfig = readJsonc('wrangler.preview.jsonc');
 
 const defaultDeclaresTriggers = Object.hasOwn(defaultConfig.value, 'triggers');
 const statusDeclaresTriggers = Object.hasOwn(statusConfig.value, 'triggers');
+const statusCrons = statusConfig.value.triggers?.crons;
 const publisherDeclaresTriggers = Object.hasOwn(publisherConfig.value, 'triggers');
 const previewDeclaresTriggers = Object.hasOwn(previewConfig.value, 'triggers');
 const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
@@ -100,8 +101,10 @@ gate(
   'target status config is scheduler-free',
   statusConfig.value.name === 'xqueue-production' &&
     statusConfig.value.main === statusWorkerPath &&
-    statusDeclaresTriggers === false,
-  statusConfig.value.name + ':' + statusConfig.value.main,
+    statusDeclaresTriggers === true &&
+    Array.isArray(statusCrons) &&
+    statusCrons.length === 0,
+  statusConfig.value.name + ':' + JSON.stringify(statusCrons),
 );
 
 gate(
