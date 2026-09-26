@@ -5,6 +5,23 @@ import {
   runScheduledPublication,
 } from '../cloudflare/src/production-publisher.mjs';
 
+const CANDIDATE_SHA = '83c7ffffea11950960cee66b413006db827fec2d';
+const VERSION_ID = '8646c543-65f0-4353-a29b-5c457e914010';
+const DEPLOYMENT_ID =
+  'cloudflare-worker:xqueue-publisher-production:version:' + VERSION_ID;
+
+function dynamicRuntime() {
+  return {
+    ok: true,
+    snapshot: {
+      assignments: [],
+      deferred: [],
+      approvedUnscheduled: [],
+      media: [],
+    },
+  };
+}
+
 function ledger() {
   return {
     version: 1,
@@ -87,13 +104,15 @@ function baseDependencies(overrides = {}) {
         reason: null,
         state: {
           owner: 'cloudflare',
-          generation: 2,
+          generation: 3,
           transition_state: 'stable',
+          candidate_sha: CANDIDATE_SHA,
+          deployment_id: DEPLOYMENT_ID,
         },
       };
     },
-    async verifyQueueIntegrity() {
-      return { ok: true };
+    async verifyDynamicRuntime() {
+      return dynamicRuntime();
     },
     async readPublicationSnapshot() {
       return { raw: JSON.stringify(source), ledger: source };
@@ -101,7 +120,7 @@ function baseDependencies(overrides = {}) {
     evaluateEligibility() {
       return eligible();
     },
-    decodeBundledQueue() {
+    publicationQueueFromSnapshot() {
       return queue();
     },
     async readCurrentAssignmentHandle() {
@@ -203,6 +222,11 @@ function env() {
     XQUEUE_PUBLISH_AUTHORITY: 'enabled',
     DB: {},
     MEDIA: {},
+    CF_VERSION_METADATA: {
+      id: VERSION_ID,
+      tag: CANDIDATE_SHA,
+      timestamp: '2026-09-26T00:00:00.000Z',
+    },
   };
 }
 
@@ -215,9 +239,9 @@ test('halt present at transaction start fails closed before queue or X access', 
       async readGlobalPublicationHalt() {
         return closedHalt();
       },
-      async verifyQueueIntegrity() {
+      async verifyDynamicRuntime() {
         queueTouched = true;
-        return { ok: true };
+        return dynamicRuntime();
       },
     },
   });
@@ -237,9 +261,9 @@ test('unreadable halt store fails closed before transaction work begins', async 
       async readGlobalPublicationHalt() {
         throw new Error('D1 unavailable');
       },
-      async verifyQueueIntegrity() {
+      async verifyDynamicRuntime() {
         queueTouched = true;
-        return { ok: true };
+        return dynamicRuntime();
       },
     },
   });
