@@ -7,6 +7,7 @@ import {
   compileProductionAuthorityBootstrapSql,
   compileProductionCloudflareRebindSql,
   compileProductionNoneToCloudflareSql,
+  compileProductionOwnerTransitionSql,
 } from '../src/production-authority-sql.mjs';
 
 const candidate1 = '83c7ffffea11950960cee66b413006db827fec2d';
@@ -137,6 +138,92 @@ test('rebind refuses stale previous candidate/version without partial evidence',
   assert.equal(state(db).generation, 2);
   assert.equal(state(db).candidate_sha, candidate1);
   assert.equal(state(db).deployment_id, version1);
+});
+
+test('rollback ownership round-trip cloudflare -> local-systemd -> cloudflare is atomic', () => {
+  const db = fixture();
+  const localDeployment =
+    'systemd-user:xqueue.service:sha256:' + 'b'.repeat(64);
+
+  db.exec(compileProductionAuthorityBootstrapSql({
+    candidateSha: candidate1,
+    transitionId: 'bootstrap',
+    eventAt: '2026-09-26T00:00:00.000Z',
+  }));
+  db.exec(compileProductionNoneToCloudflareSql({
+    candidateSha: candidate1,
+    deploymentId: version1,
+    transitionId: 'transfer',
+    eventAt: '2026-09-26T00:01:00.000Z',
+  }));
+
+  db.exec(compileProductionOwnerTransitionSql({
+    previousOwner: 'cloudflare',
+    nextOwner: 'local-systemd',
+    previousCandidateSha: candidate1,
+    candidateSha: candidate1,
+    previousDeploymentId: version1,
+    deploymentId: localDeployment,
+    expectedGeneration: 2,
+    transitionId: 'rollback-local',
+    eventAt: '2026-09-26T00:02:00.000Z',
+  }));
+
+  assert.equal(state(db).owner, 'local-systemd');
+  assert.equal(state(db).generation, 3);
+  assert.equal(state(db).deployment_id, localDeployment);
+
+  db.exec(compileProductionOwnerTransitionSql({
+    previousOwner: 'local-systemd',
+    nextOwner: 'cloudflare',
+    previousCandidateSha: candidate1,
+    candidateSha: candidate2,
+    previousDeploymentId: localDeployment,
+    deploymentId: version2,
+    expectedGeneration: 3,
+    transitionId: 'restore-cloudflare',
+    eventAt: '2026-09-26T00:03:00.000Z',
+  }));
+
+  assert.equal(state(db).owner, 'cloudflare');
+  assert.equal(state(db).generation, 4);
+  assert.equal(state(db).candidate_sha, candidate2);
+  assert.equal(state(db).deployment_id, version2);
+  assert.equal(events(db).length, 4);
+});
+
+test('owner transition refuses stale prior projection without partial event', () => {
+  const db = fixture();
+  const localDeployment =
+    'systemd-user:xqueue.service:sha256:' + 'c'.repeat(64);
+
+  db.exec(compileProductionAuthorityBootstrapSql({
+    candidateSha: candidate1,
+    transitionId: 'bootstrap',
+    eventAt: '2026-09-26T00:00:00.000Z',
+  }));
+  db.exec(compileProductionNoneToCloudflareSql({
+    candidateSha: candidate1,
+    deploymentId: version1,
+    transitionId: 'transfer',
+    eventAt: '2026-09-26T00:01:00.000Z',
+  }));
+
+  db.exec(compileProductionOwnerTransitionSql({
+    previousOwner: 'cloudflare',
+    nextOwner: 'local-systemd',
+    previousCandidateSha: candidate2,
+    candidateSha: candidate1,
+    previousDeploymentId: version1,
+    deploymentId: localDeployment,
+    expectedGeneration: 2,
+    transitionId: 'stale-rollback',
+    eventAt: '2026-09-26T00:02:00.000Z',
+  }));
+
+  assert.equal(events(db).length, 2);
+  assert.equal(state(db).owner, 'cloudflare');
+  assert.equal(state(db).generation, 2);
 });
 
 test('replaying an already-consumed generation is an idempotent no-op', () => {
