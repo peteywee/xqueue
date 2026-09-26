@@ -12,6 +12,7 @@ import {
   APPROVED_UNSCHEDULED_SQL,
   buildDynamicRuntimeSnapshot,
   CURRENT_MEDIA_SQL,
+  DEFERRED_ASSIGNMENTS_SQL,
   RUNTIME_STATE_SQL,
 } from '../cloudflare/src/dynamic-runtime-integrity.mjs';
 import {
@@ -359,6 +360,7 @@ async function seedDynamicRuntime() {
 
   const snapshot = await buildDynamicRuntimeSnapshot({
     assignments: query(ACTIVE_ASSIGNMENTS_SQL),
+    deferred: query(DEFERRED_ASSIGNMENTS_SQL),
     approvedUnscheduled: query(APPROVED_UNSCHEDULED_SQL),
     media: query(CURRENT_MEDIA_SQL),
   });
