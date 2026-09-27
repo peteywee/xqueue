@@ -1,5 +1,8 @@
 import test from 'node:test';
-import assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\nimport { dirname, resolve } from 'node:path';\nimport { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   classifyCloudflareApiToken,
@@ -7,7 +10,8 @@ import {
   verifyCloudflareApiToken,
 } from '../src/cloudflare-auth.mjs';
 
-const HERE = dirname(fileURLToPath(import.meta.url));\nconst ACCOUNT_ID = 'a'.repeat(32);
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ACCOUNT_ID = 'a'.repeat(32);
 const ACCOUNT_TOKEN = 'cfat_' + 'a'.repeat(48);
 const USER_TOKEN = 'cfut_' + 'b'.repeat(48);
 
