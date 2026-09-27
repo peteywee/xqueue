@@ -15,6 +15,7 @@ import {
   simulatePublicationTransaction,
 } from '../../probes/cloudflare-x/simulation-harness.mjs';
 import { COST } from '../../src/cost-model.mjs';
+import { deferMissedAssignments } from '../../src/d1-deferred-lifecycle.mjs';
 
 import {
   publicationAuthorityEnabled,
@@ -307,6 +308,8 @@ export async function runScheduledPublication(
     dependencies.readGlobalPublicationHalt ?? readGlobalPublicationHalt;
   const inspectOwnership =
     dependencies.inspectAuthorityOwnership ?? inspectAuthorityOwnership;
+  const deferMissed =
+    dependencies.deferMissedAssignments ?? deferMissedAssignments;
 
   const initialHalt = await currentHaltVerdict(readHalt, env.DB);
   if (!initialHalt.ok) {
@@ -392,6 +395,55 @@ export async function runScheduledPublication(
   };
 
   const eligibility = evaluate(queue, sourceSnapshot.ledger, eligibilityOptions);
+
+  const overdue = Array.isArray(eligibility?.health?.overdue)
+    ? eligibility.health.overdue
+    : [];
+
+  if (overdue.length > 0) {
+    const haltBeforeDeferral = await currentHaltVerdict(readHalt, env.DB);
+    if (!haltBeforeDeferral.ok) {
+      return idle(haltBeforeDeferral.reason, {
+        halt: haltBeforeDeferral.halt,
+        eligibility,
+      });
+    }
+
+    let deferral;
+    try {
+      deferral = await deferMissed(env.DB, {
+        now,
+        graceMinutes: eligibilityOptions.graceMinutes,
+      });
+    } catch {
+      return idle('missed_deferral_failed', { eligibility });
+    }
+
+    const deferredIds = Array.isArray(deferral?.outcomes)
+      ? deferral.outcomes
+        .filter((outcome) =>
+          outcome?.status === 'deferred' ||
+          outcome?.status === 'already_deferred')
+        .map((outcome) => outcome.contentId)
+        .filter(Boolean)
+      : [];
+
+    if (deferredIds.length === 0) {
+      return idle('missed_deferral_incomplete', {
+        eligibility,
+        deferral,
+      });
+    }
+
+    return idle('missed_assignments_deferred', {
+      eligibility,
+      deferral: {
+        deferredIds,
+        runtimeRevision: deferral?.runtimeRevision ?? null,
+      },
+    });
+  }
+
   const post = selectedPost(queue, eligibility);
 
   if (!post) {

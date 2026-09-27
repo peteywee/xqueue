@@ -709,3 +709,192 @@ test('Worker-compatible render preserves the pillar B legal disclaimer', async (
 
   assert.match(renderedText, /General information, not legal advice\./);
 });
+
+
+test('publisher durably defers overdue assignments and never catch-up publishes in the same wake', async () => {
+  let deferralCalls = 0;
+  let leaseCalls = 0;
+  const source = ledger();
+
+  const result = await runScheduledPublication(
+    publisherEnv(),
+    {
+      now: new Date('2026-09-02T16:30:00.001Z'),
+      dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
+        async readPublicationSnapshot() {
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 1,
+            reason: 'released',
+            actorClass: 'owner',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
+        evaluateEligibility() {
+          return {
+            ...eligible(),
+            health: {
+              ...eligible().health,
+              ok: false,
+              due: ['C99'],
+              overdue: ['C99'],
+            },
+            safeToPublish: false,
+          };
+        },
+        publicationQueueFromSnapshot() { return queue(); },
+        async deferMissedAssignments() {
+          deferralCalls += 1;
+          return {
+            outcomes: [{
+              status: 'deferred',
+              reason: 'missed_slot_grace_expired',
+              contentId: 'C99',
+            }],
+            runtimeRevision: {
+              status: 'promoted',
+              generation: 10,
+              revisionDigest: 'a'.repeat(64),
+            },
+          };
+        },
+        async acquirePublicationLease() {
+          leaseCalls += 1;
+          throw new Error('must not acquire publication lease after deferral');
+        },
+      },
+    },
+  );
+
+  assert.equal(result.status, 'idle');
+  assert.equal(result.reason, 'missed_assignments_deferred');
+  assert.equal(result.dispatched, false);
+  assert.deepEqual(result.deferral.deferredIds, ['C99']);
+  assert.equal(result.deferral.runtimeRevision.generation, 10);
+  assert.equal(deferralCalls, 1);
+  assert.equal(leaseCalls, 0);
+});
+
+test('halt race before missed-slot deferral stops the lifecycle mutation', async () => {
+  let haltReads = 0;
+  let deferralCalls = 0;
+  const source = ledger();
+
+  const result = await runScheduledPublication(
+    publisherEnv(),
+    {
+      now: new Date('2026-09-02T16:30:00.001Z'),
+      dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
+        async readPublicationSnapshot() {
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        async readGlobalPublicationHalt() {
+          haltReads += 1;
+          if (haltReads === 1) {
+            return {
+              ok: true,
+              halted: false,
+              generation: 7,
+              reason: 'released',
+              actorClass: 'owner',
+              updatedAt: '2026-09-02T15:00:00.000Z',
+            };
+          }
+          return {
+            ok: true,
+            halted: true,
+            generation: 8,
+            reason: 'owner safety stop',
+            actorClass: 'owner',
+            updatedAt: '2026-09-02T16:29:59.000Z',
+          };
+        },
+        evaluateEligibility() {
+          return {
+            ...eligible(),
+            health: {
+              ...eligible().health,
+              ok: false,
+              due: ['C99'],
+              overdue: ['C99'],
+            },
+            safeToPublish: false,
+          };
+        },
+        publicationQueueFromSnapshot() { return queue(); },
+        async deferMissedAssignments() {
+          deferralCalls += 1;
+          throw new Error('must not mutate after halt');
+        },
+      },
+    },
+  );
+
+  assert.equal(result.status, 'idle');
+  assert.equal(result.reason, 'publication_halted');
+  assert.equal(result.dispatched, false);
+  assert.equal(haltReads, 2);
+  assert.equal(deferralCalls, 0);
+});
+
+test('missed-slot deferral ambiguity fails closed before lease or X access', async () => {
+  let leaseCalls = 0;
+  const source = ledger();
+
+  const result = await runScheduledPublication(
+    publisherEnv(),
+    {
+      now: new Date('2026-09-02T16:30:00.001Z'),
+      dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
+        async readPublicationSnapshot() {
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 7,
+            reason: 'released',
+            actorClass: 'owner',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
+        evaluateEligibility() {
+          return {
+            ...eligible(),
+            health: {
+              ...eligible().health,
+              ok: false,
+              due: ['C99'],
+              overdue: ['C99'],
+            },
+            safeToPublish: false,
+          };
+        },
+        publicationQueueFromSnapshot() { return queue(); },
+        async deferMissedAssignments() {
+          throw new Error('ambiguous deferral');
+        },
+        async acquirePublicationLease() {
+          leaseCalls += 1;
+          throw new Error('must not acquire');
+        },
+      },
+    },
+  );
+
+  assert.equal(result.status, 'idle');
+  assert.equal(result.reason, 'missed_deferral_failed');
+  assert.equal(result.dispatched, false);
+  assert.equal(leaseCalls, 0);
+});
