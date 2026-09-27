@@ -475,9 +475,16 @@ function itemPrecondition(item) {
   ];
 }
 
-export function renderReplacementFrontierClaimSql(plan, recordedAt) {
+export function renderReplacementFrontierClaimSql(
+  plan,
+  recordedAt,
+  { additionalGuardSql = null } = {},
+) {
   canonicalInstant(recordedAt, 'recordedAt');
   const guards = [currentRuntimeGuard(plan), ...plan.items.flatMap(itemPrecondition)];
+  if (typeof additionalGuardSql === 'string' && additionalGuardSql.trim().length > 0) {
+    guards.push('(' + additionalGuardSql.trim() + ')');
+  }
 
   return (
     'UPDATE queue_intake_frontier SET ' +
