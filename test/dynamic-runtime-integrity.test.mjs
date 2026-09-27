@@ -330,6 +330,12 @@ test('public health endpoints report runtime integrity without exposing queued c
     db.exec(text('cloudflare/migrations/0001_xqueue_runtime.sql'));
     db.exec(text('cloudflare/migrations/0003_publication_lease.sql'));
     db.exec(text('cloudflare/migrations/0011_global_publication_halt.sql'));
+    db.exec(`
+      UPDATE publication_halt_state
+      SET halted=1,generation=2,reason='dynamic runtime authority test',
+          actor_class='owner',updated_at='${AT1}'
+      WHERE singleton_id=1;
+    `);
     db.exec(text('cloudflare/migrations-production/0013_authority_ownership.sql'));
     db.exec(text('cloudflare/migrations-production/0014_authority_event_projection.sql'));
     db.exec(compileProductionAuthorityBootstrapSql({
@@ -338,6 +344,7 @@ test('public health endpoints report runtime integrity without exposing queued c
     db.exec(compileProductionNoneToCloudflareSql({
       candidateSha: 'a'.repeat(40), transitionId: 'transfer', eventAt: AT2,
       deploymentId: 'cloudflare-worker:xqueue-publisher-production:version:22222222-2222-2222-2222-222222222222',
+      expectedHaltGeneration: 2,
     }));
     const snapshot = await buildDynamicRuntimeSnapshot(await readDynamicRuntimeRows(db));
     db.exec(renderRuntimeRevisionInsertSql(nextRuntimeRevision({
