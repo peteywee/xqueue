@@ -193,6 +193,7 @@ export function parseOwnerClearResult(stdout, expected = {}) {
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  await verifyCloudflareApiToken();
 
   if (options.action === 'status') {
     const stdout = runWrangler(buildWranglerArgs({
