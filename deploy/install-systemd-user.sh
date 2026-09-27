@@ -6,7 +6,6 @@ UNIT_DIR="$HOME/.config/systemd/user"
 RUNTIME_DIR="$HOME/.config/xqueue"
 RUNTIME_ENV="$RUNTIME_DIR/runtime.env"
 SERVICE_SRC="$ROOT/deploy/systemd/xqueue.service"
-TIMER_SRC="$ROOT/deploy/systemd/xqueue.timer"
 RUNTIME_CHECK="$ROOT/deploy/systemd/check-runtime.sh"
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -108,7 +107,11 @@ install -m 0600 "$RUNTIME_TMP" "$RUNTIME_ENV"
 rm -f "$RUNTIME_TMP"
 
 install -m 0644 "$SERVICE_SRC" "$UNIT_DIR/xqueue.service"
-install -m 0644 "$TIMER_SRC" "$UNIT_DIR/xqueue.timer"
+
+# The local service is retained only as an explicit compatibility dry-run.
+# Remove the scheduler unit so this installer cannot recreate routine local
+# publication scheduling after the Cloudflare authority cutover.
+rm -f "$UNIT_DIR/xqueue.timer"
 
 systemctl --user daemon-reload
 systemctl --user reset-failed xqueue.service >/dev/null 2>&1 || true
@@ -122,23 +125,22 @@ if ! bash "$ROOT/scripts/production-preflight.sh"; then
   exit 1
 fi
 
-systemctl --user enable --now xqueue.timer
-
 printf '\n=== PINNED RUNTIME ===\n'
 cat "$RUNTIME_ENV"
 printf '\n=== INSTALLED UNIT ===\n'
 systemctl --user cat xqueue.service
-printf '\n=== TIMER ===\n'
-systemctl --user list-timers xqueue.timer --all --no-pager
+printf '\n=== TIMER RETIREMENT ===\n'
+printf 'xqueue.timer enabled state: %s\n' "$(systemctl --user is-enabled xqueue.timer 2>/dev/null || echo not-found)"
+printf 'xqueue.timer file present: %s\n' "$(test -e "$UNIT_DIR/xqueue.timer" && echo yes || echo no)"
 
 cat <<EOF
 
 XQUEUE SYSTEMD INSTALL: PASS
 
-The timer is enabled. The service is pinned to the Node/Corepack runtime that
-passed the isolated runtime check above. This installer did not invoke
-xqueue.service directly and did not publish a post. The next timer firing will
-run the normal fail-closed \`pnpm post:live\` eligibility check.
+The local timer is disabled and its installed unit is removed. The retained
+service is pinned to the Node/Corepack runtime that passed the isolated runtime
+check above and is compatibility dry-run only. This installer did not invoke
+xqueue.service, did not schedule it, and cannot publish a post.
 
 Previous scheduler files, if any, were preserved at:
 $BACKUP_DIR
