@@ -1,5 +1,5 @@
 import test from 'node:test';
-import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\nimport { dirname, resolve } from 'node:path';\nimport { fileURLToPath } from 'node:url';
 
 import {
   classifyCloudflareApiToken,
@@ -7,7 +7,7 @@ import {
   verifyCloudflareApiToken,
 } from '../src/cloudflare-auth.mjs';
 
-const ACCOUNT_ID = 'a'.repeat(32);
+const HERE = dirname(fileURLToPath(import.meta.url));\nconst ACCOUNT_ID = 'a'.repeat(32);
 const ACCOUNT_TOKEN = 'cfat_' + 'a'.repeat(48);
 const USER_TOKEN = 'cfut_' + 'b'.repeat(48);
 
@@ -127,4 +127,35 @@ test('inactive or rejected token fails without leaking the credential', async ()
       return true;
     },
   );
+});
+
+
+test('production halt and authority controls gate on typed token verification', () => {
+  const haltControl = readFileSync(
+    resolve(HERE, '../scripts/publication-halt-owner.mjs'),
+    'utf8',
+  );
+  const authorityControl = readFileSync(
+    resolve(HERE, '../scripts/production-authority-control.mjs'),
+    'utf8',
+  );
+
+  for (const source of [haltControl, authorityControl]) {
+    assert.match(
+      source,
+      /import \{ verifyCloudflareApiToken \} from '\.\.\/src\/cloudflare-auth\.mjs';/,
+    );
+    assert.match(source, /await verifyCloudflareApiToken\(\);/);
+  }
+});
+
+test('operator auth preflight proves D1 read capability without mutation SQL', () => {
+  const source = readFileSync(
+    resolve(HERE, '../scripts/cloudflare-auth-preflight.mjs'),
+    'utf8',
+  );
+
+  assert.match(source, /'SELECT 1 AS ok;'/);
+  assert.doesNotMatch(source, /'\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i);
+  assert.match(source, /verifyCloudflareApiToken/);
 });
