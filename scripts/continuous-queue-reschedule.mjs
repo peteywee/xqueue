@@ -28,16 +28,8 @@ import {
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
 
-const TARGETS = Object.freeze({
-  preview: Object.freeze({
-    database: 'xqueue-preview',
-    config: 'wrangler.preview.jsonc',
-  }),
-  production: Object.freeze({
-    database: 'xqueue-production',
-    config: 'wrangler.status.jsonc',
-  }),
-});
+const PREVIEW_DB = 'xqueue-preview';
+const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const POLICY = JSON.parse(
   readFileSync(new URL('../config/schedule-policy.json', import.meta.url), 'utf8'),
 );
@@ -95,12 +87,10 @@ function parseWranglerJson(stdout) {
   return rows;
 }
 
-let ACTIVE_TARGET = TARGETS.preview;
-
 function query(sql) {
   return parseWranglerJson(runWrangler([
-    'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
-    '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--json', '--command', sql,
+    'wrangler', 'd1', 'execute', PREVIEW_DB,
+    '--config', PREVIEW_CONFIG, '--remote', '--yes', '--json', '--command', sql,
   ]));
 }
 
@@ -110,8 +100,8 @@ function executeTransaction(sql) {
   try {
     writeFileSync(file, sql, 'utf8');
     runWrangler([
-      'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
-      '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--file', file,
+      'wrangler', 'd1', 'execute', PREVIEW_DB,
+      '--config', PREVIEW_CONFIG, '--remote', '--yes', '--file', file,
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -214,7 +204,7 @@ function readReplacementItem(item) {
 function printPlan(plan) {
   console.log(JSON.stringify({
     mode: 'dry-run',
-    environment,
+    environment: 'preview',
     operation_id: plan.operation_id,
     plan_digest: plan.plan_digest,
     replacement_mode: plan.mode,
@@ -238,10 +228,8 @@ function printPlan(plan) {
 }
 
 async function main() {
-  const environment = opt('env', 'preview');
-  ACTIVE_TARGET = TARGETS[environment];
-  if (!ACTIVE_TARGET) {
-    throw new Error('--env must be preview or production');
+  if (opt('env', 'preview') !== 'preview') {
+    throw new Error('replacement scheduling is hard-pinned to preview until dynamic cutover');
   }
 
   const mode = opt('mode', 'automatic');
@@ -253,7 +241,7 @@ async function main() {
   if (deferrals.length === 0) {
     console.log(JSON.stringify({
       status: 'nothing_to_replace',
-      environment,
+      environment: 'preview',
       mode,
     }, null, 2));
     return;
@@ -307,29 +295,8 @@ async function main() {
   }
 
   if (!flag('apply')) {
-    printPlan({ ...plan, environment });
+    printPlan(plan);
     return;
-  }
-
-  let productionGuardSql = null;
-  if (environment === 'production') {
-    const expectedHaltGeneration = Number(opt('expected-halt-generation'));
-    if (!Number.isSafeInteger(expectedHaltGeneration) || expectedHaltGeneration < 1) {
-      throw new Error(
-        'production replacement requires --expected-halt-generation <n>',
-      );
-    }
-    if (opt('confirm') !== 'xqueue-production-reschedule') {
-      throw new Error(
-        'production replacement requires --confirm xqueue-production-reschedule',
-      );
-    }
-
-    productionGuardSql =
-      "EXISTS (SELECT 1 FROM publication_halt_state " +
-      "WHERE singleton_id=1 AND halted=1 " +
-      "AND generation=" + expectedHaltGeneration + " " +
-      "AND actor_class='owner')";
   }
 
   const recordedAt = new Date().toISOString();
@@ -345,9 +312,7 @@ async function main() {
 
   const sql = [
     'BEGIN IMMEDIATE;',
-    renderReplacementFrontierClaimSql(plan, recordedAt, {
-      additionalGuardSql: productionGuardSql,
-    }),
+    renderReplacementFrontierClaimSql(plan, recordedAt),
     ...plan.items.map((item) => renderReplacementItemSql(plan, item, recordedAt)),
     renderRuntimeRevisionInsertSql(revision, {
       additionalGuardSql: renderReplacementSuccessGuardSql(plan),
@@ -379,7 +344,7 @@ async function main() {
 
   console.log(JSON.stringify({
     status: 'applied',
-    environment,
+    environment: 'preview',
     operation_id: plan.operation_id,
     replacement_mode: plan.mode,
     count: plan.count,
