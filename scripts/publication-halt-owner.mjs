@@ -123,8 +123,7 @@ function runWrangler(args) {
 
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    const detail = [result.stderr, result.stdout].filter(Boolean).join('
-').trim();
+    const detail = [result.stderr, result.stdout].filter(Boolean).join('\\n').trim();
     throw new Error('wrangler halt control failed' + (detail ? ': ' + detail : ''));
   }
 
