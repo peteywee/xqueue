@@ -290,6 +290,8 @@ export async function main(argv = process.argv.slice(2)) {
     throw new Error('--expected-halt-generation=<n> is required');
   }
 
+  await verifyCloudflareApiToken();
+
   const safety=await assertStaticSafety({ expectedHaltGeneration });
   const before=await readAuthority();
 
