@@ -12,6 +12,7 @@ import {
 const sha = 'fc9f105e24b8da64fc01dd8515b2dc646e9de1d2';
 const previousSha = '83c7ffffea11950960cee66b413006db827fec2d';
 const at = '2026-09-26T03:00:00.000Z';
+const haltGeneration = 6;
 const deploymentId =
   'cloudflare-worker:xqueue-publisher-production:version:' +
   'ddd904f7-9271-4c6b-9b91-e3da898bc349';
@@ -31,6 +32,17 @@ test('production deployment identity requires an exact UUID-shaped Worker versio
   assert.equal(
     productionPublisherDeploymentId('DDD904F7-9271-4C6B-9B91-E3DA898BC349'),
     deploymentId,
+  );
+
+  assert.deepEqual(
+    parseProductionPublisherDeploymentId(
+      'cloudflare-worker:xqueue-publisher-production:version:' +
+      'DDD904F7-9271-4C6B-9B91-E3DA898BC349',
+    ),
+    {
+      deploymentId,
+      versionId: 'ddd904f7-9271-4c6b-9b91-e3da898bc349',
+    },
   );
 
   for (const bad of [
@@ -64,6 +76,7 @@ test('production transfer is one none -> cloudflare generation 2 CAS at same can
   const sql = compileProductionNoneToCloudflareSql({
     candidateSha: sha,
     deploymentId,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'production-none-to-cloudflare-test',
     eventAt: at,
   });
@@ -73,6 +86,9 @@ test('production transfer is one none -> cloudflare generation 2 CAS at same can
   assert.match(sql, /next_owner[\s\S]*'cloudflare'/);
   assert.match(sql, /SELECT\s+2,/);
   assert.match(sql, /lower\(s\.candidate_sha\) = 'fc9f105e24b8da64fc01dd8515b2dc646e9de1d2'/);
+  assert.match(sql, /h\.halted = 1/);
+  assert.match(sql, /h\.generation = 6/);
+  assert.match(sql, /h\.actor_class = 'owner'/);
   assert.match(sql, /NOT EXISTS \(SELECT 1 FROM authority_events WHERE generation >= 2\)/);
   assert.doesNotMatch(sql, /UPDATE authority_state/);
 });
@@ -84,6 +100,7 @@ test('production transfer rejects malformed publisher deployment identities', ()
       deploymentId:
         'cloudflare-worker:xqueue-publisher-production:version:' +
         '------------------------------------',
+      expectedHaltGeneration: haltGeneration,
       transitionId: 'bad',
       eventAt: at,
     }),
@@ -98,6 +115,7 @@ test('production Cloudflare rebind is generic N -> N+1 with exact prior CAS', ()
     previousCandidateSha: previousSha,
     previousDeploymentId,
     expectedGeneration: 7,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'production-cloudflare-rebind-test',
     eventAt: at,
   });
@@ -111,6 +129,9 @@ test('production Cloudflare rebind is generic N -> N+1 with exact prior CAS', ()
   );
   assert.ok(sql.includes(previousDeploymentId));
   assert.ok(sql.includes(deploymentId));
+  assert.match(sql, /h\.halted = 1/);
+  assert.match(sql, /h\.generation = 6/);
+  assert.match(sql, /h\.actor_class = 'owner'/);
   assert.match(sql, /generation >= 8/);
   assert.doesNotMatch(sql, /UPDATE authority_state/);
 });
@@ -123,6 +144,7 @@ test('production rebind refuses same version and malformed prior version', () =>
       previousCandidateSha: previousSha,
       previousDeploymentId: deploymentId,
       expectedGeneration: 3,
+      expectedHaltGeneration: haltGeneration,
       transitionId: 'same-version',
       eventAt: at,
     }),
@@ -138,6 +160,7 @@ test('production rebind refuses same version and malformed prior version', () =>
         'cloudflare-worker:xqueue-publisher-production:version:' +
         '------------------------------------',
       expectedGeneration: 3,
+      expectedHaltGeneration: haltGeneration,
       transitionId: 'bad-prior',
       eventAt: at,
     }),
@@ -153,6 +176,7 @@ test('production rebind validates prior candidate and generation inputs', () => 
       previousCandidateSha: 'not-a-sha',
       previousDeploymentId,
       expectedGeneration: 3,
+      expectedHaltGeneration: haltGeneration,
       transitionId: 'bad-sha',
       eventAt: at,
     }),
@@ -166,6 +190,7 @@ test('production rebind validates prior candidate and generation inputs', () => 
       previousCandidateSha: previousSha,
       previousDeploymentId,
       expectedGeneration: 1,
+      expectedHaltGeneration: haltGeneration,
       transitionId: 'bad-generation',
       eventAt: at,
     }),
