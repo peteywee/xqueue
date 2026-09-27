@@ -324,8 +324,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (confirm!==CONFIRM_TRANSFER) {
       throw new Error(`--confirm=${CONFIRM_TRANSFER} is required`);
     }
-    const deploymentId=args.get('deployment-id');
-    parseProductionPublisherDeploymentId(deploymentId);
+    const deploymentId=
+      parseProductionPublisherDeploymentId(args.get('deployment-id')).deploymentId;
     if (
       before.state?.owner!=='none' || Number(before.state?.generation)!==1 ||
       before.state?.transition_state!=='stable' ||
@@ -335,10 +335,16 @@ export async function main(argv = process.argv.slice(2)) {
       throw new Error('production authority is not exact stable owner=none generation 1 at HEAD');
     }
 
+    await assertPublisherVersion(deploymentId, safety.head);
+
     const eventAt=new Date().toISOString();
     const transitionId=`production-none-to-cloudflare-${safety.head}`;
     await executeOneStatement(compileProductionNoneToCloudflareSql({
-      candidateSha:safety.head,deploymentId,transitionId,eventAt,
+      candidateSha:safety.head,
+      deploymentId,
+      expectedHaltGeneration:safety.haltGeneration,
+      transitionId,
+      eventAt,
     }));
 
     const after=await readAuthority();
@@ -359,8 +365,8 @@ export async function main(argv = process.argv.slice(2)) {
       throw new Error(`--confirm=${CONFIRM_REBIND} is required`);
     }
 
-    const deploymentId=args.get('deployment-id');
-    parseProductionPublisherDeploymentId(deploymentId);
+    const deploymentId=
+      parseProductionPublisherDeploymentId(args.get('deployment-id')).deploymentId;
 
     const currentGeneration=Number(before.state?.generation);
     if (
@@ -404,6 +410,7 @@ export async function main(argv = process.argv.slice(2)) {
       previousCandidateSha,
       previousDeploymentId,
       expectedGeneration:currentGeneration,
+      expectedHaltGeneration:safety.haltGeneration,
       transitionId,
       eventAt,
     }));
@@ -442,12 +449,12 @@ export async function main(argv = process.argv.slice(2)) {
       throw new Error(`--confirm=${CONFIRM_ROLLBACK} is required`);
     }
 
-    const deploymentId=args.get('deployment-id');
+    const deploymentId=
+      parseProductionPublisherDeploymentId(args.get('deployment-id')).deploymentId;
     const candidateSha=String(args.get('candidate-sha') ?? '').toLowerCase();
     if (!/^[0-9a-f]{40}$/.test(candidateSha)) {
       throw new Error('--candidate-sha=<exact prior git SHA> is required');
     }
-    parseProductionPublisherDeploymentId(deploymentId);
 
     const currentGeneration=Number(before.state?.generation);
     if (
@@ -492,6 +499,7 @@ export async function main(argv = process.argv.slice(2)) {
       previousCandidateSha,
       previousDeploymentId,
       expectedGeneration:currentGeneration,
+      expectedHaltGeneration:safety.haltGeneration,
       transitionId,
       eventAt,
     }));

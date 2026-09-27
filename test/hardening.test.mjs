@@ -37,7 +37,12 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTENT = resolve(HERE, '../content');
 const SYSTEMD_SERVICE = resolve(HERE, '../deploy/systemd/xqueue.service');
+const SYSTEMD_INSTALLER = resolve(HERE, '../deploy/install-systemd-user.sh');
 const SYSTEMD_RUNTIME_CHECK = resolve(HERE, '../deploy/systemd/check-runtime.sh');
+const PRODUCTION_AUTHORITY_CONTROL = resolve(
+  HERE,
+  '../scripts/production-authority-control.mjs',
+);
 
 function withTempDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'xqueue-hardening-'));
@@ -191,6 +196,36 @@ test('systemd compatibility service pins runtime and cannot publish live', () =>
   assert.match(unit, /post:dry/);
   assert.doesNotMatch(unit, /post:live/);
   assert.doesNotMatch(unit, /bash\s+-lc/);
+});
+
+test('systemd installer cannot recreate a local scheduler after cutover', () => {
+  const installer = readFileSync(SYSTEMD_INSTALLER, 'utf8');
+  assert.match(installer, /disable --now xqueue\.timer/);
+  assert.match(installer, /rm -f "\$UNIT_DIR\/xqueue\.timer"/);
+  assert.doesNotMatch(installer, /enable --now xqueue\.timer/);
+  assert.doesNotMatch(installer, /install -m 0644 "\$TIMER_SRC"/);
+  assert.doesNotMatch(installer, /post:live/);
+});
+
+test('production authority controller validates transfer version and carries halt CAS to every bind', () => {
+  const source = readFileSync(PRODUCTION_AUTHORITY_CONTROL, 'utf8');
+  const transferStart = source.indexOf("if (action==='transfer')");
+  const rebindStart = source.indexOf("if (action==='rebind')");
+  const rollbackStart = source.indexOf("if (action==='rollback-cloudflare')");
+
+  assert.ok(transferStart >= 0 && rebindStart > transferStart && rollbackStart > rebindStart);
+
+  const transfer = source.slice(transferStart, rebindStart);
+  const rebind = source.slice(rebindStart, rollbackStart);
+  const rollback = source.slice(rollbackStart);
+
+  assert.match(transfer, /await assertPublisherVersion\(deploymentId, safety\.head\)/);
+  for (const block of [transfer, rebind, rollback]) {
+    assert.match(
+      block,
+      /expectedHaltGeneration:safety\.haltGeneration/,
+    );
+  }
 });
 
 test('systemd runtime checker accepts explicit compatible binaries', () =>

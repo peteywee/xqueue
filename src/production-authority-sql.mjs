@@ -53,7 +53,11 @@ export function parseProductionPublisherDeploymentId(value, name = 'deploymentId
       `${name} must identify xqueue-publisher-production exact Worker version`,
     );
   }
-  return Object.freeze({ deploymentId: text, versionId: versionId.toLowerCase() });
+  const normalizedVersionId = versionId.toLowerCase();
+  return Object.freeze({
+    deploymentId: DEPLOYMENT_PREFIX + normalizedVersionId,
+    versionId: normalizedVersionId,
+  });
 }
 
 export function productionPublisherDeploymentId(versionId) {
@@ -114,6 +118,7 @@ RETURNING
 export function compileProductionNoneToCloudflareSql({
   candidateSha,
   deploymentId,
+  expectedHaltGeneration,
   transitionId,
   eventAt,
 } = {}) {
@@ -123,6 +128,10 @@ export function compileProductionNoneToCloudflareSql({
   const deployment = sqlTextLiteral(deploymentText);
   const transition = sqlTextLiteral(requireText(transitionId, 'transitionId'));
   const at = sqlTextLiteral(requireIsoInstant(eventAt, 'eventAt'));
+  const haltGeneration = requireGeneration(
+    expectedHaltGeneration,
+    'expectedHaltGeneration',
+  );
   const detail = sqlTextLiteral(
     'production authority transfer: none -> cloudflare',
   );
@@ -168,6 +177,14 @@ WHERE EXISTS (
     AND e.deployment_id IS NULL
     AND e.event_at = s.transitioned_at
 )
+  AND EXISTS (
+    SELECT 1
+    FROM publication_halt_state h
+    WHERE h.singleton_id = 1
+      AND h.halted = 1
+      AND h.generation = ${haltGeneration}
+      AND h.actor_class = 'owner'
+  )
   AND NOT EXISTS (SELECT 1 FROM authority_events WHERE generation >= 2)
 RETURNING
   generation,
@@ -187,6 +204,7 @@ export function compileProductionCloudflareRebindSql({
   previousCandidateSha,
   previousDeploymentId,
   expectedGeneration,
+  expectedHaltGeneration,
   transitionId,
   eventAt,
 } = {}) {
@@ -210,6 +228,10 @@ export function compileProductionCloudflareRebindSql({
     throw new TypeError('expectedGeneration must be >= 2 for Cloudflare rebind');
   }
   const nextGeneration = generation + 1;
+  const haltGeneration = requireGeneration(
+    expectedHaltGeneration,
+    'expectedHaltGeneration',
+  );
 
   const deployment = sqlTextLiteral(deploymentText);
   const previousDeployment = sqlTextLiteral(previousDeploymentText);
@@ -259,6 +281,14 @@ WHERE EXISTS (
     AND e.deployment_id = s.deployment_id
     AND e.event_at = s.transitioned_at
 )
+  AND EXISTS (
+    SELECT 1
+    FROM publication_halt_state h
+    WHERE h.singleton_id = 1
+      AND h.halted = 1
+      AND h.generation = ${haltGeneration}
+      AND h.actor_class = 'owner'
+  )
   AND NOT EXISTS (
     SELECT 1 FROM authority_events WHERE generation >= ${nextGeneration}
   )

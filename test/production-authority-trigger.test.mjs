@@ -11,6 +11,7 @@ import {
 
 const candidate1 = '83c7ffffea11950960cee66b413006db827fec2d';
 const candidate2 = 'fc9f105e24b8da64fc01dd8515b2dc646e9de1d2';
+const haltGeneration = 2;
 const version1 =
   'cloudflare-worker:xqueue-publisher-production:version:' +
   '8646c543-65f0-4353-a29b-5c457e914010';
@@ -20,6 +21,19 @@ const version2 =
 
 function fixture() {
   const db = new DatabaseSync(':memory:');
+  db.exec(readFileSync(
+    new URL('../cloudflare/migrations-production/0011_global_publication_halt.sql', import.meta.url),
+    'utf8',
+  ));
+  db.exec(`
+    UPDATE publication_halt_state
+    SET halted=1,
+        generation=${haltGeneration},
+        reason='authority mutation test halt',
+        actor_class='owner',
+        updated_at='2026-09-26T00:00:00.000Z'
+    WHERE singleton_id=1;
+  `);
   db.exec(readFileSync(
     new URL('../cloudflare/migrations-production/0013_authority_ownership.sql', import.meta.url),
     'utf8',
@@ -55,6 +69,7 @@ test('event append atomically projects bootstrap, transfer, and generic rebind',
   db.exec(compileProductionNoneToCloudflareSql({
     candidateSha: candidate1,
     deploymentId: version1,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'transfer',
     eventAt: '2026-09-26T00:01:00.000Z',
   }));
@@ -70,6 +85,7 @@ test('event append atomically projects bootstrap, transfer, and generic rebind',
     previousCandidateSha: candidate1,
     previousDeploymentId: version1,
     expectedGeneration: 2,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'rebind-g3',
     eventAt: '2026-09-26T00:02:00.000Z',
   }));
@@ -86,6 +102,7 @@ test('event append atomically projects bootstrap, transfer, and generic rebind',
     previousCandidateSha: candidate2,
     previousDeploymentId: version2,
     expectedGeneration: 3,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'rollback-g4',
     eventAt: '2026-09-26T00:03:00.000Z',
   }));
@@ -95,6 +112,94 @@ test('event append atomically projects bootstrap, transfer, and generic rebind',
   assert.equal(state(db).candidate_sha, candidate1);
   assert.equal(state(db).deployment_id, version1);
   assert.equal(events(db).length, 4);
+});
+
+test('transfer halt CAS refuses a clear or newer re-halt before the append', () => {
+  const db = fixture();
+
+  db.exec(compileProductionAuthorityBootstrapSql({
+    candidateSha: candidate1,
+    transitionId: 'bootstrap',
+    eventAt: '2026-09-26T00:00:00.000Z',
+  }));
+
+  const transferSql = compileProductionNoneToCloudflareSql({
+    candidateSha: candidate1,
+    deploymentId: version1,
+    expectedHaltGeneration: haltGeneration,
+    transitionId: 'transfer-race',
+    eventAt: '2026-09-26T00:01:00.000Z',
+  });
+
+  db.exec(`
+    UPDATE publication_halt_state
+    SET halted=0,generation=3,reason='owner clear',actor_class='owner',
+        updated_at='2026-09-26T00:00:30.000Z'
+    WHERE singleton_id=1;
+  `);
+  db.exec(transferSql);
+  assert.equal(events(db).length, 1);
+  assert.equal(state(db).owner, 'none');
+
+  db.exec(`
+    UPDATE publication_halt_state
+    SET halted=1,generation=4,reason='owner re-halt',actor_class='owner',
+        updated_at='2026-09-26T00:00:40.000Z'
+    WHERE singleton_id=1;
+  `);
+  db.exec(transferSql);
+  assert.equal(events(db).length, 1);
+  assert.equal(state(db).owner, 'none');
+});
+
+test('rebind and rollback shared CAS refuses a clear or newer re-halt before append', () => {
+  const db = fixture();
+
+  db.exec(compileProductionAuthorityBootstrapSql({
+    candidateSha: candidate1,
+    transitionId: 'bootstrap',
+    eventAt: '2026-09-26T00:00:00.000Z',
+  }));
+  db.exec(compileProductionNoneToCloudflareSql({
+    candidateSha: candidate1,
+    deploymentId: version1,
+    expectedHaltGeneration: haltGeneration,
+    transitionId: 'transfer',
+    eventAt: '2026-09-26T00:01:00.000Z',
+  }));
+
+  const mutationSql = compileProductionCloudflareRebindSql({
+    candidateSha: candidate2,
+    deploymentId: version2,
+    previousCandidateSha: candidate1,
+    previousDeploymentId: version1,
+    expectedGeneration: 2,
+    expectedHaltGeneration: haltGeneration,
+    transitionId: 'rebind-race',
+    eventAt: '2026-09-26T00:02:00.000Z',
+  });
+
+  db.exec(`
+    UPDATE publication_halt_state
+    SET halted=0,generation=3,reason='owner clear',actor_class='owner',
+        updated_at='2026-09-26T00:01:30.000Z'
+    WHERE singleton_id=1;
+  `);
+  db.exec(mutationSql);
+  assert.equal(events(db).length, 2);
+  assert.equal(state(db).generation, 2);
+  assert.equal(state(db).deployment_id, version1);
+
+  db.exec(`
+    UPDATE publication_halt_state
+    SET halted=1,generation=4,reason='owner re-halt',actor_class='owner',
+        updated_at='2026-09-26T00:01:40.000Z'
+    WHERE singleton_id=1;
+  `);
+  db.exec(mutationSql);
+  assert.equal(events(db).length, 2);
+  assert.equal(state(db).generation, 2);
+  assert.equal(state(db).deployment_id, version1);
 });
 
 test('trigger abort rolls back the event when projection preconditions fail', () => {
@@ -135,6 +240,7 @@ test('rebind refuses stale previous candidate/version without partial evidence',
   db.exec(compileProductionNoneToCloudflareSql({
     candidateSha: candidate1,
     deploymentId: version1,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'transfer',
     eventAt: '2026-09-26T00:01:00.000Z',
   }));
@@ -145,6 +251,7 @@ test('rebind refuses stale previous candidate/version without partial evidence',
     previousCandidateSha: candidate2,
     previousDeploymentId: version1,
     expectedGeneration: 2,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'wrong-prior',
     eventAt: '2026-09-26T00:02:00.000Z',
   }));
@@ -166,6 +273,7 @@ test('replaying an already-consumed generation is an idempotent no-op', () => {
   db.exec(compileProductionNoneToCloudflareSql({
     candidateSha: candidate1,
     deploymentId: version1,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'transfer',
     eventAt: '2026-09-26T00:01:00.000Z',
   }));
@@ -176,6 +284,7 @@ test('replaying an already-consumed generation is an idempotent no-op', () => {
     previousCandidateSha: candidate1,
     previousDeploymentId: version1,
     expectedGeneration: 2,
+    expectedHaltGeneration: haltGeneration,
     transitionId: 'rebind-g3',
     eventAt: '2026-09-26T00:02:00.000Z',
   });
