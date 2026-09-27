@@ -169,6 +169,7 @@ test('operator auth preflight proves D1 read capability without mutation SQL', (
 test('auth preflight targets production by default and preview explicitly', () => {
   assert.equal(parseEnvironment([]), 'production');
   assert.equal(parseEnvironment(['--environment', 'preview']), 'preview');
+  assert.equal(parseEnvironment(['--', '--environment', 'preview']), 'preview');
   assert.equal(parseEnvironment(['--environment=production']), 'production');
   assert.throws(
     () => parseEnvironment(['--environment', 'wrong']),
