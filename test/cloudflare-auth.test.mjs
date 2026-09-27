@@ -127,7 +127,8 @@ test('inactive or rejected token fails without leaking the credential', async ()
       }),
     (error) => {
       assert.match(error.message, /account API token verification failed/i);
-      assert.match(error.message, /1000: Invalid API Token/);
+      assert.match(error.message, /1000/);
+      assert.equal(error.message.includes('Invalid API Token'), false);
       assert.equal(error.message.includes(secret), false);
       return true;
     },
@@ -174,5 +175,38 @@ test('auth preflight targets production by default and preview explicitly', () =
   assert.throws(
     () => parseEnvironment(['--environment', 'wrong']),
     /environment must be preview or production/i,
+  );
+});
+
+
+test('server-reflected secret text is never surfaced', async () => {
+  const secret = ACCOUNT_TOKEN;
+
+  await assert.rejects(
+    () =>
+      verifyCloudflareApiToken({
+        token: secret,
+        accountId: ACCOUNT_ID,
+        fetchImpl: async () =>
+          response(
+            {
+              success: false,
+              errors: [
+                {
+                  code: 9999,
+                  message: 'credential=' + secret,
+                },
+              ],
+              result: null,
+            },
+            false,
+          ),
+      }),
+    (error) => {
+      assert.match(error.message, /9999/);
+      assert.equal(error.message.includes(secret), false);
+      assert.equal(error.message.includes('credential='), false);
+      return true;
+    },
   );
 });
