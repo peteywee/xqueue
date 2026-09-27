@@ -6,7 +6,7 @@ import {
   renderOwnerClearPublicationHaltSql,
   renderOwnerSetPublicationHaltSql,
   renderPublicationHaltStatusSql,
-} from '../src/publication-halt-owner.mjs';
+} from '../src/publication-halt-owner.mjs';\nimport { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 
 const TARGETS = Object.freeze({
   preview: {
