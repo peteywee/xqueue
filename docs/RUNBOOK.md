@@ -47,7 +47,13 @@ Before any production Cloudflare observation or mutation, load
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, then run:
 
 ```bash
-pnpm cf:auth:preflight
+pnpm cf:auth:preflight --environment production
+```
+
+For preview-only operator work use:
+
+```bash
+pnpm cf:auth:preflight --environment preview
 ```
 
 The preflight is fail-closed and never prints the token. It:
@@ -69,6 +75,11 @@ operator feedback, but skipping it cannot bypass the authentication gate.
 Do not hand-construct a token verification URL during an acceptance run.
 Use the repository preflight so token type determines the endpoint
 automatically.
+
+The `Cloudflare Auth Health` GitHub Actions workflow runs the same typed
+preflight against preview and production D1 on a schedule. Token rotation is
+not complete until the repository `CLOUDFLARE_API_TOKEN` secret is updated and
+that workflow passes.
 
 ## Production Worker topology
 
