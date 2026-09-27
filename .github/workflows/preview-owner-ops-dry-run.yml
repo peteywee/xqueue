@@ -46,6 +46,9 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Verify typed Cloudflare auth and preview D1 access
+        run: pnpm cf:auth:preflight -- --environment preview
+
       - name: Prove owner-operation guards locally
         run: |
           node --test \

@@ -10,6 +10,7 @@ import {
   compileProductionNoneToCloudflareSql,
   parseProductionPublisherDeploymentId,
 } from '../src/production-authority-sql.mjs';
+import { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 
 const DB = 'xqueue-production';
 const CONFIG = 'wrangler.prep.jsonc';
@@ -289,6 +290,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (!Number.isSafeInteger(expectedHaltGeneration) || expectedHaltGeneration < 1) {
     throw new Error('--expected-halt-generation=<n> is required');
   }
+
+  await verifyCloudflareApiToken();
 
   const safety=await assertStaticSafety({ expectedHaltGeneration });
   const before=await readAuthority();

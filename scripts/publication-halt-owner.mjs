@@ -7,6 +7,7 @@ import {
   renderOwnerSetPublicationHaltSql,
   renderPublicationHaltStatusSql,
 } from '../src/publication-halt-owner.mjs';
+import { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 
 const TARGETS = Object.freeze({
   preview: {
@@ -122,7 +123,7 @@ function runWrangler(args) {
 
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
+    const detail = [result.stderr, result.stdout].filter(Boolean).join('\\n').trim();
     throw new Error('wrangler halt control failed' + (detail ? ': ' + detail : ''));
   }
 
@@ -193,6 +194,7 @@ export function parseOwnerClearResult(stdout, expected = {}) {
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  await verifyCloudflareApiToken();
 
   if (options.action === 'status') {
     const stdout = runWrangler(buildWranglerArgs({
