@@ -49,20 +49,13 @@ export function cloudflareTokenVerifyUrl({ token, accountId }) {
   };
 }
 
-function renderErrors(payload) {
+function renderErrorCodes(payload) {
   const errors = Array.isArray(payload?.errors) ? payload.errors : [];
-  if (errors.length === 0) return 'no API error detail returned';
+  if (errors.length === 0) return 'no API error code returned';
 
   return errors
-    .map((item) => {
-      const code = item?.code == null ? 'unknown' : String(item.code);
-      const message =
-        typeof item?.message === 'string' && item.message.length > 0
-          ? item.message
-          : 'unknown error';
-      return code + ': ' + message;
-    })
-    .join('; ');
+    .map((item) => (item?.code == null ? 'unknown' : String(item.code)))
+    .join(',');
 }
 
 export async function verifyCloudflareApiToken({
@@ -112,7 +105,7 @@ export async function verifyCloudflareApiToken({
       'Cloudflare ' +
         tokenType +
         ' API token verification failed (' +
-        renderErrors(payload) +
+        renderErrorCodes(payload) +
         ')',
     );
   }
