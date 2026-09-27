@@ -9,6 +9,7 @@ import {
   cloudflareTokenVerifyUrl,
   verifyCloudflareApiToken,
 } from '../src/cloudflare-auth.mjs';
+import { parseEnvironment } from '../scripts/cloudflare-auth-preflight.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -162,4 +163,15 @@ test('operator auth preflight proves D1 read capability without mutation SQL', (
   assert.match(source, /'SELECT 1 AS ok;'/);
   assert.doesNotMatch(source, /'\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)\b/i);
   assert.match(source, /verifyCloudflareApiToken/);
+});
+
+
+test('auth preflight targets production by default and preview explicitly', () => {
+  assert.equal(parseEnvironment([]), 'production');
+  assert.equal(parseEnvironment(['--environment', 'preview']), 'preview');
+  assert.equal(parseEnvironment(['--environment=production']), 'production');
+  assert.throws(
+    () => parseEnvironment(['--environment', 'wrong']),
+    /environment must be preview or production/i,
+  );
 });
