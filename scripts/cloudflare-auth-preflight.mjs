@@ -4,19 +4,50 @@ import { spawnSync } from 'node:child_process';
 
 import { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 
-const DATABASE = 'xqueue-production';
-const CONFIG = 'wrangler.jsonc';
+const TARGETS = Object.freeze({
+  preview: Object.freeze({
+    database: 'xqueue-preview',
+    config: 'wrangler.preview.jsonc',
+  }),
+  production: Object.freeze({
+    database: 'xqueue-production',
+    config: 'wrangler.jsonc',
+  }),
+});
 
-function runD1ReadProbe() {
+export function parseEnvironment(argv = []) {
+  let environment = 'production';
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (arg === '--environment') {
+      environment = argv[index + 1];
+      index += 1;
+    } else if (arg.startsWith('--environment=')) {
+      environment = arg.slice('--environment='.length);
+    } else {
+      throw new Error('unknown argument: ' + arg);
+    }
+  }
+
+  if (!Object.hasOwn(TARGETS, environment)) {
+    throw new Error('environment must be preview or production');
+  }
+
+  return environment;
+}
+
+function runD1ReadProbe(target) {
   const result = spawnSync(
     'pnpm',
     [
       'wrangler',
       'd1',
       'execute',
-      DATABASE,
+      target.database,
       '--config',
-      CONFIG,
+      target.config,
       '--remote',
       '--yes',
       '--json',
@@ -37,7 +68,8 @@ function runD1ReadProbe() {
       .join('\n')
       .trim();
     throw new Error(
-      'Cloudflare D1 read capability probe failed' +
+      'Cloudflare D1 read capability probe failed for ' +
+        target.database +
         (detail ? ': ' + detail : ''),
     );
   }
@@ -58,20 +90,24 @@ function runD1ReadProbe() {
   }
 
   return {
-    database: DATABASE,
-    config: CONFIG,
+    database: target.database,
+    config: target.config,
     readable: true,
   };
 }
 
-export async function main() {
+export async function main(argv = process.argv.slice(2)) {
+  const environment = parseEnvironment(argv);
+  const target = TARGETS[environment];
+
   const auth = await verifyCloudflareApiToken();
-  const d1 = runD1ReadProbe();
+  const d1 = runD1ReadProbe(target);
 
   console.log(
     JSON.stringify(
       {
         ok: true,
+        environment,
         token_type: auth.tokenType,
         token_status: auth.status,
         expires_on: auth.expiresOn,
