@@ -9,7 +9,7 @@ import {
   compileProductionCloudflareRebindSql,
   compileProductionNoneToCloudflareSql,
   parseProductionPublisherDeploymentId,
-} from '../src/production-authority-sql.mjs';
+} from '../src/production-authority-sql.mjs';\nimport { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 
 const DB = 'xqueue-production';
 const CONFIG = 'wrangler.prep.jsonc';
