@@ -1,0 +1,57 @@
+name: Cloudflare Auth Health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 10 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/cloudflare-auth-health.yml'
+      - 'src/cloudflare-auth.mjs'
+      - 'scripts/cloudflare-auth-preflight.mjs'
+      - 'package.json'
+  pull_request:
+    paths:
+      - '.github/workflows/cloudflare-auth-health.yml'
+      - 'src/cloudflare-auth.mjs'
+      - 'scripts/cloudflare-auth-preflight.mjs'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-cloudflare-credential:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify typed token and preview D1 access
+        run: pnpm cf:auth:preflight -- --environment preview
+
+      - name: Verify typed token and production D1 access
+        run: pnpm cf:auth:preflight -- --environment production
