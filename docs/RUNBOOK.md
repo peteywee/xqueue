@@ -41,6 +41,35 @@ pnpm post:dry
 
 `pnpm post:dry` is safe and performs no X mutation. `pnpm post:live` is a legacy/local capability and must not be used as routine production authority after the D1 canonical cutover.
 
+## Cloudflare operator authentication preflight
+
+Before any production Cloudflare observation or mutation, load
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, then run:
+
+```bash
+pnpm cf:auth:preflight
+```
+
+The preflight is fail-closed and never prints the token. It:
+
+1. rejects whitespace, missing values, and unknown token formats;
+2. detects `cfat_` account-owned tokens and verifies them through the
+   account-scoped `/accounts/{account_id}/tokens/verify` endpoint;
+3. detects `cfut_` user tokens and verifies them through
+   `/user/tokens/verify`;
+4. requires token status `active`;
+5. performs a read-only `SELECT 1` against production D1 so a token that is
+   active but cannot read the canonical database is rejected before the
+   operator starts an acceptance sequence.
+
+The production halt controller and production authority controller also call
+the same typed verifier internally. A manual preflight therefore improves
+operator feedback, but skipping it cannot bypass the authentication gate.
+
+Do not hand-construct a token verification URL during an acceptance run.
+Use the repository preflight so token type determines the endpoint
+automatically.
+
 ## Production Worker topology
 
 ### Status Worker
