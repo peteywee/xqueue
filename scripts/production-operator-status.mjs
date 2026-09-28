@@ -108,7 +108,9 @@ export const STATUS_SQL = [
 
   "SELECT value,updated_at FROM runtime_metadata WHERE key='scheduler.last_invocation';",
 
-  "SELECT post_id,event_type,event_at FROM publication_events ORDER BY id DESC LIMIT 1;",
+  "SELECT post_id,event_type,event_at FROM publication_events",
+  "WHERE event_type IN ('posted','confirmed_not_posted','needs_reconciliation','reconciled_posted','reconciled_not_posted')",
+  "ORDER BY id DESC LIMIT 1;",
 ].join(' ');
 
 async function readHealth() {
