@@ -1,5 +1,7 @@
 # XQueue Production Runbook
 
+Canonical source/authority roles are summarized in `docs/architecture/source-of-truth.md`.
+
 ## Current production model
 
 XQueue is fail-closed and has one routine production publication authority:
@@ -40,6 +42,25 @@ pnpm post:dry
 ```
 
 `pnpm post:dry` is safe and performs no X mutation. `pnpm post:live` is a legacy/local capability and must not be used as routine production authority after the D1 canonical cutover.
+
+## Routine production status
+
+Use the read-only canonical status surface before ad-hoc D1 queries:
+
+```bash
+pnpm production:status
+pnpm production:status -- --json
+```
+
+Default runway thresholds are 14 days warning / 7 days critical and may be
+overridden with `--warning-days` and `--critical-days`. The command reports
+status but exits zero by default so monitoring itself cannot block valid
+publication. Use `--strict` only when a caller intentionally wants
+warning/critical status to become a non-zero monitoring result.
+
+The surface reads production D1 through `wrangler.status.jsonc`, runs the typed
+Cloudflare authentication preflight, and fetches the status-only Worker health.
+Its SQL contains only `SELECT` statements and it has no X/publication path.
 
 ## Cloudflare operator authentication preflight
 
@@ -415,3 +436,18 @@ The following remain owner-reserved:
 - provision/rotate X credentials;
 - change scheduling/content policy;
 - approve a future change to the single-publisher topology.
+
+
+## Production queue mutation boundary
+
+Canonical production runtime is active, but the original continuous-queue
+operator mutation CLIs remain preview-only. Do not repoint their preview
+database/config constants at production.
+
+Production intake, revise/rebind/cancel, and deferred replacement require the
+separate control-plane work tracked by #145. That work must establish a D1-safe
+atomic mutation boundary with exact owner halt generation, Cloudflare authority,
+runtime revision/assignment CAS, ambiguity readback, and concurrency tests.
+
+This limitation does not affect routine publishing. The publisher already
+durably defers overdue assignments and refuses stale catch-up publication.
