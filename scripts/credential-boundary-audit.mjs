@@ -9,6 +9,7 @@ const PRODUCTION_DB_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
 const STATUS_ENTRY = 'cloudflare/src/status-worker.mjs';
 const PUBLISHER_ENTRY = 'cloudflare/src/publisher-worker.mjs';
 const PRODUCTION_PUBLISHER = 'cloudflare/src/production-publisher.mjs';
+const PRODUCTION_CONTROL = 'cloudflare/src/production-control-local.mjs';
 const failures = [];
 
 function gate(name, ok, detail = '') {
@@ -90,11 +91,14 @@ const status = readJsonc('wrangler.status.jsonc');
 const publisher = readJsonc('wrangler.publisher.jsonc');
 const authority = readJsonc('wrangler.authority.jsonc');
 const prep = readJsonc('wrangler.prep.jsonc');
+const control = readJsonc('wrangler.control.jsonc');
 
 const statusGraph = collectGraph(STATUS_ENTRY);
 const publisherGraph = collectGraph(PUBLISHER_ENTRY);
+const controlGraph = collectGraph(PRODUCTION_CONTROL);
 const statusText = graphText(statusGraph);
 const publisherEntryText = read(PUBLISHER_ENTRY);
+const controlText = graphText(controlGraph);
 
 gate(
   'legacy production descriptor remains unchanged for #46 activation',
@@ -136,6 +140,21 @@ gate(
 );
 
 gate(
+  'local control config binds only remote production D1',
+  control.name === 'xqueue-production-control-local' &&
+    control.main === PRODUCTION_CONTROL &&
+    !Object.hasOwn(control, 'triggers') &&
+    control.d1_databases?.length === 1 &&
+    control.d1_databases?.[0]?.database_name === 'xqueue-production' &&
+    control.d1_databases?.[0]?.database_id === PRODUCTION_DB_ID &&
+    control.d1_databases?.[0]?.remote === true &&
+    control.r2_buckets === undefined &&
+    control.services === undefined &&
+    control.vars === undefined,
+  control.name + ':' + control.main,
+);
+
+gate(
   'prep config keeps combined Worker scheduled but publication-disabled',
   prep.name === 'xqueue-production' &&
     prep.main === 'cloudflare/src/worker.mjs' &&
@@ -145,9 +164,10 @@ gate(
 );
 
 const productionConfigs = [legacy, status, publisher, authority, prep];
+const productionStorageConfigs = [...productionConfigs, control];
 gate(
   'all production topology configs bind the same canonical D1',
-  productionConfigs.every(
+  productionStorageConfigs.every(
     (config) =>
       config.d1_databases?.length === 1 &&
       config.d1_databases[0].database_name === 'xqueue-production' &&
@@ -218,13 +238,24 @@ gate(
 );
 
 gate(
+  'control module graph has no X or media publication capability',
+  !credentialRe.test(controlText) &&
+    !publishRe.test(controlText) &&
+    ![...controlGraph.packages].some((name) => name.startsWith('@xdevplatform')) &&
+    !/\bscheduled\s*\(/.test(read(PRODUCTION_CONTROL)) &&
+    !/\bMEDIA\s*\./.test(controlText) &&
+    /env\.DB\.batch/.test(controlText),
+  [...controlGraph.files.keys()].join(', '),
+);
+
+gate(
   'publisher graph contains the X publication implementation',
   publishRe.test(graphText(publisherGraph)) ||
     [...publisherGraph.packages].some((name) => name === '@xdevplatform/xdk'),
   'publisher-only capability present',
 );
 
-const configText = productionConfigs.map((value) => JSON.stringify(value)).join('\n');
+const configText = productionStorageConfigs.map((value) => JSON.stringify(value)).join('\n');
 gate(
   'Wrangler configs contain no X credentials and capability vars are exact',
   !credentialRe.test(configText) &&
@@ -232,7 +263,8 @@ gate(
     status.vars?.XQUEUE_PUBLISH_AUTHORITY === undefined &&
     publisher.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
     authority.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled' &&
-    prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
+    prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
+    control.vars?.XQUEUE_PUBLISH_AUTHORITY === undefined,
   'secrets remain external; authority capability is repository-controlled',
 );
 
