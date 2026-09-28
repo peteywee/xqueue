@@ -70,6 +70,7 @@ const legacyWorkerPath = 'cloudflare/src/worker.mjs';
 const statusWorkerPath = 'cloudflare/src/status-worker.mjs';
 const publisherWorkerPath = 'cloudflare/src/publisher-worker.mjs';
 const productionPublisherPath = 'cloudflare/src/production-publisher.mjs';
+const productionControlPath = 'cloudflare/src/production-control-local.mjs';
 const publicationLedgerPath = 'cloudflare/src/publication-ledger.mjs';
 const publicationHaltPath = 'cloudflare/src/publication-halt.mjs';
 const schedulerLivenessPath = 'cloudflare/src/scheduler-liveness.mjs';
@@ -80,6 +81,7 @@ const publisherConfig = readJsonc('wrangler.publisher.jsonc');
 const authorityConfig = readJsonc('wrangler.authority.jsonc');
 const prepConfig = readJsonc('wrangler.prep.jsonc');
 const previewConfig = readJsonc('wrangler.preview.jsonc');
+const controlConfig = readJsonc('wrangler.control.jsonc');
 
 const defaultDeclaresTriggers = Object.hasOwn(defaultConfig.value, 'triggers');
 const statusDeclaresTriggers = Object.hasOwn(statusConfig.value, 'triggers');
@@ -152,6 +154,21 @@ gate(
   previewDeclaresTriggers ? 'triggers declared' : 'triggers omitted',
 );
 
+gate(
+  'local production control config is D1-only and scheduler-free',
+  controlConfig.value.name === 'xqueue-production-control-local' &&
+    controlConfig.value.main === productionControlPath &&
+    !Object.hasOwn(controlConfig.value, 'triggers') &&
+    controlConfig.value.d1_databases?.length === 1 &&
+    controlConfig.value.d1_databases?.[0]?.database_id === PRODUCTION_DB_ID &&
+    controlConfig.value.d1_databases?.[0]?.database_name === 'xqueue-production' &&
+    controlConfig.value.d1_databases?.[0]?.remote === true &&
+    controlConfig.value.r2_buckets === undefined &&
+    controlConfig.value.services === undefined &&
+    controlConfig.value.vars === undefined,
+  controlConfig.value.name + ':' + controlConfig.value.main,
+);
+
 const productionConfigs = [
   defaultConfig,
   statusConfig,
@@ -193,6 +210,7 @@ const allConfigRaw = [
   authorityConfig.raw,
   prepConfig.raw,
   previewConfig.raw,
+  controlConfig.raw,
 ].join('\n');
 
 gate(
@@ -200,6 +218,7 @@ gate(
   !/XQUEUE_PUBLISH_AUTHORITY/.test(defaultConfig.raw) &&
     !/XQUEUE_PUBLISH_AUTHORITY/.test(statusConfig.raw) &&
     !/XQUEUE_PUBLISH_AUTHORITY/.test(previewConfig.raw) &&
+    !/XQUEUE_PUBLISH_AUTHORITY/.test(controlConfig.raw) &&
     publisherConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
     prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled' &&
     authorityConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'enabled',
@@ -248,6 +267,7 @@ const credentialConfigHits = findMatches(
     { path: 'wrangler.authority.jsonc', text: authorityConfig.raw },
     { path: 'wrangler.prep.jsonc', text: prepConfig.raw },
     { path: 'wrangler.preview.jsonc', text: previewConfig.raw },
+    { path: 'wrangler.control.jsonc', text: controlConfig.raw },
   ],
   CREDENTIAL_RE,
 );
@@ -273,6 +293,21 @@ gate(
   'X transport surface is confined to production publisher',
   publishHitsOutsidePublisher.length === 0 && publisherHasCreate,
   publishHitsOutsidePublisher.join(' ') || productionPublisherPath,
+);
+
+const controlWorker =
+  workerFiles.find((file) => file.path === productionControlPath)?.text ?? '';
+
+gate(
+  'production control Worker is local D1 control only',
+  /XQUEUE_CONTROL_TOKEN/.test(controlWorker) &&
+    /env\.DB\.batch/.test(controlWorker) &&
+    /publicationCapable:\s*false/.test(controlWorker) &&
+    !CREDENTIAL_RE.test(controlWorker) &&
+    !PUBLISH_RE.test(controlWorker) &&
+    !/\bscheduled\s*\(/.test(controlWorker) &&
+    !/MEDIA\s*\./.test(controlWorker),
+  productionControlPath,
 );
 
 const statusWorker =
@@ -382,6 +417,7 @@ gate(
 const runtimeOwnerClearHits = findMatches(
   workerFiles,
   /\bSET\s+halted\s*=\s*0\b|\bactor_class\s*=\s*['"]owner['"]\b/i,
+  (path) => path === productionControlPath,
 );
 gate(
   'Worker runtime contains no owner-clear halt capability',
