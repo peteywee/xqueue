@@ -117,10 +117,11 @@ publisher trigger, captures a real halted scheduler invocation, and verifies
 durable pre-clear state.
 
 `--release` is never implied by `--apply`. Release additionally requires the
-literal confirmation `xqueue-production-acceptance`. After release the
-orchestrator captures the first qualifying scheduler invocation, verifies
-durable state, runs production health and TSAL evidence, then performs the
-logical backup and isolated restore proof.
+literal confirmation `xqueue-production-acceptance`. After release the orchestrator polls durable D1 evidence until it proves a
+fresh post-clear scheduler heartbeat, exact authority, clean publication state,
+and any expected missed-slot deferral. This avoids a log-tail attachment race.
+It then runs production health and TSAL evidence, followed by the logical
+backup and isolated restore proof.
 
 Evidence is stored outside the repository under:
 
