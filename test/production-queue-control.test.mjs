@@ -78,6 +78,13 @@ test('production control allows only known queue mutation tables', () => {
     () => validateMutationStatement('BEGIN IMMEDIATE'),
     /transaction\/schema-control SQL is forbidden/,
   );
+
+  assert.equal(
+    validateMutationStatement(
+      "INSERT INTO queue_content_events(detail) VALUES ('CREATE a better system; do not DROP context')",
+    ).table,
+    'queue_content_events',
+  );
 });
 
 test('SQL splitter preserves semicolons inside exact content literals', () => {
