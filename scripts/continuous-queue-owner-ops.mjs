@@ -306,7 +306,7 @@ async function applyRuntimeChangingOperation(options) {
 
 async function main() {
   if (opt('env', 'preview') !== 'preview') {
-    throw new Error('owner operations are hard-pinned to preview until dynamic cutover');
+    throw new Error('owner operations remain preview-only; production mutation control plane is tracked by #145');
   }
 
   const action = opt('action');
