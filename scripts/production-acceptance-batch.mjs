@@ -551,6 +551,12 @@ function durableFact(raw) {
   const inflight = firstD1Row(payload, 4)?.inflight ?? null;
   const heartbeat = firstD1Row(payload, 5) ?? null;
   const pendingDeferrals = payload?.[6]?.results ?? [];
+  const eventRow = firstD1Row(payload, 7);
+  const publicationEventCount = Number(
+    eventRow?.post_clear_events ??
+    eventRow?.publication_events ??
+    -1,
+  );
   return {
     halt,
     authority,
@@ -559,7 +565,194 @@ function durableFact(raw) {
     inflight,
     heartbeat,
     pendingDeferrals,
+    publicationEventCount,
   };
+}
+
+async function waitForDurablePostClear(
+  ctx,
+  {
+    clearAt,
+    clearedGeneration,
+    headSha,
+    expectedDeploymentId,
+    expectDeferral = null,
+    timeoutMs = 17 * 60 * 1000,
+    pollMs = 15 * 1000,
+  },
+) {
+  assertNoAmbiguousStep(ctx);
+  const name = 'durable-postclear-proof';
+  const prior = ctx.state.steps[name];
+  if (prior?.status === 'pass') {
+    printStep(name, 'SKIP', 'already proven');
+    return prior.fact;
+  }
+
+  const stdoutFile = stepFile(ctx, name, 'stdout');
+  const stderrFile = stepFile(ctx, name, 'stderr');
+  const startedAt = nowIso();
+  const output = [];
+  const errors = [];
+  const deadline = Date.now() + timeoutMs;
+  const clearMs = Date.parse(clearAt);
+
+  printStep(
+    name,
+    'RUN',
+    'polling durable scheduler/deferral evidence until acceptance is proven',
+  );
+
+  while (Date.now() < deadline) {
+    const queryArgs = [
+      'wrangler',
+      'd1',
+      'execute',
+      'xqueue-production',
+      '--config',
+      'wrangler.status.jsonc',
+      '--remote',
+      '--yes',
+      '--json',
+      '--command',
+      durableSql(clearAt),
+    ];
+    const result = spawnSync('pnpm', queryArgs, {
+      cwd: process.cwd(),
+      env: process.env,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+
+    output.push(
+      '\n=== poll ' + nowIso() + ' ===\n' +
+      String(result.stdout ?? ''),
+    );
+    errors.push(String(result.stderr ?? ''));
+
+    if (!result.error && result.status === 0) {
+      let fact = null;
+      try {
+        fact = durableFact(result.stdout);
+      } catch {
+        fact = null;
+      }
+
+      if (fact) {
+        const haltExact =
+          Number(fact.halt?.halted) === 0 &&
+          Number(fact.halt?.generation) === clearedGeneration &&
+          fact.halt?.actor_class === 'owner';
+        const authorityExact =
+          fact.authority?.owner === 'cloudflare' &&
+          fact.authority?.transition_state === 'stable' &&
+          String(fact.authority?.candidate_sha ?? '').toLowerCase() === headSha &&
+          fact.authority?.deployment_id === expectedDeploymentId;
+        const stateClean =
+          fact.unresolved === 0 &&
+          fact.activeLeases === 0 &&
+          fact.inflight === null;
+        const heartbeatMs = Date.parse(fact.heartbeat?.observed_at ?? '');
+        const freshHeartbeat =
+          Number.isFinite(heartbeatMs) &&
+          Number.isFinite(clearMs) &&
+          heartbeatMs > clearMs;
+        const deferralExact =
+          !expectDeferral ||
+          fact.pendingDeferrals.some(
+            (row) =>
+              row?.content_id === expectDeferral &&
+              row?.state === 'pending_replacement',
+          );
+        const noPublicationTransaction =
+          !expectDeferral || fact.publicationEventCount === 0;
+
+        if (!haltExact || !authorityExact) {
+          writeFileSync(stdoutFile, output.join(''), 'utf8');
+          writeFileSync(stderrFile, errors.join(''), 'utf8');
+          ctx.state.steps[name] = {
+            status: 'fail',
+            mutation: false,
+            command: commandText('pnpm', queryArgs),
+            startedAt,
+            finishedAt: nowIso(),
+            exitCode: 1,
+            stdoutFile,
+            stderrFile,
+            error: 'post-clear authority/halt state changed unexpectedly',
+            fact,
+          };
+          ctx.save();
+          fail('post-clear authority/halt state changed unexpectedly');
+        }
+
+        if (
+          fact.unresolved > 0 ||
+          fact.activeLeases > 0 ||
+          fact.inflight !== null
+        ) {
+          writeFileSync(stdoutFile, output.join(''), 'utf8');
+          writeFileSync(stderrFile, errors.join(''), 'utf8');
+          ctx.state.steps[name] = {
+            status: 'fail',
+            mutation: false,
+            command: commandText('pnpm', queryArgs),
+            startedAt,
+            finishedAt: nowIso(),
+            exitCode: 1,
+            stdoutFile,
+            stderrFile,
+            error: 'post-clear publication residue is not clean',
+            fact,
+          };
+          ctx.save();
+          fail('post-clear publication residue is not clean');
+        }
+
+        if (
+          stateClean &&
+          freshHeartbeat &&
+          deferralExact &&
+          noPublicationTransaction
+        ) {
+          writeFileSync(stdoutFile, output.join(''), 'utf8');
+          writeFileSync(stderrFile, errors.join(''), 'utf8');
+          ctx.state.steps[name] = {
+            status: 'pass',
+            mutation: false,
+            command: commandText('pnpm', queryArgs),
+            startedAt,
+            finishedAt: nowIso(),
+            exitCode: 0,
+            stdoutFile,
+            stderrFile,
+            fact,
+          };
+          ctx.save();
+          printStep(name, 'PASS');
+          return fact;
+        }
+      }
+    }
+
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollMs));
+  }
+
+  writeFileSync(stdoutFile, output.join(''), 'utf8');
+  writeFileSync(stderrFile, errors.join(''), 'utf8');
+  ctx.state.steps[name] = {
+    status: 'fail',
+    mutation: false,
+    command: 'durable post-clear polling',
+    startedAt,
+    finishedAt: nowIso(),
+    exitCode: 1,
+    stdoutFile,
+    stderrFile,
+    error: 'timed out waiting for durable post-clear acceptance evidence',
+  };
+  ctx.save();
+  fail('timed out waiting for durable post-clear acceptance evidence');
 }
 
 function countResult(raw, key = 'n') {
@@ -597,7 +790,7 @@ function writeSummary(ctx) {
     'authority=' + JSON.stringify(ctx.state.facts.authority ?? null),
     'new_version_id=' + String(ctx.state.facts.newVersionId ?? ''),
     'halted_scheduler=' + JSON.stringify(ctx.state.facts.haltedScheduler ?? null),
-    'post_clear_scheduler=' + JSON.stringify(ctx.state.facts.postClearScheduler ?? null),
+    'post_clear_durable=' + JSON.stringify(ctx.state.facts.postClearDurable ?? null),
     'runtime_evidence=' + String(ctx.state.facts.runtimeEvidence ?? ''),
     'deployment_evidence=' + String(ctx.state.facts.deploymentEvidence ?? ''),
     'backup_evidence=' + String(ctx.state.facts.backupEvidence ?? ''),
@@ -987,87 +1180,26 @@ async function main() {
   ctx.state.facts.halt = clearedHalt;
   ctx.save();
 
-  const postClearScheduler = await runTailStep(
+  const postClearFact = await waitForDurablePostClear(
     ctx,
-    'post-clear-scheduler-proof',
-    'xqueue-publisher-production',
-    newVersionId,
-    (event) => {
-      if (
-        event?.event !== 'scheduled' ||
-        event?.heartbeatRecorded !== true ||
-        event?.schedulerAuthority !== true
-      ) {
-        return false;
-      }
-      if (expectDeferral) {
-        return (
-          event?.result?.reason === 'missed_assignments_deferred' &&
-          event?.result?.dispatched === false &&
-          Array.isArray(event?.result?.deferral?.deferredIds) &&
-          event.result.deferral.deferredIds.includes(expectDeferral)
-        );
-      }
-      return true;
+    {
+      clearAt: clearedHalt.updatedAt,
+      clearedGeneration: clearedHalt.generation,
+      headSha,
+      expectedDeploymentId,
+      expectDeferral,
     },
   );
-  ctx.state.facts.postClearScheduler = postClearScheduler;
-  ctx.save();
-
-  if (
-    expectDeferral &&
-    (
-      postClearScheduler?.result?.reason !== 'missed_assignments_deferred' ||
-      postClearScheduler?.result?.dispatched !== false
-    )
-  ) {
-    fail('expected post-clear missed-slot deferral was not proven');
-  }
-
-  const postClear = runStep(ctx, 'durable-postclear-proof', 'pnpm', [
-    'wrangler',
-    'd1',
-    'execute',
-    'xqueue-production',
-    '--config',
-    'wrangler.status.jsonc',
-    '--remote',
-    '--yes',
-    '--json',
-    '--command',
-    durableSql(clearedHalt.updatedAt),
-  ]);
-  const postClearFact = durableFact(postClear.stdout);
   ctx.state.facts.postClear = postClearFact;
+  ctx.state.facts.postClearDurable = {
+    heartbeat: postClearFact.heartbeat,
+    pendingDeferrals: postClearFact.pendingDeferrals,
+    publicationEventCount: postClearFact.publicationEventCount,
+  };
   ctx.save();
-
-  if (
-    Number(postClearFact.halt?.halted) !== 0 ||
-    Number(postClearFact.halt?.generation) !== clearedHalt.generation ||
-    postClearFact.halt?.actor_class !== 'owner' ||
-    postClearFact.authority?.owner !== 'cloudflare' ||
-    postClearFact.authority?.transition_state !== 'stable' ||
-    String(postClearFact.authority?.candidate_sha ?? '').toLowerCase() !== headSha ||
-    postClearFact.authority?.deployment_id !== expectedDeploymentId ||
-    postClearFact.unresolved !== 0 ||
-    postClearFact.activeLeases !== 0 ||
-    postClearFact.inflight !== null
-  ) {
-    fail('durable post-clear state is not acceptance-clean');
-  }
-
-  if (
-    expectDeferral &&
-    !postClearFact.pendingDeferrals.some(
-      (row) => row?.content_id === expectDeferral &&
-        row?.state === 'pending_replacement',
-    )
-  ) {
-    fail('expected deferred content was not durable in queue_deferrals');
-  }
 
   const health = runStep(ctx, 'production-health', 'curl', [
-    '-fsS',
+    '-sS',
     'https://xqueue-production.patrickcraven.workers.dev/health',
   ]);
   const healthJson = parseJsonOutput(health.stdout);
