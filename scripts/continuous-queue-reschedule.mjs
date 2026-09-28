@@ -359,7 +359,12 @@ async function main() {
     renderReplacementFrontierReleaseSql(plan, recordedAt),
   ].join('\n');
 
-  await executeTransaction(sql);
+  let transactionError = null;
+  try {
+    await executeTransaction(sql);
+  } catch (error) {
+    transactionError = error;
+  }
 
   const runtimeRevision = query(
     'SELECT * FROM queue_runtime_revisions WHERE source_operation_id=' +
@@ -372,7 +377,13 @@ async function main() {
   };
   const status = classifyReplacementReadback(plan, observed);
   if (status !== 'complete') {
-    throw new Error('replacement scheduling readback is ' + status);
+    const suffix = transactionError
+      ? ': ' + String(transactionError.message ?? transactionError)
+      : '';
+    throw new Error(
+      'replacement exact readback is ' + status +
+      '; automatic retry is forbidden' + suffix,
+    );
   }
 
   const verified = await buildDynamicRuntimeSnapshot(runtimeRows());
