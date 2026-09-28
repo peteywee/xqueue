@@ -133,7 +133,80 @@ function productionGuard(db, expected) {
           AND json_extract(value,'$.inflight') IS NULL
       )
       THEN 1
-      ELSE abs(-9223372036854775808)
+      ELSE json_extract('x','
+    END AS xqueue_production_guard`,
+  ).bind(
+    expected.haltGeneration,
+    expected.candidateSha,
+    expected.deploymentId,
+  );
+}
+
+async function executeBatch(env, request) {
+  const supplied = request.headers.get('authorization') ?? '';
+  const expectedToken = 'Bearer ' + String(env.XQUEUE_CONTROL_TOKEN ?? '');
+  if (
+    !env.XQUEUE_CONTROL_TOKEN ||
+    supplied.length !== expectedToken.length ||
+    supplied !== expectedToken
+  ) {
+    return json({ ok: false, error: 'unauthorized' }, { status: 401 });
+  }
+
+  let body;
+  try {
+    body = normalizeBody(await request.json());
+  } catch (error) {
+    return json(
+      { ok: false, error: error instanceof Error ? error.message : String(error) },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const prepared = [
+      productionGuard(env.DB, body.expected),
+      ...body.statements.map((statement) => env.DB.prepare(statement)),
+    ];
+    const results = await env.DB.batch(prepared);
+    return json({
+      ok: true,
+      operationKind: body.operationKind,
+      guard: results[0] ?? null,
+      results: results.slice(1),
+    });
+  } catch (error) {
+    return json(
+      {
+        ok: false,
+        operationKind: body.operationKind,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      { status: 409 },
+    );
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/ready' && request.method === 'GET') {
+      return json({
+        ok: true,
+        service: 'xqueue-production-control-local',
+        publicationCapable: false,
+      });
+    }
+
+    if (url.pathname === '/batch' && request.method === 'POST') {
+      return executeBatch(env, request);
+    }
+
+    return json({ ok: false, error: 'not_found' }, { status: 404 });
+  },
+};
+)
     END AS xqueue_production_guard`,
   ).bind(
     expected.haltGeneration,
