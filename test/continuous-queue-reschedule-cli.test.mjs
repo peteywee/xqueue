@@ -6,14 +6,14 @@ function text(path) {
   return readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 }
 
-test('replacement scheduling command is preview-only and dry-run by default', () => {
+test('replacement scheduling remains preview-only and dry-run by default', () => {
   const source = text('scripts/continuous-queue-reschedule.mjs');
 
   assert.match(source, /const PREVIEW_DB = 'xqueue-preview'/);
   assert.match(source, /const PREVIEW_CONFIG = 'wrangler\.preview\.jsonc'/);
   assert.match(
     source,
-    /replacement scheduling is hard-pinned to preview until dynamic cutover/,
+    /replacement scheduling remains preview-only; production mutation control plane is tracked by #145/,
   );
   assert.match(source, /if \(!flag\('apply'\)\)/);
   assert.doesNotMatch(source, /xqueue-production/);
