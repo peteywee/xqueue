@@ -27,13 +27,26 @@ import {
   nextRuntimeRevision,
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
+import { ProductionControlSession } from '../src/production-control-client.mjs';
+import { readProductionMutationGuard } from './production-mutation-preflight.mjs';
 
-const PREVIEW_DB = 'xqueue-preview';
-const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
+const TARGETS = Object.freeze({
+  preview: Object.freeze({
+    database: 'xqueue-preview',
+    config: 'wrangler.preview.jsonc',
+  }),
+  production: Object.freeze({
+    database: 'xqueue-production',
+    config: 'wrangler.status.jsonc',
+  }),
+});
 const POLICY = JSON.parse(
   readFileSync(new URL('../config/schedule-policy.json', import.meta.url), 'utf8'),
 );
 const args = process.argv.slice(2);
+let ACTIVE_TARGET = TARGETS.preview;
+let ACTIVE_ENVIRONMENT = 'preview';
+let PRODUCTION_CONTROL = null;
 
 function flag(name) {
   return args.includes('--' + name);
@@ -89,19 +102,27 @@ function parseWranglerJson(stdout) {
 
 function query(sql) {
   return parseWranglerJson(runWrangler([
-    'wrangler', 'd1', 'execute', PREVIEW_DB,
-    '--config', PREVIEW_CONFIG, '--remote', '--yes', '--json', '--command', sql,
+    'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
+    '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--json', '--command', sql,
   ]));
 }
 
-function executeTransaction(sql) {
+async function executeTransaction(sql) {
+  if (ACTIVE_ENVIRONMENT === 'production') {
+    if (!PRODUCTION_CONTROL) {
+      throw new Error('production control session is not active');
+    }
+    await PRODUCTION_CONTROL.batch('deferred-replacement', sql);
+    return;
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'xqueue-reschedule-'));
   const file = join(dir, 'reschedule.sql');
   try {
-    writeFileSync(file, sql, 'utf8');
+    writeFileSync(file, 'BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;\n', 'utf8');
     runWrangler([
-      'wrangler', 'd1', 'execute', PREVIEW_DB,
-      '--config', PREVIEW_CONFIG, '--remote', '--yes', '--file', file,
+      'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
+      '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--file', file,
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -204,7 +225,7 @@ function readReplacementItem(item) {
 function printPlan(plan) {
   console.log(JSON.stringify({
     mode: 'dry-run',
-    environment: 'preview',
+    environment: ACTIVE_ENVIRONMENT,
     operation_id: plan.operation_id,
     plan_digest: plan.plan_digest,
     replacement_mode: plan.mode,
@@ -228,8 +249,11 @@ function printPlan(plan) {
 }
 
 async function main() {
-  if (opt('env', 'preview') !== 'preview') {
-    throw new Error('replacement scheduling remains preview-only; production mutation control plane is tracked by #145');
+  const environment = opt('env', 'preview');
+  ACTIVE_TARGET = TARGETS[environment];
+  ACTIVE_ENVIRONMENT = environment;
+  if (!ACTIVE_TARGET) {
+    throw new Error('--env must be preview or production');
   }
 
   const mode = opt('mode', 'automatic');
@@ -241,7 +265,7 @@ async function main() {
   if (deferrals.length === 0) {
     console.log(JSON.stringify({
       status: 'nothing_to_replace',
-      environment: 'preview',
+      environment: ACTIVE_ENVIRONMENT,
       mode,
     }, null, 2));
     return;
@@ -295,8 +319,24 @@ async function main() {
   }
 
   if (!flag('apply')) {
+    if (environment === 'production') {
+      runWrangler(['cf:auth:preflight', '--environment', 'production']);
+    }
     printPlan(plan);
     return;
+  }
+
+  if (environment === 'production') {
+    if (opt('confirm') !== 'xqueue-production-queue-mutation') {
+      throw new Error(
+        'production replacement requires --confirm xqueue-production-queue-mutation',
+      );
+    }
+    const guard = readProductionMutationGuard({
+      expectedHaltGeneration: opt('expected-halt-generation'),
+    });
+    PRODUCTION_CONTROL = new ProductionControlSession({ expected: guard });
+    await PRODUCTION_CONTROL.start();
   }
 
   const recordedAt = new Date().toISOString();
@@ -311,17 +351,15 @@ async function main() {
   });
 
   const sql = [
-    'BEGIN IMMEDIATE;',
     renderReplacementFrontierClaimSql(plan, recordedAt),
     ...plan.items.map((item) => renderReplacementItemSql(plan, item, recordedAt)),
     renderRuntimeRevisionInsertSql(revision, {
       additionalGuardSql: renderReplacementSuccessGuardSql(plan),
     }),
     renderReplacementFrontierReleaseSql(plan, recordedAt),
-    'COMMIT;',
   ].join('\n');
 
-  executeTransaction(sql);
+  await executeTransaction(sql);
 
   const runtimeRevision = query(
     'SELECT * FROM queue_runtime_revisions WHERE source_operation_id=' +
@@ -344,7 +382,7 @@ async function main() {
 
   console.log(JSON.stringify({
     status: 'applied',
-    environment: 'preview',
+    environment: ACTIVE_ENVIRONMENT,
     operation_id: plan.operation_id,
     replacement_mode: plan.mode,
     count: plan.count,
@@ -360,7 +398,11 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await PRODUCTION_CONTROL?.close();
+  });
