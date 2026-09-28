@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xqueue-production-control-local",
+  "main": "cloudflare/src/production-control-local.mjs",
+  "compatibility_date": "2026-09-02",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xqueue-production",
+      "database_id": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
+      "migrations_dir": "cloudflare/migrations-production",
+      "remote": true
+    }
+  ],
+  "triggers": {
+    "crons": []
+  }
+}
