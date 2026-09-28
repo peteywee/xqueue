@@ -6,21 +6,21 @@ function text(path) {
   return readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 }
 
-test('owner command remains preview-only and points production activation to #145', () => {
+test('owner command supports preview plus explicitly guarded production target', () => {
   const source = text('scripts/continuous-queue-owner-ops.mjs');
 
-  assert.match(source, /const PREVIEW_DB = 'xqueue-preview'/);
-  assert.match(source, /const PREVIEW_CONFIG = 'wrangler\.preview\.jsonc'/);
-  assert.match(
-    source,
-    /owner operations remain preview-only; production mutation control plane is tracked by #145/,
-  );
-  assert.doesNotMatch(source, /xqueue-production/);
-  assert.doesNotMatch(source, /fc85026e-bfc8-435f-8bb0-c60e139178a3/);
-  assert.doesNotMatch(source, /wrangler\.jsonc/);
+  assert.match(source, /database: 'xqueue-preview'/);
+  assert.match(source, /config: 'wrangler\.preview\.jsonc'/);
+  assert.match(source, /database: 'xqueue-production'/);
+  assert.match(source, /config: 'wrangler\.status\.jsonc'/);
+  assert.match(source, /readProductionMutationGuard/);
+  assert.match(source, /ProductionControlSession/);
+  assert.match(source, /--expected-halt-generation/);
+  assert.match(source, /xqueue-production-queue-mutation/);
+  assert.doesNotMatch(source, /production mutation control plane is tracked by #145/);
 });
 
-test('owner command is dry-run by default and requires explicit apply', () => {
+test('owner command is dry-run by default and production mutation requires explicit apply', () => {
   const source = text('scripts/continuous-queue-owner-ops.mjs');
 
   assert.match(source, /const apply = flag\('apply'\)/);
@@ -29,10 +29,11 @@ test('owner command is dry-run by default and requires explicit apply', () => {
   assert.doesNotMatch(source, /apply = true/);
 });
 
-test('runtime-changing owner operations use one immediate transaction and exact promotion guard', () => {
+test('preview owner operations retain immediate transaction while production uses D1 batch bridge', () => {
   const source = text('scripts/continuous-queue-owner-ops.mjs');
 
   assert.match(source, /BEGIN IMMEDIATE;/);
+  assert.match(source, /PRODUCTION_CONTROL\.batch\('owner-operation'/);
   assert.match(source, /renderOwnerMutationSuccessGuardSql\(plan\)/);
   assert.match(source, /additionalGuardSql/);
   assert.match(source, /projectOwnerRuntimeRows/);
