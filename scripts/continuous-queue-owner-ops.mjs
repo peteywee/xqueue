@@ -29,10 +29,23 @@ import {
   nextRuntimeRevision,
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
+import { ProductionControlSession } from '../src/production-control-client.mjs';
+import { readProductionMutationGuard } from './production-mutation-preflight.mjs';
 
-const PREVIEW_DB = 'xqueue-preview';
-const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
+const TARGETS = Object.freeze({
+  preview: Object.freeze({
+    database: 'xqueue-preview',
+    config: 'wrangler.preview.jsonc',
+  }),
+  production: Object.freeze({
+    database: 'xqueue-production',
+    config: 'wrangler.status.jsonc',
+  }),
+});
 const args = process.argv.slice(2);
+let ACTIVE_TARGET = TARGETS.preview;
+let ACTIVE_ENVIRONMENT = 'preview';
+let PRODUCTION_CONTROL = null;
 
 function flag(name) {
   return args.includes('--' + name);
@@ -96,26 +109,34 @@ function parseWranglerJson(stdout) {
 
 function query(sql) {
   return parseWranglerJson(runWrangler([
-    'wrangler', 'd1', 'execute', PREVIEW_DB,
-    '--config', PREVIEW_CONFIG, '--remote', '--yes', '--json', '--command', sql,
+    'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
+    '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--json', '--command', sql,
   ]));
 }
 
-function executeTransaction(sql) {
+async function executeTransaction(sql) {
+  if (ACTIVE_ENVIRONMENT === 'production') {
+    if (!PRODUCTION_CONTROL) {
+      throw new Error('production control session is not active');
+    }
+    await PRODUCTION_CONTROL.batch('owner-operation', sql);
+    return;
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'xqueue-owner-op-'));
   const file = join(dir, 'operation.sql');
   try {
     writeFileSync(file, 'BEGIN IMMEDIATE;\n' + sql + '\nCOMMIT;\n', 'utf8');
     runWrangler([
-      'wrangler', 'd1', 'execute', PREVIEW_DB,
-      '--config', PREVIEW_CONFIG, '--remote', '--yes', '--file', file,
+      'wrangler', 'd1', 'execute', ACTIVE_TARGET.database,
+      '--config', ACTIVE_TARGET.config, '--remote', '--yes', '--file', file,
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function requirePreviewSchema() {
+function requireSchema() {
   const names = query('SELECT name FROM d1_migrations ORDER BY id;').map((row) => row.name);
   for (const required of [
     '0006_continuous_queue_shadow.sql',
@@ -244,7 +265,7 @@ function readRevisionReadback(plan) {
 function printPlan(plan, extra = {}) {
   console.log(JSON.stringify({
     mode: 'dry-run',
-    environment: 'preview',
+    environment: ACTIVE_ENVIRONMENT,
     kind: plan.kind,
     operation_id: plan.operation_id,
     payload_digest: plan.payload_digest,
@@ -280,7 +301,7 @@ async function applyRuntimeChangingOperation(options) {
   const runtimeSql = renderRuntimeRevisionInsertSql(runtimeRevision, {
     additionalGuardSql: renderOwnerMutationSuccessGuardSql(plan),
   });
-  executeTransaction(mutationSql + '\n' + runtimeSql);
+  await executeTransaction(mutationSql + '\n' + runtimeSql);
 
   const stored = query(
     'SELECT generation,revision_digest,active_assignment_count,approved_unscheduled_count,' +
@@ -305,8 +326,11 @@ async function applyRuntimeChangingOperation(options) {
 }
 
 async function main() {
-  if (opt('env', 'preview') !== 'preview') {
-    throw new Error('owner operations remain preview-only; production mutation control plane is tracked by #145');
+  const environment = opt('env', 'preview');
+  ACTIVE_TARGET = TARGETS[environment];
+  ACTIVE_ENVIRONMENT = environment;
+  if (!ACTIVE_TARGET) {
+    throw new Error('--env must be preview or production');
   }
 
   const action = opt('action');
@@ -319,8 +343,25 @@ async function main() {
   if (!contentId) throw new Error('--content-id is required');
   if (!reason?.trim()) throw new Error('--reason is required');
 
-  requirePreviewSchema();
   const apply = flag('apply');
+
+  if (environment === 'production') {
+    runWrangler(['cf:auth:preflight', '--environment', 'production'], { capture: true });
+    if (apply) {
+      if (opt('confirm') !== 'xqueue-production-queue-mutation') {
+        throw new Error(
+          'production owner operation requires --confirm xqueue-production-queue-mutation',
+        );
+      }
+      const guard = readProductionMutationGuard({
+        expectedHaltGeneration: opt('expected-halt-generation'),
+      });
+      PRODUCTION_CONTROL = new ProductionControlSession({ expected: guard });
+      await PRODUCTION_CONTROL.start();
+    }
+  }
+
+  requireSchema();
   const content = readContent(contentId);
   const activeAssignment = readActiveAssignment(contentId);
   const publicationState = readPublicationState(contentId);
@@ -363,13 +404,13 @@ async function main() {
     }
 
     const recordedAt = new Date().toISOString();
-    executeTransaction(renderRevisionCreateSql(plan, { recordedAt }));
+    await executeTransaction(renderRevisionCreateSql(plan, { recordedAt }));
     const state = classifyRevisionReadback(plan, readRevisionReadback(plan));
     if (state !== 'complete') throw new Error('revision readback is ' + state);
 
     console.log(JSON.stringify({
       status: 'applied',
-      environment: 'preview',
+      environment: ACTIVE_ENVIRONMENT,
       kind: 'revise',
       operation_id: plan.operation_id,
       content_id: plan.content_id,
@@ -424,7 +465,7 @@ async function main() {
 
     console.log(JSON.stringify({
       status: 'applied',
-      environment: 'preview',
+      environment: ACTIVE_ENVIRONMENT,
       kind: 'rebind',
       operation_id: plan.operation_id,
       content_id: plan.content_id,
@@ -465,7 +506,7 @@ async function main() {
 
   console.log(JSON.stringify({
     status: 'applied',
-    environment: 'preview',
+    environment: ACTIVE_ENVIRONMENT,
     kind: 'cancel',
     operation_id: plan.operation_id,
     content_id: plan.content_id,
@@ -474,7 +515,11 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await PRODUCTION_CONTROL?.close();
+  });
