@@ -36,13 +36,26 @@ import {
   nextRuntimeRevision,
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
+import { ProductionControlSession } from '../src/production-control-client.mjs';
+import { readProductionMutationGuard } from './production-mutation-preflight.mjs';
 
-const PREVIEW_DB = 'xqueue-preview';
-const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
+const TARGETS = Object.freeze({
+  preview: Object.freeze({
+    database: 'xqueue-preview',
+    config: 'wrangler.preview.jsonc',
+  }),
+  production: Object.freeze({
+    database: 'xqueue-production',
+    config: 'wrangler.status.jsonc',
+  }),
+});
 const POLICY_FILE = resolve('config/schedule-policy.json');
 const RUNTIME_SCHEMA_MIGRATION = '0009_deferred_lifecycle.sql';
 
 const args = process.argv.slice(2);
+let ACTIVE_TARGET = TARGETS.preview;
+let ACTIVE_ENVIRONMENT = 'preview';
+let PRODUCTION_CONTROL = null;
 
 function flag(name) {
   return args.includes(`--${name}`);
@@ -104,9 +117,9 @@ function query(sql) {
     'wrangler',
     'd1',
     'execute',
-    PREVIEW_DB,
+    ACTIVE_TARGET.database,
     '--config',
-    PREVIEW_CONFIG,
+    ACTIVE_TARGET.config,
     '--remote',
     '--yes',
     '--json',
@@ -116,11 +129,26 @@ function query(sql) {
   return parseWranglerJson(stdout);
 }
 
-function executeCommand(sql) {
+async function executeCommand(sql) {
+  if (ACTIVE_ENVIRONMENT === 'production') {
+    if (!PRODUCTION_CONTROL) {
+      throw new Error('production control session is not active');
+    }
+    await PRODUCTION_CONTROL.batch('intake-phase', sql);
+    return;
+  }
   query(sql);
 }
 
-function executeFile(sql) {
+async function executeFile(sql) {
+  if (ACTIVE_ENVIRONMENT === 'production') {
+    if (!PRODUCTION_CONTROL) {
+      throw new Error('production control session is not active');
+    }
+    await PRODUCTION_CONTROL.batch('intake-phase', sql);
+    return;
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'xqueue-intake-'));
   const file = join(dir, 'operation.sql');
   try {
@@ -129,9 +157,9 @@ function executeFile(sql) {
       'wrangler',
       'd1',
       'execute',
-      PREVIEW_DB,
+      ACTIVE_TARGET.database,
       '--config',
-      PREVIEW_CONFIG,
+      ACTIVE_TARGET.config,
       '--remote',
       '--yes',
       '--file',
@@ -325,7 +353,7 @@ function transport() {
         recordedAt,
       });
 
-      executeCommand(renderRuntimeRevisionInsertSql(revision));
+      await executeCommand(renderRuntimeRevisionInsertSql(revision));
 
       const readback = runtimeRevisionForOperation(plan.operation_id);
       if (!readback) {
@@ -352,7 +380,7 @@ function requireSchema() {
   for (const required of [INTAKE_SCHEMA_MIGRATION, RUNTIME_SCHEMA_MIGRATION]) {
     if (!names.includes(required)) {
       throw new Error(
-        `preview intake schema is not active; apply ${required} to xqueue-preview first`,
+        `${ACTIVE_ENVIRONMENT} intake schema is not active; required migration: ${required}`,
       );
     }
   }
@@ -361,7 +389,7 @@ function requireSchema() {
 function printPlan(plan) {
   console.log(JSON.stringify({
     mode: 'dry-run',
-    environment: 'preview',
+    environment: ACTIVE_ENVIRONMENT,
     operation_id: plan.operation_id,
     plan_digest: plan.plan_digest,
     batch_digest: plan.batch_digest,
@@ -401,8 +429,27 @@ async function main() {
     throw new Error('--mode must be single or batch');
   }
   if (!file) throw new Error('intake requires --file <json>');
-  if (environment !== 'preview') {
-    throw new Error('production intake remains preview-only; production mutation control plane is tracked by #145');
+
+  ACTIVE_TARGET = TARGETS[environment];
+  ACTIVE_ENVIRONMENT = environment;
+  if (!ACTIVE_TARGET) {
+    throw new Error('--env must be preview or production');
+  }
+
+  if (environment === 'production') {
+    runWrangler(['cf:auth:preflight', '--environment', 'production']);
+    if (apply) {
+      if (opt('confirm') !== 'xqueue-production-queue-mutation') {
+        throw new Error(
+          'production intake requires --confirm xqueue-production-queue-mutation',
+        );
+      }
+      const guard = readProductionMutationGuard({
+        expectedHaltGeneration: opt('expected-halt-generation'),
+      });
+      PRODUCTION_CONTROL = new ProductionControlSession({ expected: guard });
+      await PRODUCTION_CONTROL.start();
+    }
   }
 
   requireSchema();
@@ -449,7 +496,7 @@ async function main() {
     plan.expected_runtime_revision_digest == null
   ) {
     throw new Error(
-      'preview runtime revision is not initialized; bootstrap #90 dynamic runtime evidence first',
+      ACTIVE_ENVIRONMENT + ' runtime revision is not initialized; bootstrap dynamic runtime evidence first',
     );
   }
 
@@ -460,7 +507,11 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await PRODUCTION_CONTROL?.close();
+  });
