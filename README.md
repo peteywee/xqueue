@@ -75,6 +75,7 @@ src/              parser, validator, scheduler, XDK client, CLI, safety modules
 test/             node:test suite including failure-path hardening tests
 docs/PLAN.md      full content plan
 docs/RUNBOOK.md   production operations and recovery procedures
+docs/architecture/source-of-truth.md   canonical source/authority map
 media/            deployment-local figure assets (gitignored)
 queue.json        generated local compatibility schedule (gitignored)
 state.json        local compatibility publication ledger (gitignored)
@@ -92,7 +93,8 @@ regeneration is portable across CI and production hosts.
 | `pnpm validate` | authoring validation; missing local media can be informational |
 | `pnpm validate:production` | production validation; all referenced media required |
 | `pnpm build` | regenerate `queue.json` from Markdown |
-| `pnpm health` | audit generated schedule against production policy |
+| `pnpm health` | audit generated compatibility schedule against policy |
+| `pnpm production:status` | read-only canonical D1 production runway/operator status |
 | `pnpm stats` | pillar split, runway, cost projection, publication state |
 | `pnpm next` | show upcoming unpublished posts |
 | `pnpm post` / `pnpm post:dry` | safe local compatibility dry-run; never X mutation |
@@ -120,6 +122,30 @@ The validator mechanically enforces content and publication policy, including:
 Authoring mode can operate on a machine where media has not been provisioned.
 Production mode cannot. Run `pnpm validate:production` on the actual publisher
 host before enabling the scheduler.
+
+## Production operator status
+
+Use the canonical D1-backed status surface for routine production inspection:
+
+```bash
+pnpm production:status
+pnpm production:status -- --json
+pnpm production:status -- --warning-days 14 --critical-days 7
+```
+
+It is read-only and reports scheduled future inventory, runway, approved-unscheduled
+inventory, pending deferrals, reconciliation state, next assignment, canonical
+runtime revision, policy versions, halt/authority state, scheduler heartbeat,
+and the latest publication event. By default warning/critical state is reported
+without a non-zero exit; `--strict` is available for monitoring automation.
+
+The preview queue mutation commands (`queue:add`, `queue:revise`,
+`queue:rebind`, `queue:cancel`, `queue:reschedule`, `queue:place`) are
+not production mutation surfaces. Production activation for those operations is
+tracked by #145.
+
+See `docs/architecture/source-of-truth.md` for the canonical/non-authoritative
+boundary.
 
 ## Ambiguous create-post recovery
 
