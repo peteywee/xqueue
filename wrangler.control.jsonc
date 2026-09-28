@@ -11,8 +11,5 @@
       "migrations_dir": "cloudflare/migrations-production",
       "remote": true
     }
-  ],
-  "triggers": {
-    "crons": []
-  }
+  ]
 }
