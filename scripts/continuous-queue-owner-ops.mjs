@@ -301,7 +301,12 @@ async function applyRuntimeChangingOperation(options) {
   const runtimeSql = renderRuntimeRevisionInsertSql(runtimeRevision, {
     additionalGuardSql: renderOwnerMutationSuccessGuardSql(plan),
   });
-  await executeTransaction(mutationSql + '\n' + runtimeSql);
+  let transactionError = null;
+  try {
+    await executeTransaction(mutationSql + '\n' + runtimeSql);
+  } catch (error) {
+    transactionError = error;
+  }
 
   const stored = query(
     'SELECT generation,revision_digest,active_assignment_count,approved_unscheduled_count,' +
@@ -315,7 +320,13 @@ async function applyRuntimeChangingOperation(options) {
     Number(stored.generation) !== runtimeRevision.generation ||
     stored.revision_digest !== runtimeRevision.revision_digest
   ) {
-    throw new Error('owner mutation did not commit its exact runtime revision');
+    const suffix = transactionError
+      ? ': ' + String(transactionError.message ?? transactionError)
+      : '';
+    throw new Error(
+      'owner mutation exact readback did not prove commit; automatic retry is forbidden' +
+      suffix,
+    );
   }
 
   const observed = await buildDynamicRuntimeSnapshot(readRuntimeRows());
@@ -404,9 +415,22 @@ async function main() {
     }
 
     const recordedAt = new Date().toISOString();
-    await executeTransaction(renderRevisionCreateSql(plan, { recordedAt }));
+    let transactionError = null;
+    try {
+      await executeTransaction(renderRevisionCreateSql(plan, { recordedAt }));
+    } catch (error) {
+      transactionError = error;
+    }
     const state = classifyRevisionReadback(plan, readRevisionReadback(plan));
-    if (state !== 'complete') throw new Error('revision readback is ' + state);
+    if (state !== 'complete') {
+      const suffix = transactionError
+        ? ': ' + String(transactionError.message ?? transactionError)
+        : '';
+      throw new Error(
+        'revision exact readback is ' + state +
+        '; automatic retry is forbidden' + suffix,
+      );
+    }
 
     console.log(JSON.stringify({
       status: 'applied',
