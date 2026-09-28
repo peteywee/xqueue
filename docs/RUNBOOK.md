@@ -81,6 +81,65 @@ preflight against preview and production D1 on a schedule. Token rotation is
 not complete until the repository `CLOUDFLARE_API_TOKEN` secret is updated and
 that workflow passes.
 
+
+## One-command production acceptance
+
+Use the repository acceptance orchestrator instead of copying individual
+production commands between terminals or chat.
+
+Dry-run observation only:
+
+```bash
+pnpm production:acceptance -- --sync-main
+```
+
+Full guarded acceptance, including release and post-clear proof:
+
+```bash
+pnpm production:acceptance -- \
+  --sync-main \
+  --apply \
+  --release \
+  --expect-deferral C24 \
+  --confirm xqueue-production-acceptance
+```
+
+The command is fail-closed. It requires a clean local `main`, active
+Cloudflare credentials, an owner-controlled production halt, stable Cloudflare
+authority, a proven rollback version, and retired local service/timer
+authority before it mutates production.
+
+The orchestrator automatically carries forward the observed halt generation,
+Git HEAD, authority generation, uploaded Worker version ID, and deployment
+identity. It uploads the exact candidate without traffic, proves the immutable
+version, rebinds durable authority, promotes that exact version, reapplies the
+publisher trigger, captures a real halted scheduler invocation, and verifies
+durable pre-clear state.
+
+`--release` is never implied by `--apply`. Release additionally requires the
+literal confirmation `xqueue-production-acceptance`. After release the
+orchestrator captures the first qualifying scheduler invocation, verifies
+durable state, runs production health and TSAL evidence, then performs the
+logical backup and isolated restore proof.
+
+Evidence is stored outside the repository under:
+
+```text
+~/.local/state/xqueue/production-acceptance/<run>/
+```
+
+Each command has separate stdout/stderr logs. `state.json` is the resumable
+checkpoint, `summary.json` is the machine-readable final summary, and
+`SUMMARY.txt` is the compact operator summary.
+
+Rerunning the same command on the same HEAD automatically resumes the latest
+incomplete run and skips already-proven steps. A failed mutation is recorded
+as `ambiguous`; the orchestrator refuses to auto-retry an ambiguous mutation
+and requires the saved evidence to be inspected first.
+
+This orchestration intentionally uses explicit per-command failure handling.
+It does not use shell-wide `set -e` / errexit behavior.
+
 ## Production Worker topology
 
 ### Status Worker
