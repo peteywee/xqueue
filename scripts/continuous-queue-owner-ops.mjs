@@ -143,7 +143,7 @@ function requireSchema() {
     '0007_continuous_queue_intake.sql',
     '0008_dynamic_runtime_integrity.sql',
   ]) {
-    if (!names.includes(required)) throw new Error('preview owner operations require ' + required);
+    if (!names.includes(required)) throw new Error(ACTIVE_ENVIRONMENT + ' owner operations require ' + required);
   }
 }
 
