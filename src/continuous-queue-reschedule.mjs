@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { resolveUniqueWallClock } from './schedule-slot.mjs';
 
 export const RESCHEDULE_FORMAT = 1;
-export const RESCHEDULE_SCOPE = 'dynamic-preview-production-control-plane-pending-145';
+export const RESCHEDULE_SCOPE = 'dynamic-preview-and-production-halt-gated-control';
 
 const SHA_RE = /^[a-f0-9]{64}$/;
 
