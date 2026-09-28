@@ -54,8 +54,8 @@ test('production acceptance orchestration is explicit, resumable and fail-closed
     /--apply requires --confirm xqueue-production-acceptance/,
   );
   assert.match(source, /previous mutation has ambiguous outcome/);
-  assert.match(source, /status: 'ready_for_release'/);
-  assert.match(source, /status: 'complete'/);
+  assert.match(source, /ctx\.state\.status = 'ready_for_release'/);
+  assert.match(source, /ctx\.state\.status = 'complete'/);
   assert.match(source, /state\.json/);
   assert.match(source, /summary\.json/);
   assert.match(source, /missed_assignments_deferred/);
