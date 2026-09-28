@@ -6,14 +6,14 @@ function text(path) {
   return readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 }
 
-test('owner command is hard-pinned to preview and has no production target path', () => {
+test('owner command remains preview-only and points production activation to #145', () => {
   const source = text('scripts/continuous-queue-owner-ops.mjs');
 
   assert.match(source, /const PREVIEW_DB = 'xqueue-preview'/);
   assert.match(source, /const PREVIEW_CONFIG = 'wrangler\.preview\.jsonc'/);
   assert.match(
     source,
-    /owner operations are hard-pinned to preview until dynamic cutover/,
+    /owner operations remain preview-only; production mutation control plane is tracked by #145/,
   );
   assert.doesNotMatch(source, /xqueue-production/);
   assert.doesNotMatch(source, /fc85026e-bfc8-435f-8bb0-c60e139178a3/);

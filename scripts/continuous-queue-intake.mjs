@@ -402,7 +402,7 @@ async function main() {
   }
   if (!file) throw new Error('intake requires --file <json>');
   if (environment !== 'preview') {
-    throw new Error('production intake is not activated; #89 is hard-pinned to preview');
+    throw new Error('production intake remains preview-only; production mutation control plane is tracked by #145');
   }
 
   requireSchema();

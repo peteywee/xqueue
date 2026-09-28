@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export const OWNER_OPERATION_FORMAT = 1;
-export const OWNER_OPERATION_SCOPE = 'preview-only-until-dynamic-cutover';
+export const OWNER_OPERATION_SCOPE = 'preview-only-production-control-plane-pending-145';
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SHA_RE = /^[a-f0-9]{64}$/;

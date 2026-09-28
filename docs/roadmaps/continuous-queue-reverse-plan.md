@@ -2,7 +2,7 @@
 > Historical status: this reverse-engineered roadmap drove the continuous-queue program. The implementation has now passed the #46 production cutover; current production authority and rollback instructions live in `docs/RUNBOOK.md`, while #48 tracks remaining program closeout. Future-tense descriptions below are retained as design history and are not current operator instructions.
 # XQueue Continuous Queue — Reverse Plan from End Goal to Current State
 
-Status: planning baseline
+Status: historical design record — superseded for operations
 Written against main: `8fefc81bddcdcf7e444d26e332dccca232c1939a`
 Contract package: draft PR #87
 Contract head at time of writing: `511832266714c5725cf425e7ea4acf4273c08eb7`
@@ -120,7 +120,7 @@ At any time Patrick can see:
 
 ### Hidden work required for Gate 8
 
-This operator surface does not exist today as one coherent workflow. Current CLI commands were designed around generated Markdown -> queue.json -> local state.
+At the time this roadmap was written, this operator surface did not exist as one coherent workflow. It is now implemented by `pnpm production:status`; production mutation activation remains separately tracked by #145.
 
 ---
 
@@ -188,7 +188,7 @@ Rollback MUST NOT resurrect an older queue snapshot and silently discard newly a
 
 # Reverse Gate 6 — Production activation/cutover is proven
 
-This is the future #46 gate after the continuous-queue implementation exists.
+This was the planned #46 activation gate. #46 is now complete; the sequence below is retained as design history.
 
 ## Preconditions
 
@@ -238,7 +238,7 @@ Migration is complete only when the publisher's authoritative read path uses the
 
 # Reverse Gate 5 — Publisher consumes dynamic runtime truth
 
-Today's production publisher still imports:
+At the time this roadmap was written, the production publisher imported:
 
 - `cloudflare/generated/queue-bundle.mjs`
 - `cloudflare/generated/media-manifest.mjs`
@@ -334,7 +334,7 @@ Publisher verifies the exact referenced R2 object before dispatch.
 
 ## 5.5 Dynamic readiness/health
 
-`/health` must eventually report runtime integrity based on durable content/assignments/media instead of generated queue/media modules.
+Planned requirement (now implemented): `/health` reports runtime integrity from durable content/assignments/media; generated artifacts are compatibility telemetry only.
 
 ---
 
@@ -393,7 +393,7 @@ This prevents two different schedulers from evolving.
 
 # Reverse Gate 3 — Intake and queue growth exist
 
-This is the main missing product feature.
+At the time this roadmap was written, this was the main missing product feature.
 
 ## 3.1 Single finished-post intake
 
@@ -501,7 +501,7 @@ Any stale mismatch refuses before side effect.
 
 ## #44 — global halt
 
-Still a real owner/architecture decision.
+Historical note: this was an owner/architecture decision and is now implemented.
 
 End-state requirement:
 
@@ -553,7 +553,7 @@ Before implementation branches multiply, the normative target must live on main 
 
 ## 1.1 Merge/activate the product intent deliberately
 
-PR #87 currently exists only as a draft.
+At the time this roadmap was written, PR #87 existed only as a draft.
 
 Before implementation treats it as normative:
 - review it;

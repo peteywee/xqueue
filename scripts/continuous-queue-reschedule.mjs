@@ -229,7 +229,7 @@ function printPlan(plan) {
 
 async function main() {
   if (opt('env', 'preview') !== 'preview') {
-    throw new Error('replacement scheduling is hard-pinned to preview until dynamic cutover');
+    throw new Error('replacement scheduling remains preview-only; production mutation control plane is tracked by #145');
   }
 
   const mode = opt('mode', 'automatic');
