@@ -793,6 +793,7 @@ function writeSummary(ctx) {
     'post_clear_durable=' + JSON.stringify(ctx.state.facts.postClearDurable ?? null),
     'runtime_evidence=' + String(ctx.state.facts.runtimeEvidence ?? ''),
     'deployment_evidence=' + String(ctx.state.facts.deploymentEvidence ?? ''),
+    'production_control_proof=' + JSON.stringify(ctx.state.facts.productionControlProof ?? null),
     'backup_evidence=' + String(ctx.state.facts.backupEvidence ?? ''),
     'restore_evidence=' + String(ctx.state.facts.restoreEvidence ?? ''),
   ].join('\n') + '\n';
@@ -1125,6 +1126,16 @@ async function main() {
     deploymentId: preclearFact.authority.deployment_id,
   };
   ctx.save();
+
+  if (existsSync('scripts/production-control-proof.mjs')) {
+    const controlProof = runStep(ctx, 'production-control-proof', 'node', [
+      'scripts/production-control-proof.mjs',
+      '--expected-halt-generation',
+      String(initialHalt.generation),
+    ]);
+    ctx.state.facts.productionControlProof = parseJsonOutput(controlProof.stdout);
+    ctx.save();
+  }
 
   if (!release) {
     ctx.state.status = 'ready_for_release';
