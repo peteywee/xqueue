@@ -58,7 +58,9 @@ test('production acceptance orchestration is explicit, resumable and fail-closed
   assert.match(source, /ctx\.state\.status = 'complete'/);
   assert.match(source, /state\.json/);
   assert.match(source, /summary\.json/);
-  assert.match(source, /missed_assignments_deferred/);
+  assert.match(source, /pending_replacement/);
+  assert.match(source, /publicationEventCount/);
+  assert.match(source, /waitForDurablePostClear/);
   assert.match(source, /publication_halted/);
 
   assert.doesNotMatch(source, /\bset\s+-[Ee]/);
