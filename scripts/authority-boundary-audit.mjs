@@ -81,6 +81,16 @@ const authorityConfig = readJsonc('wrangler.authority.jsonc');
 const prepConfig = readJsonc('wrangler.prep.jsonc');
 const previewConfig = readJsonc('wrangler.preview.jsonc');
 
+const trackedWranglerDescriptors = execFileSync(
+  'git',
+  ['ls-files', 'wrangler*.jsonc'],
+  { cwd: ROOT, encoding: 'utf8' },
+)
+  .split('\n')
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .map((path) => ({ path, ...readJsonc(path) }));
+
 const defaultDeclaresTriggers = Object.hasOwn(defaultConfig.value, 'triggers');
 const statusDeclaresTriggers = Object.hasOwn(statusConfig.value, 'triggers');
 const statusCrons = statusConfig.value.triggers?.crons;
@@ -433,12 +443,15 @@ gate(
 
 
 
+const liveStatusOwners = trackedWranglerDescriptors.filter(
+  ({ value }) => value.name === 'xqueue-production',
+);
 gate(
   'only status config may deploy Worker identity xqueue-production',
-  statusConfig.value.name === 'xqueue-production' &&
-    [defaultConfig, prepConfig, publisherConfig, authorityConfig, previewConfig]
-      .every(({ value }) => value.name !== 'xqueue-production'),
-  statusConfig.value.name,
+  liveStatusOwners.length === 1 &&
+    liveStatusOwners[0].path === 'wrangler.status.jsonc' &&
+    liveStatusOwners[0].value.main === statusWorkerPath,
+  liveStatusOwners.map(({ path }) => path).join(',') || 'none',
 );
 
 const failures = results.filter((result) => !result.ok);
