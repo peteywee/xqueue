@@ -39,6 +39,22 @@ test('logical mutation identity is stable across replans while plan digest fence
   assert.notEqual(a.plan_digest, b.plan_digest);
 });
 
+test('adapter plan context changes plan digest without changing logical operation identity', () => {
+  const base = {
+    kind: 'intake',
+    mutation: { batch_digest: 'b'.repeat(64) },
+    items: [{ item_key: 'item-1', resulting_content_revision: 1, resulting_assignment_version: 1 }],
+    haltState: { halted: 0, generation: 4 },
+    laneState: { generation: 7, active_operation_id: null },
+    runtimeState: { generation: 11, revision_digest: RUNTIME_DIGEST },
+  };
+  const a = createMutationPlan({ ...base, planContext: { frontier_generation: 4, policy_version: 2 } });
+  const b = createMutationPlan({ ...base, planContext: { frontier_generation: 5, policy_version: 2 } });
+  assert.equal(a.operation_id, b.operation_id);
+  assert.equal(a.operation_digest, b.operation_digest);
+  assert.notEqual(a.plan_digest, b.plan_digest);
+});
+
 test('preflight clean resolves; blocked lane defers; stale fences replan', () => {
   const p = plan();
   assert.equal(decideMutationPreflight(p, current(p)).outcome, 'AUTO_RESOLVE');

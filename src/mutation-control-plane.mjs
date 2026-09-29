@@ -137,6 +137,7 @@ export function createMutationPlan({
   laneState,
   runtimeState,
   retryBudgets = MUTATION_RETRY_BUDGETS,
+  planContext = null,
 }) {
   if (!MUTATION_KINDS.includes(kind)) throw new Error('unsupported mutation kind');
   const normalizedItems = normalizeItems(items);
@@ -153,8 +154,11 @@ export function createMutationPlan({
   const operationDigest = sha256Canonical(operationMaterial);
   const operationId = `mutation-${kind}-${operationDigest.slice(0, 24)}`;
 
+  if (planContext !== null) canonical(planContext);
+
   const planMaterial = Object.freeze({
     operation_digest: operationDigest,
+    plan_context: planContext,
     expected_halt_generation: halt.generation,
     expected_lane_generation: lane.generation,
     expected_runtime_generation: runtime.generation,
@@ -173,6 +177,7 @@ export function createMutationPlan({
     operation_kind: kind,
     operation_digest: operationDigest,
     plan_digest: sha256Canonical(planMaterial),
+    plan_context: planContext,
     expected_halt_generation: halt.generation,
     expected_lane_generation: lane.generation,
     expected_runtime_generation: runtime.generation,
