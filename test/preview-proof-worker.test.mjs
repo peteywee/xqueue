@@ -36,15 +36,14 @@ test('preview runtime proof no longer shells out to raw R2 object API', () => {
   const source = text('scripts/preview-dynamic-runtime-proof.mjs');
   assert.equal(source.includes("'r2',\n        'object',\n        'get'"), false);
   assert.equal(source.includes('"r2",\n        "object",\n        "get"'), false);
-  assert.match(source, /xqueue-preview-proof\.patrickcraven\.workers\.dev\/proof/);
+  assert.match(source, /http:\/\/127\.0\.0\.1:8787\/proof/);
   assert.match(source, /preview-proof-worker-r2-binding/);
 });
 
-test('preview workflow deploys proof role before remote runtime proof', () => {
+test('preview workflow runs proof role only as an ephemeral remote-dev session', () => {
   const source = text('.github/workflows/preview-dynamic-runtime.yml');
-  const deploy = source.indexOf('Deploy read-only preview proof Worker');
-  const proof = source.indexOf('Initialize and prove preview dynamic runtime');
-  assert.ok(deploy >= 0);
-  assert.ok(proof > deploy);
-  assert.match(source, /wrangler deploy --config wrangler\.preview-proof\.jsonc/);
+  assert.match(source, /wrangler dev --remote --config wrangler\.preview-proof\.jsonc --port 8787/);
+  assert.match(source, /XQUEUE_PREVIEW_PROOF_URL=http:\/\/127\.0\.0\.1:8787\/proof/);
+  assert.doesNotMatch(source, /wrangler deploy --config wrangler\.preview-proof\.jsonc/);
+  assert.match(source, /trap cleanup EXIT/);
 });
