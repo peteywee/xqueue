@@ -101,10 +101,11 @@ const previewProofText = graphText(previewProofGraph);
 const publisherEntryText = read(PUBLISHER_ENTRY);
 
 gate(
-  'legacy compatibility descriptor cannot overwrite live status Worker',
-  legacy.name === 'xqueue-legacy-compat-retired' &&
-    legacy.main === 'cloudflare/src/worker.mjs' &&
-    !Object.hasOwn(legacy, 'triggers'),
+  'default Workers Builds descriptor is status-only and scheduler-free',
+  legacy.name === 'xqueue-production' &&
+    legacy.main === STATUS_ENTRY &&
+    Array.isArray(legacy.triggers?.crons) &&
+    legacy.triggers.crons.length === 0,
   legacy.name + ':' + legacy.main,
 );
 
