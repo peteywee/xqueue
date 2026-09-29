@@ -207,6 +207,8 @@ const credentialRe =
   /\b(X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET|consumer_key|consumer_secret|oauth_token|bearer_token)\b/i;
 const publishRe =
   /\b(createPostViaClient|uploadMediaBytesViaClient|@xdevplatform\/xdk|api\.x\.com|api\.twitter\.com|upload\.twitter\.com)\b/i;
+const r2MutationRe =
+  /\.(?:put|delete|createMultipartUpload|resumeMultipartUpload|uploadPart|complete|abort)\s*\(/;
 
 gate(
   'status graph contains no X credential references',
@@ -238,7 +240,8 @@ gate(
     !publishRe.test(previewProofText) &&
     !previewProofGraph.files.has(PRODUCTION_PUBLISHER) &&
     !previewProofGraph.files.has(PUBLISHER_ENTRY) &&
-    ![...previewProofGraph.packages].some((name) => name.startsWith('@xdevplatform')),
+    ![...previewProofGraph.packages].some((name) => name.startsWith('@xdevplatform')) &&
+    !r2MutationRe.test(previewProofText),
   [...previewProofGraph.files.keys()].join(', '),
 );
 
