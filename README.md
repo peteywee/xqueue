@@ -49,7 +49,7 @@ The target production architecture separates status/read-only execution from pub
 - `wrangler.authority.jsonc` is the explicit scheduler-authority surface for `xqueue-publisher-production`. It uses the production-safe D1 migration lane, sets `XQUEUE_PUBLISH_AUTHORITY=enabled`, binds `CF_VERSION_METADATA`, and pins exactly one cron: `*/15 * * * *`.
 - `wrangler.prep.jsonc` is a retired pre-cutover descriptor under `xqueue-precutover-retired`; it has no cron and must not be used to deploy production.
 - `wrangler.preview.jsonc` remains the non-authoritative preview surface.
-- `wrangler.jsonc` is retained only as a legacy compatibility/D1 command descriptor under the retired Worker name `xqueue-legacy-compat-retired`; it cannot overwrite the live `xqueue-production` status Worker.
+- `wrangler.jsonc` is the fail-safe default for Cloudflare Workers Builds and is intentionally identical in role to the explicit status deployment: `xqueue-production` + `cloudflare/src/status-worker.mjs` + no cron. Cloudflare Workers Builds may override the configured name for a connected Worker, so the root config itself must be safe to promote.
 - All production-role configs bind the same canonical production D1/R2 truth, while the preview config remains isolated from production D1 identity.
 - X write credentials belong only to `xqueue-publisher-production`. The repository audits and CI bundle inspection fail if X credential references, the X SDK, or publish transport become reachable from the target status-only bundle.
 
