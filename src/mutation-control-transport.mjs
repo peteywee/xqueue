@@ -143,7 +143,17 @@ export function classifyD1TransportException(error) {
   if (code) return code;
   const message = String(error?.message ?? error ?? '').toLowerCase();
   if (message.includes('timeout') || message.includes('network') || message.includes('fetch')) return 'D1_BATCH_AMBIGUOUS';
-  if (message.includes('unique') && message.includes('slot')) return 'DUPLICATE_SLOT';
+  const duplicateSlot =
+    message.includes('unique') &&
+    (
+      message.includes('slot') ||
+      (
+        message.includes('queue_assignments.target_account') &&
+        message.includes('queue_assignments.resolved_at')
+      ) ||
+      message.includes('queue_assignments_dispatchable_slot_uq')
+    );
+  if (duplicateSlot) return 'DUPLICATE_SLOT';
   if (message.includes('runtime') && message.includes('stale')) return 'STALE_RUNTIME';
   if (message.includes('assignment') && message.includes('stale')) return 'STALE_ASSIGNMENT';
   if (message.includes('contended') || message.includes('locked')) return 'MUTATION_LANE_CONTENDED';
