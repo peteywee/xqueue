@@ -89,6 +89,13 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
       return d1.prepare('SELECT * FROM mutation_operations WHERE operation_id=?').bind(requiredString(operationId, 'operationId')).first();
     },
 
+    async readOperationItems(operationId) {
+      const result = await d1.prepare(
+        'SELECT * FROM mutation_operation_items WHERE operation_id=? ORDER BY item_key',
+      ).bind(requiredString(operationId, 'operationId')).all();
+      return Array.isArray(result) ? result : (result?.results ?? []);
+    },
+
     async batch(statements) {
       if (!Array.isArray(statements) || statements.length === 0) throw new Error('mutation batch statements are required');
       for (const statement of statements) {
