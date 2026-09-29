@@ -32,7 +32,7 @@ test('publisher entrypoint exposes only the scheduled publication role', () => {
   assert.doesNotMatch(source, /async fetch\s*\(/);
 });
 
-test('legacy production descriptor is frozen while target roles are separately addressable', () => {
+test('legacy descriptor is retired while target roles are separately addressable', () => {
   const legacy = jsonc('wrangler.jsonc');
   const status = jsonc('wrangler.status.jsonc');
   const publisher = jsonc('wrangler.publisher.jsonc');
@@ -41,7 +41,7 @@ test('legacy production descriptor is frozen while target roles are separately a
   assert.deepEqual(
     { name: legacy.name, main: legacy.main, triggers: legacy.triggers },
     {
-      name: 'xqueue-production',
+      name: 'xqueue-legacy-compat-retired',
       main: 'cloudflare/src/worker.mjs',
       triggers: undefined,
     },
