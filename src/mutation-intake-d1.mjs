@@ -165,13 +165,14 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
     controlPlan.operation_id,
   ).first();
 
+  const operationState = operation?.state;
   if (
     !operation ||
     operation.plan_digest !== controlPlan.plan_digest ||
-    operation.state !== 'VERIFYING' ||
+    !['VERIFYING', 'COMPLETE'].includes(operationState) ||
     operation.effect_state !== 'applied'
   ) {
-    throw new Error('mutation operation readback is not exact VERIFYING/applied state');
+    throw new Error('mutation operation readback is not exact applied state');
   }
 
   const intakeOperation = await stmt(
@@ -181,12 +182,13 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
     intakePlan.operation_id,
   ).first();
 
+  const expectedIntakeStatus = operationState === 'COMPLETE' ? 'complete' : 'claimed';
   if (
     !intakeOperation ||
     intakeOperation.plan_digest !== intakePlan.plan_digest ||
-    intakeOperation.status !== 'claimed'
+    intakeOperation.status !== expectedIntakeStatus
   ) {
-    throw new Error('intake operation readback is not exact claimed state');
+    throw new Error('intake operation readback does not match mutation state');
   }
 
   const runtime = await stmt(
