@@ -162,6 +162,17 @@ and requires the saved evidence to be inspected first.
 This orchestration intentionally uses explicit per-command failure handling.
 It does not use shell-wide `set -e` / errexit behavior.
 
+## Post-cutover deploy guard
+
+After #46, exactly one tracked config may own the live status Worker identity `xqueue-production`: `wrangler.status.jsonc`.
+
+- `wrangler.jsonc` uses the retired identity `xqueue-legacy-compat-retired` and is compatibility/D1-command-only.
+- `wrangler.prep.jsonc` uses `xqueue-precutover-retired`, has no cron, and is historical pre-cutover tooling only.
+- the historical Production Pre-Cutover Preparation workflow is hard-retired and performs no production mutation;
+- every push to `main` runs the Production Status Role reconciliation workflow, which deploys only `wrangler.status.jsonc` and proves the live endpoint is status-only before succeeding.
+
+Do not rename either retired config back to `xqueue-production`. That would reintroduce the overwrite path that caused incident #147.
+
 ## Production Worker topology
 
 ### Status Worker
