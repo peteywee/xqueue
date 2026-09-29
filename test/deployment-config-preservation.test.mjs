@@ -17,12 +17,13 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('legacy Workers Builds descriptor is retired from the live status Worker identity', () => {
+test('default Workers Builds descriptor is production status-only and scheduler-free', () => {
   const config = readJsonc('wrangler.jsonc');
 
-  assert.equal(config.name, 'xqueue-legacy-compat-retired');
-  assert.equal(config.main, 'cloudflare/src/worker.mjs');
-  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.main, 'cloudflare/src/status-worker.mjs');
+  assert.equal(declaresSchedulerMutation(config), true);
+  assert.deepEqual(config.triggers?.crons, []);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
 });
