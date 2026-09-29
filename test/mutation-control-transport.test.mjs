@@ -92,7 +92,7 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
     fetchImpl: async () => ({ ok: true, json: async () => ({ success: true, result: { bookmark: 'bookmark_12345' } }) }),
   });
   assert.deepEqual(Object.keys(transport).sort(), [
-    'batch', 'captureCheckpoint', 'readHaltState', 'readLaneState', 'readOperation', 'readOperationItems', 'readRuntimeState',
+    'batch', 'captureCheckpoint', 'prepare', 'readHaltState', 'readLaneState', 'readOperation', 'readOperationItems', 'readRuntimeState',
   ]);
   assert.equal((await transport.readHaltState()).generation, 3);
   assert.equal((await transport.readLaneState()).generation, 7);
@@ -100,6 +100,8 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
   assert.equal((await transport.readOperation('op-1')).operation_id, 'op-1');
   assert.equal((await transport.readOperationItems('op-1'))[0].item_key, 'I-1');
   assert.equal(await transport.captureCheckpoint(), 'bookmark_12345');
+  const prepared = transport.prepare('UPDATE mutation_operations SET state=state');
+  assert.equal(typeof prepared.run, 'function');
   const stmt = db.prepare('UPDATE mutation_operations SET state=state');
   assert.equal((await transport.batch([stmt]))[0].success, true);
 });

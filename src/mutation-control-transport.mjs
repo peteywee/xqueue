@@ -63,6 +63,10 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
   const checkpointArgs = { fetchImpl, accountId, databaseId, apiToken };
 
   return Object.freeze({
+    prepare(sql) {
+      return d1.prepare(requiredString(sql, 'sql'));
+    },
+
     async captureCheckpoint() {
       return getD1TimeTravelBookmark(checkpointArgs);
     },
