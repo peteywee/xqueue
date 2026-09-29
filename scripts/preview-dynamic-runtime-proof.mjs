@@ -27,7 +27,7 @@ const PREVIEW_DB = 'xqueue-preview';
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const PROOF_URL =
   process.env.XQUEUE_PREVIEW_PROOF_URL ??
-  'https://xqueue-preview-proof.patrickcraven.workers.dev/proof';
+  'http://127.0.0.1:8787/proof';
 const EVIDENCE =
   process.env.XQUEUE_PREVIEW_DYNAMIC_RUNTIME_EVIDENCE ??
   '/tmp/xqueue-preview-dynamic-runtime-proof.json';
