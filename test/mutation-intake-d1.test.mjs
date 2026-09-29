@@ -187,8 +187,8 @@ test('atomic intake apply commits canonical writes in VERIFYING and finalize rel
     { generation: 6, pending_operation_id: intakePlan.operation_id },
   );
   assert.deepEqual(
-    raw.prepare('SELECT state,effect_state,resulting_runtime_generation FROM mutation_operations WHERE operation_id=?')
-      .get(controlPlan.operation_id),
+    { ...raw.prepare('SELECT state,effect_state,resulting_runtime_generation FROM mutation_operations WHERE operation_id=?')
+      .get(controlPlan.operation_id) },
     { state: 'VERIFYING', effect_state: 'applied', resulting_runtime_generation: 12 },
   );
   assert.equal(
@@ -222,8 +222,8 @@ test('atomic intake apply commits canonical writes in VERIFYING and finalize rel
     { pending_operation_id: null, last_completed_operation_id: intakePlan.operation_id },
   );
   assert.deepEqual(
-    raw.prepare('SELECT state,outcome,effect_state,evidence_digest FROM mutation_operations WHERE operation_id=?')
-      .get(controlPlan.operation_id),
+    { ...raw.prepare('SELECT state,outcome,effect_state,evidence_digest FROM mutation_operations WHERE operation_id=?')
+      .get(controlPlan.operation_id) },
     {
       state: 'COMPLETE',
       outcome: 'AUTO_RESOLVE',
@@ -261,7 +261,7 @@ test('stale frontier aborts and rolls back the lane claim and every canonical wr
   await assert.rejects(d1.batch(apply.statements));
 
   assert.deepEqual(
-    raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get(),
+    { ...raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get() },
     { generation: 1, active_operation_id: null },
   );
   assert.equal(
