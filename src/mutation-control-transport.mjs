@@ -100,6 +100,33 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
       return Array.isArray(result) ? result : (result?.results ?? []);
     },
 
+    async readPublicationSafety() {
+      const authority = await d1.prepare(
+        'SELECT owner,generation,transition_state,candidate_sha,deployment_id,updated_at ' +
+        'FROM authority_state WHERE singleton_id=1',
+      ).first();
+      const unresolved = await d1.prepare(
+        "SELECT COUNT(*) AS unresolved FROM publication_state " +
+        "WHERE status IN ('prepared','publishing','needs_reconciliation')",
+      ).first();
+      const leases = await d1.prepare(
+        'SELECT COUNT(*) AS active_leases FROM publication_leases ' +
+        'WHERE owner_token IS NOT NULL ' +
+        "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000",
+      ).first();
+      const runtime = await d1.prepare(
+        "SELECT json_extract(value, '$.inflight') AS inflight " +
+        "FROM runtime_metadata WHERE key='state.snapshot_json'",
+      ).first();
+
+      return Object.freeze({
+        authority: authority ?? null,
+        unresolvedAttemptCount: Number(unresolved?.unresolved ?? -1),
+        activeLeaseCount: Number(leases?.active_leases ?? -1),
+        inflight: runtime?.inflight ?? null,
+      });
+    },
+
     async batch(statements) {
       if (!Array.isArray(statements) || statements.length === 0) throw new Error('mutation batch statements are required');
       for (const statement of statements) {
