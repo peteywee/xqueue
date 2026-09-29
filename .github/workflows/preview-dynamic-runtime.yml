@@ -93,13 +93,31 @@ jobs:
       - name: Apply preview-only schema
         run: pnpm preview:intake:migrate
 
-      - name: Deploy read-only preview proof Worker
-        run: pnpm wrangler deploy --config wrangler.preview-proof.jsonc
+      - name: Initialize and prove preview dynamic runtime through ephemeral R2 binding
+        run: |
+          pnpm wrangler dev --remote --config wrangler.preview-proof.jsonc --port 8787 > /tmp/xqueue-preview-proof-worker.log 2>&1 &
+          PROOF_PID=$!
 
-      - name: Initialize and prove preview dynamic runtime
-        env:
-          XQUEUE_PREVIEW_PROOF_URL: https://xqueue-preview-proof.patrickcraven.workers.dev/proof
-        run: pnpm preview:runtime-proof
+          cleanup() {
+            kill "$PROOF_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          READY=0
+          for ATTEMPT in $(seq 1 60); do
+            if curl -sS -o /dev/null http://127.0.0.1:8787/proof; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            cat /tmp/xqueue-preview-proof-worker.log
+            exit 1
+          fi
+
+          XQUEUE_PREVIEW_PROOF_URL=http://127.0.0.1:8787/proof pnpm preview:runtime-proof
 
       - name: Upload dynamic runtime evidence
         if: ${{ always() }}
