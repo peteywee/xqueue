@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
-  readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +25,9 @@ import {
 
 const PREVIEW_DB = 'xqueue-preview';
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
-const BUCKET = 'xqueue-media';
+const PROOF_URL =
+  process.env.XQUEUE_PREVIEW_PROOF_URL ??
+  'http://127.0.0.1:8787/proof';
 const EVIDENCE =
   process.env.XQUEUE_PREVIEW_DYNAMIC_RUNTIME_EVIDENCE ??
   '/tmp/xqueue-preview-dynamic-runtime-proof.json';
@@ -209,51 +208,100 @@ function readRevisionHead() {
   );
 }
 
-function verifyR2Bytes(mediaRows) {
-  const dir = mkdtempSync(join(tmpdir(), 'xqueue-runtime-r2-'));
-  const verified = [];
-
+async function verifyR2Bytes(mediaRows) {
+  let response;
   try {
-    for (const row of mediaRows) {
-      const destination = join(
-        dir,
-        `${String(row.figure).padStart(4, '0')}.${row.extension}`,
-      );
-
-      run('pnpm', [
-        'wrangler',
-        'r2',
-        'object',
-        'get',
-        `${BUCKET}/${row.r2_key}`,
-        '--file',
-        destination,
-        '--remote',
-      ], { capture: false });
-
-      const byteSize = statSync(destination).size;
-      const sha256 = createHash('sha256')
-        .update(readFileSync(destination))
-        .digest('hex');
-
-      if (byteSize !== Number(row.byte_size)) {
-        throw new Error(`${row.r2_key}: R2 byte size mismatch`);
-      }
-      if (sha256 !== row.sha256) {
-        throw new Error(`${row.r2_key}: R2 SHA-256 mismatch`);
-      }
-
-      verified.push({
-        r2Key: row.r2_key,
-        byteSize,
-        sha256,
-      });
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+    response = await fetch(PROOF_URL, {
+      headers: {
+        accept: 'application/json',
+        'cache-control': 'no-cache',
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    throw new Error(
+      'preview proof Worker was unreachable: ' +
+      (error instanceof Error ? error.message : String(error)),
+    );
   }
 
-  return verified;
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error(
+      'preview proof Worker returned non-JSON data (HTTP ' + response.status + ')',
+    );
+  }
+
+  if (!response.ok || body?.status !== 'ok') {
+    throw new Error(
+      'preview proof Worker reported failure: ' + JSON.stringify(body),
+    );
+  }
+  if (
+    body?.service !== 'xqueue-preview-proof' ||
+    body?.role !== 'read-only-proof' ||
+    body?.publicationCapable !== false ||
+    body?.schedulerAuthority !== false
+  ) {
+    throw new Error('preview proof Worker role boundary is invalid');
+  }
+
+  const runtime = body?.dynamicRuntime;
+  const proof = body?.mediaBodyProof;
+  if (
+    runtime?.ok !== true ||
+    runtime?.media?.ok !== true ||
+    Number(runtime?.mediaRequiredCount) !== mediaRows.length ||
+    Number(runtime?.mediaReadyCount) !== mediaRows.length ||
+    proof?.ok !== true ||
+    Number(proof?.bodyObservedCount) !== mediaRows.length ||
+    !Array.isArray(proof?.objects)
+  ) {
+    throw new Error('preview proof Worker did not verify every required media body');
+  }
+
+  const expected = new Map(
+    mediaRows.map((row) => [
+      row.r2_key,
+      {
+        byteSize: Number(row.byte_size),
+        sha256: String(row.sha256).toLowerCase(),
+      },
+    ]),
+  );
+
+  for (const object of proof.objects) {
+    const want = expected.get(object?.r2Key);
+    if (
+      !want ||
+      Number(object.byteSize) !== want.byteSize ||
+      String(object.sha256 ?? '').toLowerCase() !== want.sha256 ||
+      object.sizeMatch !== true ||
+      object.hashMatch !== true
+    ) {
+      throw new Error(
+        'preview proof Worker media readback mismatch for ' +
+        String(object?.r2Key ?? 'unknown'),
+      );
+    }
+    expected.delete(object.r2Key);
+  }
+
+  if (expected.size !== 0) {
+    throw new Error(
+      'preview proof Worker omitted media keys: ' +
+      JSON.stringify([...expected.keys()]),
+    );
+  }
+
+  return proof.objects.map((object) => ({
+    r2Key: object.r2Key,
+    byteSize: Number(object.byteSize),
+    sha256: String(object.sha256).toLowerCase(),
+    proofSource: 'preview-proof-worker-r2-binding',
+  }));
 }
 
 async function main() {
@@ -373,7 +421,7 @@ async function main() {
     throw new Error('preview runtime revision history is not exact generation 1');
   }
 
-  const r2 = verifyR2Bytes(mediaActual);
+  const r2 = await verifyR2Bytes(mediaActual);
 
   const evidence = {
     format: 1,
@@ -410,6 +458,7 @@ async function main() {
       status: row.status,
     })),
     r2ByteVerification: r2,
+    r2ProofUrl: PROOF_URL,
     productionMutation: false,
     publicationAuthorityChanged: false,
     proofFixtureInserted: false,

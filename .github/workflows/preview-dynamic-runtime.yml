@@ -29,6 +29,8 @@ on:
       - 'src/d1-deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
       - 'cloudflare/src/worker.mjs'
+      - 'cloudflare/src/preview-proof-worker.mjs'
+      - 'wrangler.preview-proof.jsonc'
       - 'src/continuous-queue-runtime-write.mjs'
       - 'src/continuous-queue-intake.mjs'
       - 'scripts/continuous-queue-intake.mjs'
@@ -91,8 +93,31 @@ jobs:
       - name: Apply preview-only schema
         run: pnpm preview:intake:migrate
 
-      - name: Initialize and prove preview dynamic runtime
-        run: pnpm preview:runtime-proof
+      - name: Initialize and prove preview dynamic runtime through ephemeral R2 binding
+        run: |
+          pnpm wrangler dev --remote --config wrangler.preview-proof.jsonc --port 8787 > /tmp/xqueue-preview-proof-worker.log 2>&1 &
+          PROOF_PID=$!
+
+          cleanup() {
+            kill "$PROOF_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          READY=0
+          for ATTEMPT in $(seq 1 60); do
+            if curl -sS -o /dev/null http://127.0.0.1:8787/proof; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            cat /tmp/xqueue-preview-proof-worker.log
+            exit 1
+          fi
+
+          XQUEUE_PREVIEW_PROOF_URL=http://127.0.0.1:8787/proof pnpm preview:runtime-proof
 
       - name: Upload dynamic runtime evidence
         if: ${{ always() }}

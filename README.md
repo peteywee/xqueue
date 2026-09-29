@@ -37,7 +37,7 @@ Key invariants:
 - Preview D1 access is isolated behind explicit `wrangler.preview.jsonc`; production configs contain zero preview D1 identities.
 - Cloudflare publication authority is structurally isolated in `xqueue-publisher-production`; `xqueue-production` is status-only and has no scheduler or X write credentials.
 - Every production scheduled invocation writes a D1 heartbeat; scheduler liveness becomes stale after three missed 15-minute cycles.
-- The independent hourly TSAL observer fails on stale/missing production scheduler liveness, opens one deduplicated GitHub incident, and closes it after recovery.
+- The hourly `Reconcile Production Status Role` workflow first restores/proves the status-only surface; successful completion then triggers TSAL live runtime/deployment monitoring. TSAL still opens one deduplicated incident on a genuine live failure and closes it after recovery.
 - Production deployment is not considered fully verified until TSAL reconciles repository intent with Cloudflare control-plane and runtime evidence.
 
 ### Cloudflare deployment authority boundary
