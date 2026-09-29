@@ -43,7 +43,7 @@ The publisher Worker has no normal HTTP publication route.
 - `wrangler.status.jsonc`: target status-only production deployment; explicit `triggers.crons: []` removes any previously deployed cron during #46 cutover.
 - `wrangler.publisher.jsonc`: inert publisher deployment; no triggers and explicit `XQUEUE_PUBLISH_AUTHORITY=disabled`.
 - `wrangler.authority.jsonc`: publisher authority surface; production-safe migration lane, explicit `XQUEUE_PUBLISH_AUTHORITY=enabled`, exact Worker version metadata binding, and exactly one 15-minute cron.
-- `wrangler.jsonc`: retired compatibility/D1-command descriptor under `xqueue-legacy-compat-retired`; it cannot overwrite `xqueue-production`.
+- `wrangler.jsonc`: fail-safe default for Cloudflare Workers Builds; it targets `xqueue-production` with `cloudflare/src/status-worker.mjs` and an empty cron set. Because Workers Builds can override the configured Worker name for the dashboard-connected project, the root config itself must remain safe to promote.
 - `wrangler.prep.jsonc`: retired pre-cutover descriptor under `xqueue-precutover-retired`; no cron and no live production identity.
 - `wrangler.preview.jsonc`: existing non-authoritative preview surface.
 
