@@ -6,14 +6,18 @@ function json(value, init = {}) {
   return new Response(JSON.stringify(value, null, 2), { ...init, headers });
 }
 
-async function sha256Hex(bytes) {
+export async function sha256Hex(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, '0'))
     .join('');
 }
 
-async function observeMediaBodies(env, mediaVerdict) {
+export async function observeMediaBodies(
+  env,
+  mediaVerdict,
+  { hashBytes = sha256Hex } = {},
+) {
   const objects = Array.isArray(mediaVerdict?.objects) ? mediaVerdict.objects : [];
   const observed = [];
 
@@ -54,7 +58,7 @@ async function observeMediaBodies(env, mediaVerdict) {
 
     const bytes = await body.arrayBuffer();
     const byteSize = bytes.byteLength;
-    const sha256 = await sha256Hex(bytes);
+    const sha256 = await hashBytes(bytes);
     const item = {
       r2Key: key,
       byteSize,
@@ -82,68 +86,75 @@ async function observeMediaBodies(env, mediaVerdict) {
   };
 }
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname !== '/proof') {
-      return json({ error: 'not_found' }, { status: 404 });
-    }
+export function createPreviewProofWorker({
+  verifyRuntime = verifyDynamicRuntime,
+  hashBytes = sha256Hex,
+} = {}) {
+  return {
+    async fetch(request, env) {
+      const url = new URL(request.url);
+      if (url.pathname !== '/proof') {
+        return json({ error: 'not_found' }, { status: 404 });
+      }
 
-    try {
-      const runtime = await verifyDynamicRuntime(env, {
-        verifyMedia: true,
-        includeSnapshot: false,
-      });
+      try {
+        const runtime = await verifyRuntime(env, {
+          verifyMedia: true,
+          includeSnapshot: false,
+        });
 
-      if (!runtime.ok) {
+        if (!runtime.ok) {
+          return json({
+            service: 'xqueue-preview-proof',
+            role: 'read-only-proof',
+            status: 'error',
+            publicationCapable: false,
+            schedulerAuthority: false,
+            dynamicRuntime: runtime,
+            mediaBodyProof: null,
+          }, { status: 503 });
+        }
+
+        const mediaBodyProof = await observeMediaBodies(env, runtime.media, { hashBytes });
+        const ok = mediaBodyProof.ok === true;
+
+        return json({
+          service: 'xqueue-preview-proof',
+          role: 'read-only-proof',
+          status: ok ? 'ok' : 'error',
+          publicationCapable: false,
+          schedulerAuthority: false,
+          dynamicRuntime: {
+            ok: runtime.ok,
+            reason: runtime.reason,
+            generation: runtime.generation,
+            revisionDigest: runtime.revisionDigest,
+            activeAssignmentCount: runtime.activeAssignmentCount,
+            approvedUnscheduledCount: runtime.approvedUnscheduledCount,
+            deferredCount: runtime.deferredCount,
+            mediaRequiredCount: runtime.mediaRequiredCount,
+            mediaReadyCount: runtime.mediaReadyCount,
+            media: {
+              ok: runtime.media?.ok === true,
+              requiredCount: runtime.media?.requiredCount ?? null,
+              verifiedCount: runtime.media?.verifiedCount ?? null,
+              failures: runtime.media?.failures ?? [],
+            },
+          },
+          mediaBodyProof,
+        }, ok ? {} : { status: 503 });
+      } catch (error) {
         return json({
           service: 'xqueue-preview-proof',
           role: 'read-only-proof',
           status: 'error',
           publicationCapable: false,
           schedulerAuthority: false,
-          dynamicRuntime: runtime,
-          mediaBodyProof: null,
+          error: error instanceof Error ? error.message : String(error),
         }, { status: 503 });
       }
-
-      const mediaBodyProof = await observeMediaBodies(env, runtime.media);
-      const ok = mediaBodyProof.ok === true;
-
-      return json({
-        service: 'xqueue-preview-proof',
-        role: 'read-only-proof',
-        status: ok ? 'ok' : 'error',
-        publicationCapable: false,
-        schedulerAuthority: false,
-        dynamicRuntime: {
-          ok: runtime.ok,
-          reason: runtime.reason,
-          generation: runtime.generation,
-          revisionDigest: runtime.revisionDigest,
-          activeAssignmentCount: runtime.activeAssignmentCount,
-          approvedUnscheduledCount: runtime.approvedUnscheduledCount,
-          deferredCount: runtime.deferredCount,
-          mediaRequiredCount: runtime.mediaRequiredCount,
-          mediaReadyCount: runtime.mediaReadyCount,
-          media: {
-            ok: runtime.media?.ok === true,
-            requiredCount: runtime.media?.requiredCount ?? null,
-            verifiedCount: runtime.media?.verifiedCount ?? null,
-            failures: runtime.media?.failures ?? [],
-          },
-        },
-        mediaBodyProof,
-      }, ok ? {} : { status: 503 });
-    } catch (error) {
-      return json({
-        service: 'xqueue-preview-proof',
-        role: 'read-only-proof',
-        status: 'error',
-        publicationCapable: false,
-        schedulerAuthority: false,
-        error: error instanceof Error ? error.message : String(error),
-      }, { status: 503 });
-    }
   },
-};
+  };
+}
+
+export default createPreviewProofWorker();
