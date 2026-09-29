@@ -179,11 +179,11 @@ test('atomic intake apply commits canonical writes in VERIFYING and finalize rel
   await d1.batch(apply.statements);
 
   assert.deepEqual(
-    raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get(),
+    { ...raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get() },
     { generation: 2, active_operation_id: controlPlan.operation_id },
   );
   assert.deepEqual(
-    raw.prepare('SELECT generation,pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1').get(),
+    { ...raw.prepare('SELECT generation,pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1').get() },
     { generation: 6, pending_operation_id: intakePlan.operation_id },
   );
   assert.deepEqual(
@@ -214,11 +214,11 @@ test('atomic intake apply commits canonical writes in VERIFYING and finalize rel
   await d1.batch(finalize.statements);
 
   assert.deepEqual(
-    raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get(),
+    { ...raw.prepare('SELECT generation,active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get() },
     { generation: 2, active_operation_id: null },
   );
   assert.deepEqual(
-    raw.prepare('SELECT pending_operation_id,last_completed_operation_id FROM queue_intake_frontier WHERE singleton_id=1').get(),
+    { ...raw.prepare('SELECT pending_operation_id,last_completed_operation_id FROM queue_intake_frontier WHERE singleton_id=1').get() },
     { pending_operation_id: null, last_completed_operation_id: intakePlan.operation_id },
   );
   assert.deepEqual(
