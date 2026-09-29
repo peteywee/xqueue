@@ -1,0 +1,207 @@
+name: Preview Mutation Intake Rehearsal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preview-mutation-intake-rehearsal.yml'
+      - 'cloudflare/src/mutation-preview-rehearsal-worker.mjs'
+      - 'wrangler.mutation-preview-proof.jsonc'
+      - 'cloudflare/migrations/0015_mutation_control_plane.sql'
+      - 'cloudflare/migrations/0016_mutation_completion_item_guard.sql'
+      - 'src/continuous-queue-intake.mjs'
+      - 'src/mutation-control-plane.mjs'
+      - 'src/mutation-control-transport.mjs'
+      - 'src/mutation-intake-adapter.mjs'
+      - 'src/mutation-intake-d1.mjs'
+      - 'src/mutation-intake-runner.mjs'
+      - 'cloudflare/src/dynamic-runtime-integrity.mjs'
+      - 'config/schedule-policy.json'
+      - 'test/mutation-preview-rehearsal-worker.test.mjs'
+      - 'test/mutation-intake-runner.test.mjs'
+      - 'test/mutation-intake-adversarial.test.mjs'
+      - 'test/mutation-control-transport.test.mjs'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-preview-schema-mutation
+  cancel-in-progress: false
+
+jobs:
+  rehearse-preview-intake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      CLOUDFLARE_ACCOUNT_ID: aab09adea145e6da8fa57b0f73b073da
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638
+
+    steps:
+      - name: Checkout exact main candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove guarded intake path locally
+        run: |
+          node --test \
+            test/mutation-preview-rehearsal-worker.test.mjs \
+            test/mutation-intake-runner.test.mjs \
+            test/mutation-intake-adversarial.test.mjs \
+            test/mutation-control-transport.test.mjs
+          pnpm audit:authority
+
+      - name: Verify preview Cloudflare authentication
+        run: pnpm cf:auth:preflight --environment preview
+
+      - name: Apply preview mutation schema
+        run: pnpm preview:intake:migrate
+
+      - name: Capture one verified preview recovery checkpoint
+        shell: bash
+        run: |
+          BOOKMARK="$(node --input-type=module <<'NODE'
+          import { getD1TimeTravelBookmark } from './src/mutation-control-transport.mjs';
+
+          const bookmark = await getD1TimeTravelBookmark({
+            accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+            databaseId: process.env.XQUEUE_PREVIEW_DATABASE_ID,
+            apiToken: process.env.CLOUDFLARE_API_TOKEN,
+          });
+          process.stdout.write(bookmark);
+          NODE
+          )"
+
+          if [ -z "$BOOKMARK" ]; then
+            echo "Preview recovery checkpoint was not captured" >&2
+            exit 1
+          fi
+
+          printf '%s' "$BOOKMARK" > /tmp/xqueue-preview-bookmark
+          chmod 600 /tmp/xqueue-preview-bookmark
+          echo "Preview recovery checkpoint captured"
+
+      - name: Build unique preview-only rehearsal request
+        run: |
+          node --input-type=module <<'NODE' > /tmp/xqueue-mutation-preview-request.json
+          import { readFileSync } from 'node:fs';
+
+          const policy = JSON.parse(readFileSync('config/schedule-policy.json', 'utf8'));
+          const bookmark = readFileSync('/tmp/xqueue-preview-bookmark', 'utf8').trim();
+          const suffix = [
+            process.env.GITHUB_RUN_ID,
+            process.env.GITHUB_RUN_ATTEMPT,
+          ].join('-').replace(/[^A-Za-z0-9_-]/g, '');
+
+          const request = {
+            bookmark,
+            policy,
+            fixture: {
+              content_id: 'CQ-PREVIEW-MUT-' + suffix,
+              pillar: 'A',
+              title: 'Preview mutation rehearsal',
+              body:
+                'Preview-only XQueue mutation-control rehearsal fixture. ' +
+                'This content exists only to prove the no-X preview D1 mutation path.',
+              source_ref: 'github-actions:preview-mutation-rehearsal:' + suffix,
+            },
+          };
+
+          process.stdout.write(JSON.stringify(request));
+          NODE
+
+      - name: Run guarded intake through remote preview D1 binding
+        shell: bash
+        run: |
+          pnpm wrangler dev --remote \
+            --config wrangler.mutation-preview-proof.jsonc \
+            --port 8788 \
+            > /tmp/xqueue-mutation-preview-worker.log 2>&1 &
+          PROOF_PID=$!
+
+          cleanup() {
+            kill "$PROOF_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          READY=0
+          for ATTEMPT in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8788/health >/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            cat /tmp/xqueue-mutation-preview-worker.log
+            exit 1
+          fi
+
+          curl -fsS \
+            -X POST \
+            -H 'content-type: application/json' \
+            --data-binary @/tmp/xqueue-mutation-preview-request.json \
+            http://127.0.0.1:8788/mutation-intake-proof \
+            > /tmp/xqueue-mutation-preview-evidence.json
+
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const evidence = JSON.parse(
+            readFileSync('/tmp/xqueue-mutation-preview-evidence.json', 'utf8'),
+          );
+
+          if (
+            evidence.status !== 'ok' ||
+            evidence.ok !== true ||
+            evidence.publicationCapable !== false ||
+            evidence.schedulerAuthority !== false ||
+            !['applied', 'already_applied'].includes(evidence.mutation?.status) ||
+            evidence.recoveryCheckpointCaptured !== true ||
+            Number(evidence.after?.generation) !== Number(evidence.before?.generation) + 1
+          ) {
+            throw new Error(
+              'preview mutation rehearsal evidence did not satisfy the guarded contract',
+            );
+          }
+
+          console.log(JSON.stringify({
+            status: evidence.status,
+            mutationStatus: evidence.mutation.status,
+            operationId: evidence.mutation.operationId,
+            contentId: evidence.mutation.contentId,
+            beforeGeneration: evidence.before.generation,
+            afterGeneration: evidence.after.generation,
+            publicationCapable: evidence.publicationCapable,
+            schedulerAuthority: evidence.schedulerAuthority,
+            recoveryCheckpointCaptured: evidence.recoveryCheckpointCaptured,
+          }, null, 2));
+          NODE
+
+      - name: Upload preview mutation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: xqueue-preview-mutation-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            /tmp/xqueue-mutation-preview-evidence.json
+            /tmp/xqueue-mutation-preview-worker.log
+          if-no-files-found: warn
