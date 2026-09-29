@@ -34,15 +34,37 @@ test('autonomy model is pure local code: imports only its own modules, no I/O, n
   }
 });
 
-test('no production, publisher, worker, script, or CLI module imports the Batch 0 autonomy model', () => {
-  const production = [...walk(join(ROOT, 'src')).filter((f) => !f.startsWith(AUTONOMY)), ...walk(join(ROOT, 'cloudflare/src')),
-    ...walk(join(ROOT, 'scripts')).filter((f) => !f.endsWith('autonomy-batch0-evidence.mjs'))];
+test('only the explicit #145 control-plane adapter may consume the Batch 0 autonomy model', () => {
+  const approved = new Map([
+    [
+      join(ROOT, 'src/mutation-control-plane.mjs'),
+      new Set(['./autonomy/decision-model.mjs', './autonomy/fault-catalog.mjs']),
+    ],
+  ]);
+  const production = [
+    ...walk(join(ROOT, 'src')).filter((f) => !f.startsWith(AUTONOMY)),
+    ...walk(join(ROOT, 'cloudflare/src')),
+    ...walk(join(ROOT, 'scripts')).filter((f) => !f.endsWith('autonomy-batch0-evidence.mjs')),
+  ];
+
   for (const file of production) {
-    assert.ok(!/autonomy\//.test(readFileSync(file, 'utf8')), `${file} references src/autonomy`);
+    const source = readFileSync(file, 'utf8');
+    const imports = [...source.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+['"]([^'"]*autonomy\/[^'"]+)['"]/gm)]
+      .map((m) => m[1])
+      .sort();
+    if (imports.length === 0) continue;
+
+    const allowed = approved.get(file);
+    assert.ok(allowed, `${file} references src/autonomy without approval`);
+    assert.deepEqual(imports, [...allowed].sort(), `${file} autonomy imports widened beyond the approved #145 boundary`);
+  }
+
+  for (const file of approved.keys()) {
+    assert.ok(production.includes(file), `${file} approved consumer is missing from production scan`);
   }
 });
 
-test('Batch 0 adds no wrangler configuration, migration, or workflow', () => {
+test('Batch 0 autonomy artifacts do not leak into wrangler configuration, migrations, or workflows', () => {
   const wrangler = readdirSync(ROOT).filter((n) => n.startsWith('wrangler'));
   for (const name of wrangler) assert.ok(!/autonomy/i.test(readFileSync(join(ROOT, name), 'utf8')), name);
   for (const dir of ['cloudflare/migrations', 'cloudflare/migrations-production', '.github/workflows']) {
