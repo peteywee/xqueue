@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   classifyD1TransportException,
@@ -133,9 +134,58 @@ test('batch rejects raw/unprepared input', async () => {
 test('exception classifier emits only control-plane codes', () => {
   assert.equal(classifyD1TransportException(Object.assign(new Error('x'), { code: 'CHECKPOINT_CORRUPT' })), 'CHECKPOINT_CORRUPT');
   assert.equal(classifyD1TransportException(new Error('network timeout')), 'D1_BATCH_AMBIGUOUS');
-  assert.equal(classifyD1TransportException(new Error('unique slot conflict')), 'DUPLICATE_SLOT');
+  assert.equal(classifyD1TransportException(new Error('unique slot conflict')), 'UNMAPPED');
   assert.equal(classifyD1TransportException(new Error('runtime stale')), 'STALE_RUNTIME');
   assert.equal(classifyD1TransportException(new Error('assignment stale')), 'STALE_ASSIGNMENT');
   assert.equal(classifyD1TransportException(new Error('database locked')), 'MUTATION_LANE_CONTENDED');
   assert.equal(classifyD1TransportException(new Error('something novel')), 'UNMAPPED');
+});
+
+
+test('real node:sqlite duplicate assignment slot maps to DUPLICATE_SLOT despite generic sqlite code', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    "CREATE TABLE queue_assignments (" +
+      "target_account TEXT NOT NULL," +
+      "resolved_at TEXT NOT NULL," +
+      "status TEXT NOT NULL" +
+    ");" +
+    "CREATE UNIQUE INDEX queue_assignments_active_slot_uq " +
+      "ON queue_assignments(target_account,resolved_at) WHERE status='active';",
+  );
+  db.prepare(
+    "INSERT INTO queue_assignments(target_account,resolved_at,status) VALUES (?,?,?)",
+  ).run('x-primary', '2026-09-30T10:00:00.000Z', 'active');
+
+  let caught = null;
+  try {
+    db.prepare(
+      "INSERT INTO queue_assignments(target_account,resolved_at,status) VALUES (?,?,?)",
+    ).run('x-primary', '2026-09-30T10:00:00.000Z', 'active');
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.ok(caught);
+  assert.equal(typeof caught.code, 'string');
+  assert.equal(classifyD1TransportException(caught), 'DUPLICATE_SLOT');
+  db.close();
+});
+
+test('unrelated sqlite UNIQUE failures remain UNMAPPED', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE queue_content(slot_label TEXT UNIQUE);");
+  db.prepare("INSERT INTO queue_content(slot_label) VALUES (?)").run('morning');
+
+  let caught = null;
+  try {
+    db.prepare("INSERT INTO queue_content(slot_label) VALUES (?)").run('morning');
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.ok(caught);
+  assert.equal(typeof caught.code, 'string');
+  assert.equal(classifyD1TransportException(caught), 'UNMAPPED');
+  db.close();
 });
