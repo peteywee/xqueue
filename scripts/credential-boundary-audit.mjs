@@ -9,6 +9,7 @@ const PRODUCTION_DB_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
 const STATUS_ENTRY = 'cloudflare/src/status-worker.mjs';
 const PUBLISHER_ENTRY = 'cloudflare/src/publisher-worker.mjs';
 const PRODUCTION_PUBLISHER = 'cloudflare/src/production-publisher.mjs';
+const PREVIEW_PROOF_ENTRY = 'cloudflare/src/preview-proof-worker.mjs';
 const failures = [];
 
 function gate(name, ok, detail = '') {
@@ -90,10 +91,13 @@ const status = readJsonc('wrangler.status.jsonc');
 const publisher = readJsonc('wrangler.publisher.jsonc');
 const authority = readJsonc('wrangler.authority.jsonc');
 const prep = readJsonc('wrangler.prep.jsonc');
+const previewProof = readJsonc('wrangler.preview-proof.jsonc');
 
 const statusGraph = collectGraph(STATUS_ENTRY);
 const publisherGraph = collectGraph(PUBLISHER_ENTRY);
+const previewProofGraph = collectGraph(PREVIEW_PROOF_ENTRY);
 const statusText = graphText(statusGraph);
+const previewProofText = graphText(previewProofGraph);
 const publisherEntryText = read(PUBLISHER_ENTRY);
 
 gate(
@@ -215,6 +219,27 @@ gate(
   !publishRe.test(statusText) &&
     ![...statusGraph.packages].some((name) => name.startsWith('@xdevplatform')),
   'no X SDK/transport',
+);
+
+gate(
+  'preview proof config is scheduler-free and non-authoritative',
+  previewProof.name === 'xqueue-preview-proof' &&
+    previewProof.main === PREVIEW_PROOF_ENTRY &&
+    !Object.hasOwn(previewProof, 'triggers') &&
+    previewProof.vars?.XQUEUE_PUBLISH_AUTHORITY === undefined &&
+    previewProof.d1_databases?.[0]?.database_name === 'xqueue-preview' &&
+    previewProof.r2_buckets?.[0]?.bucket_name === 'xqueue-media',
+  previewProof.name + ':' + previewProof.main,
+);
+
+gate(
+  'preview proof module graph has no X credential or publish capability',
+  !credentialRe.test(previewProofText) &&
+    !publishRe.test(previewProofText) &&
+    !previewProofGraph.files.has(PRODUCTION_PUBLISHER) &&
+    !previewProofGraph.files.has(PUBLISHER_ENTRY) &&
+    ![...previewProofGraph.packages].some((name) => name.startsWith('@xdevplatform')),
+  [...previewProofGraph.files.keys()].join(', '),
 );
 
 gate(
