@@ -138,19 +138,39 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
   });
 }
 
+const CONTROL_PLANE_ERROR_CODES = new Set([
+  'D1_READ_UNAVAILABLE',
+  'HALT_GENERATION_CHANGED',
+  'MUTATION_LANE_HALTED',
+  'MUTATION_LANE_CONTENDED',
+  'MUTATION_LANE_LOST',
+  'STALE_RUNTIME',
+  'STALE_ASSIGNMENT',
+  'DUPLICATE_SLOT',
+  'ALREADY_COMMITTED',
+  'CHECKPOINT_STALE',
+  'CHECKPOINT_CORRUPT',
+  'D1_BATCH_APPLIED',
+  'D1_BATCH_AMBIGUOUS',
+  'D1_BATCH_TRANSIENT_NOT_APPLIED',
+  'D1_BATCH_PERMANENT_NOT_APPLIED',
+]);
+
 export function classifyD1TransportException(error) {
   const code = typeof error?.code === 'string' ? error.code : null;
-  if (code) return code;
+  if (code && CONTROL_PLANE_ERROR_CODES.has(code)) return code;
+
   const message = String(error?.message ?? error ?? '').toLowerCase();
   if (message.includes('timeout') || message.includes('network') || message.includes('fetch')) return 'D1_BATCH_AMBIGUOUS';
+
   const duplicateSlot =
-    message.includes('unique') &&
+    message.includes('unique constraint failed') &&
     (
-      message.includes('slot') ||
       (
         message.includes('queue_assignments.target_account') &&
         message.includes('queue_assignments.resolved_at')
       ) ||
+      message.includes('queue_assignments_active_slot_uq') ||
       message.includes('queue_assignments_dispatchable_slot_uq')
     );
   if (duplicateSlot) return 'DUPLICATE_SLOT';
