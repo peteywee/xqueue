@@ -17,10 +17,10 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('legacy Workers Builds descriptor remains compatibility-only and unscheduled', () => {
+test('legacy Workers Builds descriptor is retired from the live status Worker identity', () => {
   const config = readJsonc('wrangler.jsonc');
 
-  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.name, 'xqueue-legacy-compat-retired');
   assert.equal(config.main, 'cloudflare/src/worker.mjs');
   assert.equal(declaresSchedulerMutation(config), false);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
@@ -117,4 +117,26 @@ test('empty cron declarations remain destructive authority mutations', () => {
 
   assert.equal(declaresSchedulerMutation(omitted), false);
   assert.equal(declaresSchedulerMutation(destructiveEmpty), true);
+});
+
+
+test('retired precutover config cannot overwrite live status Worker or recreate a cron', () => {
+  const prep = readJsonc('wrangler.prep.jsonc');
+  assert.equal(prep.name, 'xqueue-precutover-retired');
+  assert.equal(prep.main, 'cloudflare/src/worker.mjs');
+  assert.equal(declaresSchedulerMutation(prep), false);
+  assert.equal(prep.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
+});
+
+test('only status config owns the xqueue-production Worker name', () => {
+  const configs = [
+    ['wrangler.jsonc', readJsonc('wrangler.jsonc')],
+    ['wrangler.prep.jsonc', readJsonc('wrangler.prep.jsonc')],
+    ['wrangler.status.jsonc', readJsonc('wrangler.status.jsonc')],
+    ['wrangler.publisher.jsonc', readJsonc('wrangler.publisher.jsonc')],
+    ['wrangler.authority.jsonc', readJsonc('wrangler.authority.jsonc')],
+    ['wrangler.preview.jsonc', readJsonc('wrangler.preview.jsonc')],
+  ];
+  const owners = configs.filter(([, config]) => config.name === 'xqueue-production');
+  assert.deepEqual(owners.map(([path]) => path), ['wrangler.status.jsonc']);
 });
