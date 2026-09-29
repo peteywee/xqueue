@@ -90,8 +90,8 @@ const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 const prepCrons = prepConfig.value.triggers?.crons ?? [];
 
 gate(
-  'legacy production descriptor is compatibility-only and unscheduled',
-  defaultConfig.value.name === 'xqueue-production' &&
+  'legacy compatibility descriptor cannot target live status Worker',
+  defaultConfig.value.name === 'xqueue-legacy-compat-retired' &&
     defaultConfig.value.main === legacyWorkerPath &&
     defaultDeclaresTriggers === false,
   defaultConfig.value.name + ':' + defaultConfig.value.main,
@@ -136,14 +136,12 @@ gate(
 );
 
 gate(
-  'production prep config is exact-cron but authority-disabled',
-  prepConfig.value.name === 'xqueue-production' &&
+  'retired precutover config cannot target live status Worker or scheduler',
+  prepConfig.value.name === 'xqueue-precutover-retired' &&
     prepConfig.value.main === legacyWorkerPath &&
-    Array.isArray(prepCrons) &&
-    prepCrons.length === 1 &&
-    prepCrons[0] === '*/15 * * * *' &&
+    prepConfig.value.triggers === undefined &&
     prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
-  prepConfig.value.name + ':' + JSON.stringify(prepCrons),
+  prepConfig.value.name + ':' + JSON.stringify(prepConfig.value.triggers ?? null),
 );
 
 gate(
@@ -451,3 +449,12 @@ if (failures.length) {
   }
   process.exit(1);
 }
+
+
+gate(
+  'only status config may deploy Worker identity xqueue-production',
+  statusConfig.value.name === 'xqueue-production' &&
+    [defaultConfig, prepConfig, publisherConfig, authorityConfig, previewConfig]
+      .every(({ value }) => value.name !== 'xqueue-production'),
+  statusConfig.value.name,
+);
