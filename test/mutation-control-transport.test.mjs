@@ -115,6 +115,7 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
   assert.equal(safety.authority.owner, 'cloudflare');
   assert.equal(safety.unresolvedAttemptCount, 0);
   assert.equal(safety.activeLeaseCount, 0);
+  assert.equal(safety.runtimeSnapshotObserved, true);
   assert.equal(safety.inflight, null);
   assert.equal(await transport.captureCheckpoint(), 'bookmark_12345');
   const prepared = transport.prepare('UPDATE mutation_operations SET state=state');
