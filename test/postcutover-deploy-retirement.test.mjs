@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function text(path) {
   return readFileSync(new URL('../' + path, import.meta.url), 'utf8');
@@ -11,14 +15,9 @@ function json(path) {
 }
 
 test('only status descriptor owns the live xqueue-production Worker identity', () => {
-  const paths = [
-    'wrangler.jsonc',
-    'wrangler.prep.jsonc',
-    'wrangler.status.jsonc',
-    'wrangler.publisher.jsonc',
-    'wrangler.authority.jsonc',
-    'wrangler.preview.jsonc',
-  ];
+  const paths = readdirSync(ROOT)
+    .filter((name) => /^wrangler.*\.jsonc$/.test(name))
+    .sort();
   const owners = paths.filter((path) => json(path).name === 'xqueue-production');
   assert.deepEqual(owners, ['wrangler.status.jsonc']);
 });
@@ -89,4 +88,11 @@ test('main-push TSAL waits for status-role reconciliation before production evid
   assert.ok(runtime > wait);
   assert.match(source, /post_push_status_role_reconciliation_timeout/);
   assert.match(source, /Date\.now\(\) \+ 180_000/);
+});
+
+
+test('status reconciliation requires HTTP success and healthy status body', () => {
+  const source = text('.github/workflows/production-status-role-reconcile.yml');
+  assert.match(source, /response\.ok/);
+  assert.match(source, /body\?\.status === 'ok'/);
 });
