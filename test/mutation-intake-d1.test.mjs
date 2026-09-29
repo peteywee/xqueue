@@ -15,6 +15,7 @@ import {
   prepareIntakeAtomicApply,
   prepareIntakeAtomicFinalize,
   projectIntakeRuntimeRevision,
+  readIntakeMutationCompletion,
 } from '../src/mutation-intake-d1.mjs';
 
 function sha256(value) {
@@ -200,7 +201,8 @@ test('atomic intake apply commits canonical writes in VERIFYING and finalize rel
     controlPlan.operation_id,
   );
 
-  const completion = intakeCompletionEvidence(controlPlan, runtimeRevision);
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  const completion = intakeCompletionEvidence(controlPlan, observed);
   assert.equal(verifyIntakeMutationCompletion(controlPlan, completion.observed).ok, true);
 
   const finalize = prepareIntakeAtomicFinalize({
@@ -307,6 +309,41 @@ test('checkpoint and projected runtime are mandatory exact fences', async () => 
     checkpointEvidence: checkpoint,
     recordedAt: '2026-09-29T10:05:00.000Z',
   }), /projected runtime revision does not match/);
+
+  raw.close();
+});
+
+
+test('exact completion readback refuses corrupted canonical item state', async () => {
+  const { raw, d1 } = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const checkpoint = intakeMutationCheckpointEvidence(
+    controlPlan,
+    'bookmark_12345',
+    '2026-09-29T10:04:00.000Z',
+  );
+
+  const apply = prepareIntakeAtomicApply({
+    db: d1,
+    controlPlan,
+    intakePlan,
+    runtimeRevision,
+    checkpointEvidence: checkpoint,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+  await d1.batch(apply.statements);
+
+  raw.prepare(
+    "UPDATE queue_content SET intake_state='approved_unscheduled' WHERE content_id=?",
+  ).run('I-ATOMIC-1');
+
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  assert.equal(observed.items[0].readback_status, 'conflict');
+  assert.throws(
+    () => intakeCompletionEvidence(controlPlan, observed),
+    /completion readback is not exact/,
+  );
 
   raw.close();
 });
