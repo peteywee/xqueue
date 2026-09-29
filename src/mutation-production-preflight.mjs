@@ -177,7 +177,12 @@ export function evaluateProductionMutationPreflight({
     }
   }
 
-  if (safety?.inflight !== null) {
+  if (safety?.runtimeSnapshotObserved !== true) {
+    blockers.push(blocker(
+      'runtime_snapshot_unreadable',
+      'The canonical runtime snapshot was not observed.',
+    ));
+  } else if (safety?.inflight !== null) {
     blockers.push(blocker(
       'publication_inflight',
       'The canonical runtime snapshot still contains inflight publication state.',
@@ -198,6 +203,7 @@ export function evaluateProductionMutationPreflight({
       publicationAuthority: Object.freeze(authority),
       unresolvedAttemptCount,
       activeLeaseCount,
+      runtimeSnapshotObserved: safety?.runtimeSnapshotObserved === true,
       inflight: safety?.inflight ?? null,
     }),
   });
