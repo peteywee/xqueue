@@ -14,21 +14,26 @@ function json(path) {
   return JSON.parse(text(path));
 }
 
-test('only status descriptor owns the live xqueue-production Worker identity', () => {
+test('every live xqueue-production descriptor is status-only', () => {
   const paths = readdirSync(ROOT)
     .filter((name) => /^wrangler.*\.jsonc$/.test(name))
     .sort();
   const owners = paths.filter((path) => json(path).name === 'xqueue-production');
-  assert.deepEqual(owners, ['wrangler.status.jsonc']);
+  assert.deepEqual(owners, ['wrangler.jsonc', 'wrangler.status.jsonc']);
+  for (const path of owners) {
+    const config = json(path);
+    assert.equal(config.main, 'cloudflare/src/status-worker.mjs');
+    assert.deepEqual(config.triggers?.crons, []);
+  }
 });
 
-test('legacy and precutover descriptors are retired deployment identities', () => {
-  const legacy = json('wrangler.jsonc');
+test('default build is safe and precutover descriptor remains retired', () => {
+  const defaultConfig = json('wrangler.jsonc');
   const prep = json('wrangler.prep.jsonc');
 
-  assert.equal(legacy.name, 'xqueue-legacy-compat-retired');
-  assert.equal(legacy.main, 'cloudflare/src/worker.mjs');
-  assert.equal(legacy.triggers, undefined);
+  assert.equal(defaultConfig.name, 'xqueue-production');
+  assert.equal(defaultConfig.main, 'cloudflare/src/status-worker.mjs');
+  assert.deepEqual(defaultConfig.triggers?.crons, []);
 
   assert.equal(prep.name, 'xqueue-precutover-retired');
   assert.equal(prep.main, 'cloudflare/src/worker.mjs');
