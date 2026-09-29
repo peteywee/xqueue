@@ -128,7 +128,7 @@ test('retired precutover config cannot overwrite live status Worker or recreate 
   assert.equal(prep.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
 });
 
-test('only status config owns the xqueue-production Worker name', () => {
+test('all xqueue-production descriptors are status-only', () => {
   const configs = [
     ['wrangler.jsonc', readJsonc('wrangler.jsonc')],
     ['wrangler.prep.jsonc', readJsonc('wrangler.prep.jsonc')],
@@ -138,5 +138,9 @@ test('only status config owns the xqueue-production Worker name', () => {
     ['wrangler.preview.jsonc', readJsonc('wrangler.preview.jsonc')],
   ];
   const owners = configs.filter(([, config]) => config.name === 'xqueue-production');
-  assert.deepEqual(owners.map(([path]) => path), ['wrangler.status.jsonc']);
+  assert.deepEqual(owners.map(([path]) => path), ['wrangler.jsonc', 'wrangler.status.jsonc']);
+  assert.ok(owners.every(([, config]) =>
+    config.main === 'cloudflare/src/status-worker.mjs' &&
+    JSON.stringify(config.triggers?.crons) === JSON.stringify([])
+  ));
 });
