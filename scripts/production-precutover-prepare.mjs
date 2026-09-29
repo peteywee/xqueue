@@ -459,6 +459,7 @@ function assertHaltState() {
 }
 
 async function main() {
+  throw new Error('retired after #46 canonical activation; production pre-cutover preparation is no longer permitted');
   requireApproval();
   assertBundle();
   const before = assertPreMutationState();

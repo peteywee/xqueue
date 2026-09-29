@@ -81,6 +81,16 @@ const authorityConfig = readJsonc('wrangler.authority.jsonc');
 const prepConfig = readJsonc('wrangler.prep.jsonc');
 const previewConfig = readJsonc('wrangler.preview.jsonc');
 
+const trackedWranglerDescriptors = execFileSync(
+  'git',
+  ['ls-files', 'wrangler*.jsonc'],
+  { cwd: ROOT, encoding: 'utf8' },
+)
+  .split('\n')
+  .map((value) => value.trim())
+  .filter(Boolean)
+  .map((path) => ({ path, ...readJsonc(path) }));
+
 const defaultDeclaresTriggers = Object.hasOwn(defaultConfig.value, 'triggers');
 const statusDeclaresTriggers = Object.hasOwn(statusConfig.value, 'triggers');
 const statusCrons = statusConfig.value.triggers?.crons;
@@ -90,8 +100,8 @@ const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 const prepCrons = prepConfig.value.triggers?.crons ?? [];
 
 gate(
-  'legacy production descriptor is compatibility-only and unscheduled',
-  defaultConfig.value.name === 'xqueue-production' &&
+  'legacy compatibility descriptor cannot target live status Worker',
+  defaultConfig.value.name === 'xqueue-legacy-compat-retired' &&
     defaultConfig.value.main === legacyWorkerPath &&
     defaultDeclaresTriggers === false,
   defaultConfig.value.name + ':' + defaultConfig.value.main,
@@ -136,14 +146,12 @@ gate(
 );
 
 gate(
-  'production prep config is exact-cron but authority-disabled',
-  prepConfig.value.name === 'xqueue-production' &&
+  'retired precutover config cannot target live status Worker or scheduler',
+  prepConfig.value.name === 'xqueue-precutover-retired' &&
     prepConfig.value.main === legacyWorkerPath &&
-    Array.isArray(prepCrons) &&
-    prepCrons.length === 1 &&
-    prepCrons[0] === '*/15 * * * *' &&
+    prepConfig.value.triggers === undefined &&
     prepConfig.value.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
-  prepConfig.value.name + ':' + JSON.stringify(prepCrons),
+  prepConfig.value.name + ':' + JSON.stringify(prepConfig.value.triggers ?? null),
 );
 
 gate(
@@ -431,6 +439,19 @@ gate(
   'no media binaries tracked',
   trackedMedia.length === 0,
   trackedMedia.join(' ') || 'none',
+);
+
+
+
+const liveStatusOwners = trackedWranglerDescriptors.filter(
+  ({ value }) => value.name === 'xqueue-production',
+);
+gate(
+  'only status config may deploy Worker identity xqueue-production',
+  liveStatusOwners.length === 1 &&
+    liveStatusOwners[0].path === 'wrangler.status.jsonc' &&
+    liveStatusOwners[0].value.main === statusWorkerPath,
+  liveStatusOwners.map(({ path }) => path).join(',') || 'none',
 );
 
 const failures = results.filter((result) => !result.ok);

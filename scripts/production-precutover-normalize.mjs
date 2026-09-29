@@ -44,6 +44,7 @@ function execute(sql){
 }
 
 async function main(){
+  throw new Error('retired after #46 canonical activation; production pre-cutover normalization is no longer permitted');
   if(process.env.XQUEUE_PRODUCTION_PREP_APPROVED!==APPROVAL) throw new Error('explicit production prep approval required');
 
   const snapshot=query("SELECT value FROM runtime_metadata WHERE key='state.snapshot_json' LIMIT 1;")[0];

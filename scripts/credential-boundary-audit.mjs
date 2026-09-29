@@ -97,8 +97,8 @@ const statusText = graphText(statusGraph);
 const publisherEntryText = read(PUBLISHER_ENTRY);
 
 gate(
-  'legacy production descriptor remains unchanged for #46 activation',
-  legacy.name === 'xqueue-production' &&
+  'legacy compatibility descriptor cannot overwrite live status Worker',
+  legacy.name === 'xqueue-legacy-compat-retired' &&
     legacy.main === 'cloudflare/src/worker.mjs' &&
     !Object.hasOwn(legacy, 'triggers'),
   legacy.name + ':' + legacy.main,
@@ -136,10 +136,10 @@ gate(
 );
 
 gate(
-  'prep config keeps combined Worker scheduled but publication-disabled',
-  prep.name === 'xqueue-production' &&
+  'retired prep config cannot own a scheduler or live status identity',
+  prep.name === 'xqueue-precutover-retired' &&
     prep.main === 'cloudflare/src/worker.mjs' &&
-    JSON.stringify(prep.triggers?.crons) === JSON.stringify(['*/15 * * * *']) &&
+    prep.triggers === undefined &&
     prep.vars?.XQUEUE_PUBLISH_AUTHORITY === 'disabled',
   prep.name + ':' + prep.main + ':' + String(prep.vars?.XQUEUE_PUBLISH_AUTHORITY ?? 'missing'),
 );

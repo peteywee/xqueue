@@ -26,12 +26,12 @@ test('production prep candidate pins committed UTC on all 180 rows', () => {
   assert.equal(JSON.parse(CANONICAL_QUEUE_JSON).length, 180);
 });
 
-test('prep config keeps the existing cron but disables publication authority', () => {
+test('retired prep config cannot overwrite live production status or scheduler', () => {
   const config = JSON.parse(text('wrangler.prep.jsonc'));
-  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.name, 'xqueue-precutover-retired');
   assert.equal(config.main, 'cloudflare/src/worker.mjs');
   assert.equal(config.vars.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
-  assert.deepEqual(config.triggers.crons, ['*/15 * * * *']);
+  assert.equal(config.triggers, undefined);
   assert.equal(
     config.d1_databases[0].database_id,
     'fc85026e-bfc8-435f-8bb0-c60e139178a3',
@@ -42,35 +42,17 @@ test('prep config keeps the existing cron but disables publication authority', (
   );
 });
 
-test('production preparation workflow is manual-only and authority-disable precedes mutation', () => {
+test('production preparation workflow is hard-retired after canonical activation', () => {
   const source = text('.github/workflows/production-precutover-preparation.yml');
   assert.match(source, /workflow_dispatch:/);
   assert.doesNotMatch(source, /\bpush:/);
-  assert.match(source, /PREPARE_XQUEUE_PRODUCTION/);
-
-  const deploy = source.indexOf('Deploy fail-closed UTC bundle with Cloudflare authority disabled');
-  const inert = source.indexOf('Prove Cloudflare publication is inert before D1 mutation');
-  const migrations = source.indexOf('Apply production continuous-queue and recovery schema');
-  const seed = source.indexOf('Seed durable queue/runtime and activate committed UTC metadata');
-  const normalize = source.indexOf('Normalize expired pre-cutover assignments to deferred');
-  const finalHealth = source.indexOf('Prove UTC bundle and dynamic runtime are readable while authority stays disabled');
-
-  assert.ok(
-    deploy >= 0 &&
-    inert > deploy &&
-    migrations > inert &&
-    seed > migrations &&
-    normalize > seed &&
-    finalHealth > normalize
-  );
-  assert.match(source, /authorityFlag === false/);
-  assert.match(source, /authorized === false/);
-  assert.match(source, /livePublication === false/);
-  assert.match(source, /schedulerAuthority === false/);
-  assert.match(source, /authorityReadiness\?\.ok !== true/);
-  assert.match(source, /Date\.now\(\) \+ 120_000/);
-  assert.match(source, /setTimeout\(resolve, 5_000\)/);
-  assert.match(source, /authority_disable_propagation_timeout/);
+  assert.match(source, /Production Pre-Cutover Preparation \(Retired\)/);
+  assert.match(source, /cannot deploy or mutate production/);
+  assert.match(source, /exit 1/);
+  assert.doesNotMatch(source, /wrangler deploy/);
+  assert.doesNotMatch(source, /d1 migrations apply/);
+  assert.doesNotMatch(source, /production-precutover-prepare\.mjs/);
+  assert.doesNotMatch(source, /production-precutover-normalize\.mjs/);
 });
 
 test('production prep runtime snapshot includes already-deferred assignments on rerun', () => {

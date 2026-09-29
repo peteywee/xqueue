@@ -72,8 +72,8 @@
     "d1:restore-proof": "node scripts/d1-backup-restore-proof.mjs",
     "preview:parity-proof": "node scripts/preview-static-dynamic-parity.mjs",
     "cutover:readiness": "node scripts/production-cutover-readiness.mjs",
-    "production:precutover:prepare": "node scripts/production-precutover-prepare.mjs",
-    "production:precutover:normalize": "node scripts/production-precutover-normalize.mjs",
+    "production:precutover:prepare": "node -e \"console.error('STOP: retired after #46; use production:acceptance'); process.exit(1)\"",
+    "production:precutover:normalize": "node -e \"console.error('STOP: retired after #46; publisher handles missed-slot deferral'); process.exit(1)\"",
     "production:authority": "node scripts/production-authority-control.mjs",
     "production:acceptance": "node scripts/production-acceptance-batch.mjs",
     "production:status": "node scripts/production-operator-status.mjs"

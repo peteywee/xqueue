@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+# RETIRED AFTER #46: this historical direct-deploy release path must not
+# mutate production. Use pnpm production:acceptance instead.
+printf '%s\n' 'STOP: finalize-xqueue-1.1.0.sh is retired after canonical activation.' >&2
+printf '%s\n' 'Use pnpm production:acceptance for production publisher releases.' >&2
+exit 1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 

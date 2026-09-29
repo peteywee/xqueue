@@ -177,6 +177,45 @@ jobs:
           }
           NODE
 
+      - name: Wait for post-push status-role reconciliation
+        if: github.event_name == 'push'
+        working-directory: xqueue
+        run: |
+          node --input-type=module <<'NODE'
+          const endpoint = 'https://xqueue-production.patrickcraven.workers.dev/health';
+          const deadline = Date.now() + 180_000;
+          let last = null;
+
+          while (Date.now() < deadline) {
+            try {
+              const response = await fetch(endpoint, {
+                headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+              });
+              const body = await response.json();
+              last = body;
+
+              if (
+                body?.role === 'status-only' &&
+                body?.publicationCapable === false &&
+                body?.publisherAuthority?.ok === true &&
+                body?.publicationHalt?.ok === true &&
+                body?.schedulerLiveness?.required === true
+              ) {
+                console.log('PASS: post-push status-only role is reconciled');
+                process.exit(0);
+              }
+            } catch {}
+
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+          }
+
+          console.error(JSON.stringify({
+            error: 'post_push_status_role_reconciliation_timeout',
+            last,
+          }, null, 2));
+          process.exit(1);
+          NODE
+
       - name: Collect read-only production runtime evidence
         if: github.event_name != 'pull_request'
         working-directory: xqueue
