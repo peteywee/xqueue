@@ -174,14 +174,14 @@ Preview media byte proof does not grant the GitHub Cloudflare token direct R2 ob
 
 ## Post-cutover deploy guard
 
-After #46, exactly one tracked config may own the live status Worker identity `xqueue-production`: `wrangler.status.jsonc`.
+After #46, every tracked config that can resolve to the live `xqueue-production` identity must be status-only. Both `wrangler.jsonc` (Cloudflare Workers Builds default) and `wrangler.status.jsonc` use `cloudflare/src/status-worker.mjs` with an empty cron set.
 
-- `wrangler.jsonc` uses the retired identity `xqueue-legacy-compat-retired` and is compatibility/D1-command-only.
+- `wrangler.jsonc` is a fail-safe Workers Builds surface. Do not point it at the legacy combined Worker: Cloudflare Workers Builds can override the configured Worker name for the dashboard-connected project.
 - `wrangler.prep.jsonc` uses `xqueue-precutover-retired`, has no cron, and is historical pre-cutover tooling only.
 - the historical Production Pre-Cutover Preparation workflow is hard-retired and performs no production mutation;
 - every push to `main` runs the Production Status Role reconciliation workflow, which deploys only `wrangler.status.jsonc` and proves the live endpoint is status-only before succeeding.
 
-Do not rename either retired config back to `xqueue-production`. That would reintroduce the overwrite path that caused incident #147.
+Keep `wrangler.prep.jsonc` retired. Keep both live/default `xqueue-production` descriptors status-only. A legacy combined entrypoint in root `wrangler.jsonc` can be promoted to the dashboard-connected Worker by Workers Builds even when the repository `name` field is changed.
 
 ## Production Worker topology
 
