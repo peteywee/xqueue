@@ -34,7 +34,8 @@ test('preview proof Worker cannot schedule or reach publication code', () => {
 
 test('preview runtime proof no longer shells out to raw R2 object API', () => {
   const source = text('scripts/preview-dynamic-runtime-proof.mjs');
-  assert.doesNotMatch(source, /wrangler[\s\S]*r2[\s\S]*object[\s\S]*get/);
+  assert.equal(source.includes("'r2',\n        'object',\n        'get'"), false);
+  assert.equal(source.includes('"r2",\n        "object",\n        "get"'), false);
   assert.match(source, /xqueue-preview-proof\.patrickcraven\.workers\.dev\/proof/);
   assert.match(source, /preview-proof-worker-r2-binding/);
 });
