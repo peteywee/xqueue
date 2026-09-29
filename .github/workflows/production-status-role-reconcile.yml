@@ -1,0 +1,99 @@
+name: Reconcile Production Status Role
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-production-status-role
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove authority and credential boundaries
+        run: |
+          pnpm cf:auth:preflight --environment production
+          pnpm audit:authority
+          pnpm audit:credentials
+
+      - name: Deploy status-only production Worker
+        run: pnpm wrangler deploy --config wrangler.status.jsonc
+
+      - name: Verify live status-only role
+        run: |
+          node --input-type=module <<'NODE'
+          const url = 'https://xqueue-production.patrickcraven.workers.dev/health';
+          const deadline = Date.now() + 120_000;
+          let last = null;
+
+          while (Date.now() < deadline) {
+            try {
+              const response = await fetch(url, {
+                headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+              });
+              const body = await response.json();
+              last = body;
+
+              const ok =
+                body?.service === 'xqueue' &&
+                body?.role === 'status-only' &&
+                body?.publicationCapable === false &&
+                body?.livePublication === false &&
+                body?.schedulerAuthority === false &&
+                body?.publisherAuthority?.ok === true &&
+                body?.publisherAuthority?.owner === 'cloudflare' &&
+                body?.publisherAuthority?.transitionState === 'stable' &&
+                body?.publicationHalt?.ok === true &&
+                body?.schedulerLiveness?.required === true &&
+                body?.storage?.d1?.reachable === true &&
+                body?.storage?.r2?.reachable === true;
+
+              if (ok) {
+                console.log(JSON.stringify({
+                  status: 'pass',
+                  role: body.role,
+                  publicationCapable: body.publicationCapable,
+                  publisherAuthority: body.publisherAuthority,
+                  publicationHalt: body.publicationHalt,
+                  schedulerLiveness: body.schedulerLiveness,
+                }, null, 2));
+                process.exit(0);
+              }
+            } catch {}
+
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+          }
+
+          console.error(JSON.stringify({
+            status: 'fail',
+            reason: 'status_role_reconciliation_timeout',
+            last,
+          }, null, 2));
+          process.exit(1);
+          NODE
