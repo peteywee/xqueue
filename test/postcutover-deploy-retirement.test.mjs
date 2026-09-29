@@ -85,18 +85,22 @@ test('TSAL keeps push candidate evidence separate from live production monitorin
   assert.doesNotMatch(source, /Wait for post-push status-role reconciliation/);
   assert.match(
     source,
-    /Collect read-only production runtime evidence[\s\S]*github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+    /Collect read-only production runtime evidence[\s\S]*github\.event_name == 'workflow_run' \|\| github\.event_name == 'workflow_dispatch'/,
   );
   assert.match(
     source,
-    /Collect read-only Cloudflare deployment evidence[\s\S]*github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+    /Collect read-only Cloudflare deployment evidence[\s\S]*github\.event_name == 'workflow_run' \|\| github\.event_name == 'workflow_dispatch'/,
   );
 });
 
-test('production status role self-heals before the hourly TSAL monitor', () => {
-  const source = text('.github/workflows/production-status-role-reconcile.yml');
-  assert.match(source, /cron: '8 \* \* \* \*'/);
-  assert.match(text('.github/workflows/tsal-conformance.yml'), /cron: '17 \* \* \* \*'/);
+test('production TSAL monitor is explicitly chained from successful status reconciliation', () => {
+  const reconcile = text('.github/workflows/production-status-role-reconcile.yml');
+  const tsal = text('.github/workflows/tsal-conformance.yml');
+  assert.match(reconcile, /cron: '8 \* \* \* \*'/);
+  assert.match(tsal, /workflow_run:/);
+  assert.match(tsal, /workflows: \["Reconcile Production Status Role"\]/);
+  assert.match(tsal, /github\.event\.workflow_run\.conclusion == 'success'/);
+  assert.doesNotMatch(tsal, /cron: '17 \* \* \* \*'/);
 });
 
 
