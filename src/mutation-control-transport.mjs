@@ -123,6 +123,7 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
         authority: authority ?? null,
         unresolvedAttemptCount: Number(unresolved?.unresolved ?? -1),
         activeLeaseCount: Number(leases?.active_leases ?? -1),
+        runtimeSnapshotObserved: runtime !== null,
         inflight: runtime?.inflight ?? null,
       });
     },
