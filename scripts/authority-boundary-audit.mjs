@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Mechanical proof of XQueue deployment and publication-authority boundaries.
 // #46 activated the split production topology. wrangler.jsonc remains only a
-// legacy compatibility descriptor; it is not routine publication authority.
+// default Workers Builds descriptor is status-only; it is never publication authority.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -100,10 +100,11 @@ const authorityCrons = authorityConfig.value.triggers?.crons ?? [];
 const prepCrons = prepConfig.value.triggers?.crons ?? [];
 
 gate(
-  'legacy compatibility descriptor cannot target live status Worker',
-  defaultConfig.value.name === 'xqueue-legacy-compat-retired' &&
-    defaultConfig.value.main === legacyWorkerPath &&
-    defaultDeclaresTriggers === false,
+  'default Workers Builds descriptor is status-only and scheduler-free',
+  defaultConfig.value.name === 'xqueue-production' &&
+    defaultConfig.value.main === statusWorkerPath &&
+    Array.isArray(defaultConfig.value.triggers?.crons) &&
+    defaultConfig.value.triggers.crons.length === 0,
   defaultConfig.value.name + ':' + defaultConfig.value.main,
 );
 
@@ -446,11 +447,19 @@ gate(
 const liveStatusOwners = trackedWranglerDescriptors.filter(
   ({ value }) => value.name === 'xqueue-production',
 );
+const expectedStatusDescriptors = ['wrangler.jsonc', 'wrangler.status.jsonc'];
 gate(
-  'only status config may deploy Worker identity xqueue-production',
-  liveStatusOwners.length === 1 &&
-    liveStatusOwners[0].path === 'wrangler.status.jsonc' &&
-    liveStatusOwners[0].value.main === statusWorkerPath,
+  'every tracked xqueue-production descriptor is status-only',
+  liveStatusOwners.length === expectedStatusDescriptors.length &&
+    liveStatusOwners
+      .map(({ path }) => path)
+      .sort()
+      .every((path, index) => path === expectedStatusDescriptors[index]) &&
+    liveStatusOwners.every(({ value }) =>
+      value.main === statusWorkerPath &&
+      Array.isArray(value.triggers?.crons) &&
+      value.triggers.crons.length === 0
+    ),
   liveStatusOwners.map(({ path }) => path).join(',') || 'none',
 );
 
