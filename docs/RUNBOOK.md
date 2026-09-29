@@ -164,11 +164,11 @@ It does not use shell-wide `set -e` / errexit behavior.
 
 ## Monitoring and proof credential boundaries
 
-Production status-role drift is self-healed by `Reconcile Production Status Role` on every `main` push and hourly at minute 8. The scheduled TSAL production monitor runs at minute 17, after that reconciliation window.
+Production status-role drift is self-healed by `Reconcile Production Status Role` on every `main` push and hourly at minute 8. Live TSAL monitoring is triggered by the successful completion of that reconciliation workflow, so the dependency is explicit rather than inferred from cron timing.
 
 TSAL evidence classes are separated:
 - pull requests and pushes emit exact-candidate test evidence;
-- scheduled/manual TSAL runs emit live runtime/deployment evidence against durable production authority.
+- reconciliation-triggered/manual TSAL runs emit live runtime/deployment evidence against durable production authority.
 
 Preview media byte proof does not grant the GitHub Cloudflare token direct R2 object access. `xqueue-preview-proof` reads R2 through a Worker binding and returns only integrity metadata (key, size, SHA-256 match), with no queued content, X capability, scheduler, or mutation API.
 
