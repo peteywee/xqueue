@@ -26,6 +26,12 @@ function fakeDb() {
           if (sql.startsWith('SELECT * FROM mutation_operations')) return { operation_id: state.args[0] };
           return rows.get(sql) ?? null;
         },
+        async all() {
+          if (sql.startsWith('SELECT * FROM mutation_operation_items')) {
+            return { results: [{ operation_id: state.args[0], item_key: 'I-1', readback_status: 'applied' }] };
+          }
+          return { results: [] };
+        },
         async run() { return { success: true }; },
       };
     },
@@ -86,12 +92,13 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
     fetchImpl: async () => ({ ok: true, json: async () => ({ success: true, result: { bookmark: 'bookmark_12345' } }) }),
   });
   assert.deepEqual(Object.keys(transport).sort(), [
-    'batch', 'captureCheckpoint', 'readHaltState', 'readLaneState', 'readOperation', 'readRuntimeState',
+    'batch', 'captureCheckpoint', 'readHaltState', 'readLaneState', 'readOperation', 'readOperationItems', 'readRuntimeState',
   ]);
   assert.equal((await transport.readHaltState()).generation, 3);
   assert.equal((await transport.readLaneState()).generation, 7);
   assert.equal((await transport.readRuntimeState()).generation, 9);
   assert.equal((await transport.readOperation('op-1')).operation_id, 'op-1');
+  assert.equal((await transport.readOperationItems('op-1'))[0].item_key, 'I-1');
   assert.equal(await transport.captureCheckpoint(), 'bookmark_12345');
   const stmt = db.prepare('UPDATE mutation_operations SET state=state');
   assert.equal((await transport.batch([stmt]))[0].success, true);

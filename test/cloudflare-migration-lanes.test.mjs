@@ -23,6 +23,7 @@ const SHARED = [
   '0011_global_publication_halt.sql',
   '0012_reconciliation_determinations.sql',
   '0015_mutation_control_plane.sql',
+  '0016_mutation_completion_item_guard.sql',
 ];
 
 test('default production config uses the production-safe migration lane', () => {
@@ -45,10 +46,14 @@ test('production-safe lane preserves history and admits only production authorit
     .sort();
 
   assert.deepEqual(files, [
-    ...SHARED.filter((name) => name !== '0015_mutation_control_plane.sql'),
+    ...SHARED.filter((name) => ![
+      '0015_mutation_control_plane.sql',
+      '0016_mutation_completion_item_guard.sql',
+    ].includes(name)),
     '0013_authority_ownership.sql',
     '0014_authority_event_projection.sql',
     '0015_mutation_control_plane.sql',
+    '0016_mutation_completion_item_guard.sql',
   ]);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
   assert.match(text('cloudflare/migrations-production/0013_authority_ownership.sql'), /CREATE TABLE authority_state/);
