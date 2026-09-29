@@ -17,12 +17,13 @@ function declaresSchedulerMutation(config) {
   return Object.prototype.hasOwnProperty.call(config, 'triggers');
 }
 
-test('legacy Workers Builds descriptor is retired from the live status Worker identity', () => {
+test('default Workers Builds descriptor is production status-only and scheduler-free', () => {
   const config = readJsonc('wrangler.jsonc');
 
-  assert.equal(config.name, 'xqueue-legacy-compat-retired');
-  assert.equal(config.main, 'cloudflare/src/worker.mjs');
-  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.name, 'xqueue-production');
+  assert.equal(config.main, 'cloudflare/src/status-worker.mjs');
+  assert.equal(declaresSchedulerMutation(config), true);
+  assert.deepEqual(config.triggers?.crons, []);
   assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
   assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
 });
@@ -128,7 +129,7 @@ test('retired precutover config cannot overwrite live status Worker or recreate 
   assert.equal(prep.vars?.XQUEUE_PUBLISH_AUTHORITY, 'disabled');
 });
 
-test('only status config owns the xqueue-production Worker name', () => {
+test('all xqueue-production descriptors are status-only', () => {
   const configs = [
     ['wrangler.jsonc', readJsonc('wrangler.jsonc')],
     ['wrangler.prep.jsonc', readJsonc('wrangler.prep.jsonc')],
@@ -138,5 +139,9 @@ test('only status config owns the xqueue-production Worker name', () => {
     ['wrangler.preview.jsonc', readJsonc('wrangler.preview.jsonc')],
   ];
   const owners = configs.filter(([, config]) => config.name === 'xqueue-production');
-  assert.deepEqual(owners.map(([path]) => path), ['wrangler.status.jsonc']);
+  assert.deepEqual(owners.map(([path]) => path), ['wrangler.jsonc', 'wrangler.status.jsonc']);
+  assert.ok(owners.every(([, config]) =>
+    config.main === 'cloudflare/src/status-worker.mjs' &&
+    JSON.stringify(config.triggers?.crons) === JSON.stringify([])
+  ));
 });

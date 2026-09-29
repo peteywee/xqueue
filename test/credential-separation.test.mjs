@@ -32,7 +32,7 @@ test('publisher entrypoint exposes only the scheduled publication role', () => {
   assert.doesNotMatch(source, /async fetch\s*\(/);
 });
 
-test('legacy descriptor is retired while target roles are separately addressable', () => {
+test('default build and explicit status descriptors are safe while publisher remains separate', () => {
   const legacy = jsonc('wrangler.jsonc');
   const status = jsonc('wrangler.status.jsonc');
   const publisher = jsonc('wrangler.publisher.jsonc');
@@ -41,9 +41,9 @@ test('legacy descriptor is retired while target roles are separately addressable
   assert.deepEqual(
     { name: legacy.name, main: legacy.main, triggers: legacy.triggers },
     {
-      name: 'xqueue-legacy-compat-retired',
-      main: 'cloudflare/src/worker.mjs',
-      triggers: undefined,
+      name: 'xqueue-production',
+      main: 'cloudflare/src/status-worker.mjs',
+      triggers: { crons: [] },
     },
   );
 

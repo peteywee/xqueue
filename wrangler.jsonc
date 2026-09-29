@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "xqueue-legacy-compat-retired",
-  "main": "cloudflare/src/worker.mjs",
+  "name": "xqueue-production",
+  "main": "cloudflare/src/status-worker.mjs",
   "compatibility_date": "2026-09-02",
   "observability": {
     "enabled": true,
@@ -26,5 +26,8 @@
       "binding": "MEDIA",
       "bucket_name": "xqueue-media"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": []
+  }
 }
