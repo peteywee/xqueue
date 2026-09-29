@@ -29,6 +29,8 @@ on:
       - 'src/d1-deferred-lifecycle.mjs'
       - 'cloudflare/src/media-verify.mjs'
       - 'cloudflare/src/worker.mjs'
+      - 'cloudflare/src/preview-proof-worker.mjs'
+      - 'wrangler.preview-proof.jsonc'
       - 'src/continuous-queue-runtime-write.mjs'
       - 'src/continuous-queue-intake.mjs'
       - 'scripts/continuous-queue-intake.mjs'
@@ -91,7 +93,12 @@ jobs:
       - name: Apply preview-only schema
         run: pnpm preview:intake:migrate
 
+      - name: Deploy read-only preview proof Worker
+        run: pnpm wrangler deploy --config wrangler.preview-proof.jsonc
+
       - name: Initialize and prove preview dynamic runtime
+        env:
+          XQUEUE_PREVIEW_PROOF_URL: https://xqueue-preview-proof.patrickcraven.workers.dev/proof
         run: pnpm preview:runtime-proof
 
       - name: Upload dynamic runtime evidence
