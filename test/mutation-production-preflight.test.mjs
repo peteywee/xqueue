@@ -50,6 +50,7 @@ function safety(overrides = {}) {
     },
     unresolvedAttemptCount: 0,
     activeLeaseCount: 0,
+    runtimeSnapshotObserved: true,
     inflight: null,
     ...overrides,
   };
@@ -89,6 +90,7 @@ test('production mutation preflight exposes every independent blocking fact', ()
       },
       unresolvedAttemptCount: 2,
       activeLeaseCount: 1,
+      runtimeSnapshotObserved: false,
       inflight: '{"attempt":"A-1"}',
     }),
   });
@@ -106,7 +108,7 @@ test('production mutation preflight exposes every independent blocking fact', ()
     'publication_deployment_invalid',
     'unresolved_publication_attempt',
     'active_publication_lease',
-    'publication_inflight',
+    'runtime_snapshot_unreadable',
   ]) {
     assert.ok(ids.includes(expected), expected);
   }
