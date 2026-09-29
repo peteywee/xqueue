@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { buildDynamicRuntimeSnapshot } from '../cloudflare/src/dynamic-runtime-integrity.mjs';
 import { nextRuntimeRevision } from './continuous-queue-runtime-write.mjs';
+import { verifyMutationCompletion } from './mutation-control-plane.mjs';
 
 const SHA_RE = /^[a-f0-9]{64}$/;
 
@@ -153,20 +154,122 @@ export async function projectIntakeRuntimeRevision({
   });
 }
 
-export function intakeCompletionEvidence(controlPlan, runtimeRevision) {
-  const evidence = {
-    operation_id: requiredString(controlPlan?.operation_id, 'mutation operation id'),
-    runtime_generation: positiveInteger(runtimeRevision?.generation, 'runtime generation'),
-    runtime_revision_digest: digest(runtimeRevision?.revision_digest, 'runtime revision digest'),
-    items: controlPlan.items.map((item) => ({
-      item_key: item.item_key,
-      readback_status: 'applied',
-      resulting_content_revision: item.resulting_content_revision,
-      resulting_assignment_version: item.resulting_assignment_version,
-    })),
-  };
+export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan }) {
+  const d1 = ensureDb(db);
+  validatePair(controlPlan, intakePlan);
+
+  const operation = await stmt(
+    d1,
+    'SELECT operation_id,plan_digest,state,effect_state,resulting_runtime_generation,resulting_runtime_revision_digest ' +
+      'FROM mutation_operations WHERE operation_id=?',
+    controlPlan.operation_id,
+  ).first();
+
+  if (
+    !operation ||
+    operation.plan_digest !== controlPlan.plan_digest ||
+    operation.state !== 'VERIFYING' ||
+    operation.effect_state !== 'applied'
+  ) {
+    throw new Error('mutation operation readback is not exact VERIFYING/applied state');
+  }
+
+  const intakeOperation = await stmt(
+    d1,
+    'SELECT operation_id,plan_digest,status,resulting_runtime_generation,resulting_runtime_revision_digest ' +
+      'FROM queue_intake_operations WHERE operation_id=?',
+    intakePlan.operation_id,
+  ).first();
+
+  if (
+    !intakeOperation ||
+    intakeOperation.plan_digest !== intakePlan.plan_digest ||
+    intakeOperation.status !== 'claimed'
+  ) {
+    throw new Error('intake operation readback is not exact claimed state');
+  }
+
+  const runtime = await stmt(
+    d1,
+    'SELECT generation,revision_digest,source_operation_id FROM queue_runtime_revisions WHERE source_operation_id=?',
+    controlPlan.operation_id,
+  ).first();
+
+  if (
+    !runtime ||
+    Number(runtime.generation) !== Number(operation.resulting_runtime_generation) ||
+    runtime.revision_digest !== operation.resulting_runtime_revision_digest ||
+    Number(runtime.generation) !== Number(intakeOperation.resulting_runtime_generation) ||
+    runtime.revision_digest !== intakeOperation.resulting_runtime_revision_digest
+  ) {
+    throw new Error('runtime completion readback does not match operation evidence');
+  }
+
+  const items = [];
+  for (const expected of controlPlan.items) {
+    const intakeItem = intakePlan.items.find((item) => item.content_id === expected.item_key);
+    if (!intakeItem) throw new Error('intake item missing for mutation item ' + expected.item_key);
+
+    const row = await stmt(
+      d1,
+      'SELECT c.current_revision AS content_revision,c.intake_state,' +
+        'r.content_digest AS revision_digest,a.assignment_version,' +
+        'a.content_revision AS assignment_content_revision,a.content_digest AS assignment_digest,' +
+        'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state ' +
+        'FROM queue_content c ' +
+        'JOIN queue_content_revisions r ON r.content_id=c.content_id AND r.revision=c.current_revision ' +
+        'JOIN queue_assignments a ON a.content_id=c.content_id AND a.assignment_id=? ' +
+        'WHERE c.content_id=? ORDER BY a.assignment_version DESC LIMIT 1',
+      intakeItem.assignment_id,
+      intakeItem.content_id,
+    ).first();
+
+    const exact = Boolean(
+      row &&
+      Number(row.content_revision) === Number(expected.resulting_content_revision) &&
+      row.intake_state === 'scheduled' &&
+      row.revision_digest === intakeItem.content_digest &&
+      Number(row.assignment_version) === Number(expected.resulting_assignment_version) &&
+      Number(row.assignment_content_revision) === Number(expected.resulting_content_revision) &&
+      row.assignment_digest === intakeItem.content_digest &&
+      row.target_account === intakeItem.target_account &&
+      Number(row.policy_version) === Number(intakeItem.policy_version) &&
+      row.resolved_at === intakeItem.resolved_at &&
+      row.status === 'active' &&
+      row.lifecycle_state === 'scheduled'
+    );
+
+    items.push(Object.freeze({
+      item_key: expected.item_key,
+      readback_status: exact ? 'applied' : (row ? 'conflict' : 'not_applied'),
+      resulting_content_revision: row ? Number(row.content_revision) : null,
+      resulting_assignment_version: row ? Number(row.assignment_version) : null,
+    }));
+  }
+
   return Object.freeze({
-    observed: Object.freeze(evidence),
+    operation_id: operation.operation_id,
+    runtime_generation: Number(runtime.generation),
+    runtime_revision_digest: runtime.revision_digest,
+    items: Object.freeze(items),
+  });
+}
+
+export function intakeCompletionEvidence(controlPlan, observed) {
+  const verification = verifyMutationCompletion(controlPlan, observed);
+  if (!verification.ok) {
+    throw new Error('completion readback is not exact: ' + verification.reason);
+  }
+
+  const evidence = Object.freeze({
+    operation_id: observed.operation_id,
+    runtime_generation: Number(observed.runtime_generation),
+    runtime_revision_digest: digest(observed.runtime_revision_digest, 'runtime revision digest'),
+    items: Object.freeze(observed.items.map((item) => Object.freeze({ ...item }))),
+  });
+
+  return Object.freeze({
+    observed: evidence,
     evidence_digest: sha256Canonical(evidence),
   });
 }
@@ -496,6 +599,59 @@ export function prepareIntakeAtomicFinalize({
   const claimedLane = positiveInteger(controlPlan.expected_lane_generation, 'expected lane generation') + 1;
 
   const statements = [];
+
+  statements.push(assertStmt(
+    d1,
+    'EXISTS (SELECT 1 FROM queue_runtime_revisions WHERE generation=? AND revision_digest=? AND source_operation_id=?)',
+    [runtimeRevision.generation, runtimeRevision.revision_digest, controlPlan.operation_id],
+    controlPlan.operation_id,
+    recordedAt,
+  ));
+
+  statements.push(assertStmt(
+    d1,
+    "EXISTS (SELECT 1 FROM queue_intake_operations WHERE operation_id=? AND plan_digest=? AND status='claimed' " +
+      'AND resulting_runtime_generation=? AND resulting_runtime_revision_digest=?)',
+    [
+      intakePlan.operation_id,
+      intakePlan.plan_digest,
+      runtimeRevision.generation,
+      runtimeRevision.revision_digest,
+    ],
+    controlPlan.operation_id,
+    recordedAt,
+  ));
+
+  for (const expected of controlPlan.items) {
+    const intakeItem = intakePlan.items.find((item) => item.content_id === expected.item_key);
+    if (!intakeItem) throw new Error('intake item missing for mutation item ' + expected.item_key);
+
+    statements.push(assertStmt(
+      d1,
+      "EXISTS (SELECT 1 FROM queue_content c " +
+        'JOIN queue_content_revisions r ON r.content_id=c.content_id AND r.revision=c.current_revision ' +
+        'JOIN queue_assignments a ON a.content_id=c.content_id AND a.assignment_id=? ' +
+        "WHERE c.content_id=? AND c.current_revision=? AND c.intake_state='scheduled' " +
+        'AND r.content_digest=? AND a.assignment_version=? AND a.content_revision=? AND a.content_digest=? ' +
+        "AND a.target_account=? AND a.policy_version=? AND a.resolved_at=? AND a.status='active' " +
+        "AND a.lifecycle_state='scheduled')",
+      [
+        intakeItem.assignment_id,
+        intakeItem.content_id,
+        expected.resulting_content_revision,
+        intakeItem.content_digest,
+        expected.resulting_assignment_version,
+        expected.resulting_content_revision,
+        intakeItem.content_digest,
+        intakeItem.target_account,
+        intakeItem.policy_version,
+        intakeItem.resolved_at,
+      ],
+      controlPlan.operation_id,
+      recordedAt,
+    ));
+  }
+
   for (const item of completionEvidence.observed.items) {
     const itemDigest = sha256Canonical(item);
     statements.push(stmt(
