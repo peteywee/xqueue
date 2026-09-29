@@ -79,15 +79,24 @@ test('package precutover aliases are refusal-only', () => {
   }
 });
 
-test('main-push TSAL waits for status-role reconciliation before production evidence', () => {
+test('TSAL keeps push candidate evidence separate from live production monitoring', () => {
   const source = text('.github/workflows/tsal-conformance.yml');
-  const wait = source.indexOf('Wait for post-push status-role reconciliation');
-  const runtime = source.indexOf('Collect read-only production runtime evidence');
 
-  assert.ok(wait >= 0);
-  assert.ok(runtime > wait);
-  assert.match(source, /post_push_status_role_reconciliation_timeout/);
-  assert.match(source, /Date\.now\(\) \+ 180_000/);
+  assert.doesNotMatch(source, /Wait for post-push status-role reconciliation/);
+  assert.match(
+    source,
+    /Collect read-only production runtime evidence[\s\S]*github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+  );
+  assert.match(
+    source,
+    /Collect read-only Cloudflare deployment evidence[\s\S]*github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+  );
+});
+
+test('production status role self-heals before the hourly TSAL monitor', () => {
+  const source = text('.github/workflows/production-status-role-reconcile.yml');
+  assert.match(source, /cron: '8 \* \* \* \*'/);
+  assert.match(text('.github/workflows/tsal-conformance.yml'), /cron: '17 \* \* \* \*'/);
 });
 
 
