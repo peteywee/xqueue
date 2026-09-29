@@ -22,6 +22,7 @@ const SHARED = [
   '0010_publication_fence_identity.sql',
   '0011_global_publication_halt.sql',
   '0012_reconciliation_determinations.sql',
+  '0015_mutation_control_plane.sql',
 ];
 
 test('default production config uses the production-safe migration lane', () => {
@@ -31,57 +32,29 @@ test('default production config uses the production-safe migration lane', () => 
   const preview = config('wrangler.preview.jsonc');
   const authority = config('wrangler.authority.jsonc');
 
-  assert.equal(
-    production.d1_databases[0].migrations_dir,
-    'cloudflare/migrations-production',
-  );
-  assert.equal(
-    status.d1_databases[0].migrations_dir,
-    'cloudflare/migrations-production',
-  );
-  assert.equal(
-    publisher.d1_databases[0].migrations_dir,
-    'cloudflare/migrations-production',
-  );
-  assert.equal(
-    preview.d1_databases[0].migrations_dir,
-    'cloudflare/migrations',
-  );
-  assert.equal(
-    authority.d1_databases[0].migrations_dir,
-    'cloudflare/migrations-production',
-  );
+  assert.equal(production.d1_databases[0].migrations_dir, 'cloudflare/migrations-production');
+  assert.equal(status.d1_databases[0].migrations_dir, 'cloudflare/migrations-production');
+  assert.equal(publisher.d1_databases[0].migrations_dir, 'cloudflare/migrations-production');
+  assert.equal(preview.d1_databases[0].migrations_dir, 'cloudflare/migrations');
+  assert.equal(authority.d1_databases[0].migrations_dir, 'cloudflare/migrations-production');
 });
 
 test('production-safe lane preserves history and admits only production authority migrations', () => {
-  const files = readdirSync(
-    new URL('../cloudflare/migrations-production/', import.meta.url),
-  )
+  const files = readdirSync(new URL('../cloudflare/migrations-production/', import.meta.url))
     .filter((name) => name.endsWith('.sql'))
     .sort();
 
   assert.deepEqual(files, [
-    ...SHARED,
+    ...SHARED.filter((name) => name !== '0015_mutation_control_plane.sql'),
     '0013_authority_ownership.sql',
     '0014_authority_event_projection.sql',
+    '0015_mutation_control_plane.sql',
   ]);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
-  assert.match(
-    text('cloudflare/migrations-production/0013_authority_ownership.sql'),
-    /CREATE TABLE authority_state/,
-  );
-  assert.match(
-    text('cloudflare/migrations-production/0013_authority_ownership.sql'),
-    /CREATE TABLE authority_events/,
-  );
-  assert.match(
-    text('cloudflare/migrations-production/0014_authority_event_projection.sql'),
-    /CREATE TRIGGER authority_events_project_state/,
-  );
-  assert.match(
-    text('cloudflare/migrations-production/0014_authority_event_projection.sql'),
-    /RAISE\(ABORT, 'authority event projection failed'\)/,
-  );
+  assert.match(text('cloudflare/migrations-production/0013_authority_ownership.sql'), /CREATE TABLE authority_state/);
+  assert.match(text('cloudflare/migrations-production/0013_authority_ownership.sql'), /CREATE TABLE authority_events/);
+  assert.match(text('cloudflare/migrations-production/0014_authority_event_projection.sql'), /CREATE TRIGGER authority_events_project_state/);
+  assert.match(text('cloudflare/migrations-production/0014_authority_event_projection.sql'), /RAISE\(ABORT, 'authority event projection failed'\)/);
 });
 
 test('production-safe migrations are byte-identical to their canonical shared counterparts', () => {

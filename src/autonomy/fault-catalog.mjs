@@ -95,9 +95,23 @@ export const FAULT_CATALOG = Object.freeze({
   authority_unknown: { patch: { authority: 'unknown' }, scope: 'system' },
   worker_version_not_authority: { patch: { authority: 'not_bound' }, scope: 'component' },
 
+  // internal mutation transport / effect evidence (#145 adapters)
+  internal_effect_applied: { patch: { effect: 'success', effectTarget: 'internal', readback: 'proves_applied' }, scope: 'item' },
+  internal_effect_ambiguous: { patch: { effect: 'ambiguous', effectTarget: 'internal', readback: 'unavailable' }, scope: 'lane' },
+  internal_effect_transient_not_applied: { patch: { effect: 'failure_transient', effectTarget: 'internal', readback: 'proves_not_applied' }, scope: 'item' },
+  internal_effect_permanent_not_applied: { patch: { effect: 'failure_permanent', effectTarget: 'internal', readback: 'proves_not_applied' }, scope: 'item' },
+  unmapped_adapter_error: { patch: { canonical: 'corrupt', faultScope: 'unknown' }, scope: 'unknown', note: 'fail-closed fallback for any concrete adapter error without an explicit reviewed mapping' },
+
   // checkpoint / recovery
   checkpoint_stale: { patch: { checkpoint: 'stale' }, scope: 'item' },
   checkpoint_corrupt: { patch: { checkpoint: 'corrupt' }, scope: 'lane' },
+
+  // canonical mutation transport outcomes (#145)
+  internal_effect_applied: { patch: { effect: 'success', effectTarget: 'internal', readback: 'proves_applied' }, scope: 'item' },
+  internal_effect_ambiguous: { patch: { effect: 'ambiguous', effectTarget: 'internal', readback: 'unavailable' }, scope: 'lane' },
+  internal_effect_transient_not_applied: { patch: { effect: 'failure_transient', effectTarget: 'internal', readback: 'proves_not_applied' }, scope: 'item' },
+  internal_effect_permanent_not_applied: { patch: { effect: 'failure_permanent', effectTarget: 'internal', readback: 'proves_not_applied' }, scope: 'item' },
+  unmapped_adapter_error: { patch: { canonical: 'corrupt', faultScope: 'unknown' }, scope: 'unknown', note: 'unmapped concrete adapter errors fail closed at system scope' },
 
   // generation / classification
   classifier_low_confidence: { patch: { classification: 'uncertain' }, scope: 'item' },
