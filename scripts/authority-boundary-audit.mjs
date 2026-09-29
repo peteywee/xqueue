@@ -431,6 +431,16 @@ gate(
   trackedMedia.join(' ') || 'none',
 );
 
+
+
+gate(
+  'only status config may deploy Worker identity xqueue-production',
+  statusConfig.value.name === 'xqueue-production' &&
+    [defaultConfig, prepConfig, publisherConfig, authorityConfig, previewConfig]
+      .every(({ value }) => value.name !== 'xqueue-production'),
+  statusConfig.value.name,
+);
+
 const failures = results.filter((result) => !result.ok);
 console.log();
 console.log(
@@ -449,12 +459,3 @@ if (failures.length) {
   }
   process.exit(1);
 }
-
-
-gate(
-  'only status config may deploy Worker identity xqueue-production',
-  statusConfig.value.name === 'xqueue-production' &&
-    [defaultConfig, prepConfig, publisherConfig, authorityConfig, previewConfig]
-      .every(({ value }) => value.name !== 'xqueue-production'),
-  statusConfig.value.name,
-);
