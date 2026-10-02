@@ -410,6 +410,10 @@ test('trusted workflow validates saved evidence with the same completion verifie
   assert.doesNotMatch(workflow, /pull_request/);
   assert.match(workflow, /group: xqueue-preview-schema-mutation/);
   assert.match(workflow, /XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638/);
+  assert.ok(workflow.includes(
+    "'This content exists only to prove the no-X preview D1 mutation path. Run ' +",
+  ));
+  assert.ok(workflow.includes("suffix + '.',"));
   const requestStartMarker = 'HTTP_STATUS="$(curl -sS';
   const requestEndMarker = 'http://127.0.0.1:8788/mutation-intake-proof || true)"';
   const requestStart = workflow.indexOf(requestStartMarker);
