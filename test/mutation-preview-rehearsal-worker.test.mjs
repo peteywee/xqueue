@@ -411,7 +411,7 @@ test('trusted workflow validates saved evidence with the same completion verifie
   assert.match(workflow, /group: xqueue-preview-schema-mutation/);
   assert.match(workflow, /XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638/);
   assert.ok(workflow.includes("--write-out '%{http_code}'"));
-  assert.match(workflow, /cat \/tmp\/xqueue-mutation-preview-evidence\\.json >&2/);
+  assert.ok(workflow.includes('cat /tmp/xqueue-mutation-preview-evidence.json >&2'));
 });
 
 test('rehearsal triggers cover every local module in its dependency graph and the lockfile', () => {
