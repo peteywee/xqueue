@@ -10,18 +10,24 @@ on:
       - 'cloudflare/migrations/0015_mutation_control_plane.sql'
       - 'cloudflare/migrations/0016_mutation_completion_item_guard.sql'
       - 'src/continuous-queue-intake.mjs'
+      - 'src/continuous-queue-runtime-write.mjs'
+      - 'src/schedule-slot.mjs'
+      - 'src/autonomy/*.mjs'
       - 'src/mutation-control-plane.mjs'
       - 'src/mutation-control-transport.mjs'
       - 'src/mutation-intake-adapter.mjs'
       - 'src/mutation-intake-d1.mjs'
       - 'src/mutation-intake-runner.mjs'
+      - 'src/mutation-preview-evidence.mjs'
       - 'cloudflare/src/dynamic-runtime-integrity.mjs'
+      - 'cloudflare/src/media-verify.mjs'
       - 'config/schedule-policy.json'
       - 'test/mutation-preview-rehearsal-worker.test.mjs'
       - 'test/mutation-intake-runner.test.mjs'
       - 'test/mutation-intake-adversarial.test.mjs'
       - 'test/mutation-control-transport.test.mjs'
       - 'package.json'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
 
 permissions:
@@ -169,19 +175,9 @@ jobs:
             readFileSync('/tmp/xqueue-mutation-preview-evidence.json', 'utf8'),
           );
 
-          if (
-            evidence.status !== 'ok' ||
-            evidence.ok !== true ||
-            evidence.publicationCapable !== false ||
-            evidence.schedulerAuthority !== false ||
-            !['applied', 'already_applied'].includes(evidence.mutation?.status) ||
-            evidence.recoveryCheckpointCaptured !== true ||
-            Number(evidence.after?.generation) !== Number(evidence.before?.generation) + 1
-          ) {
-            throw new Error(
-              'preview mutation rehearsal evidence did not satisfy the guarded contract',
-            );
-          }
+          const { verifyPreviewIntakeEvidence } = await import('./src/mutation-preview-evidence.mjs');
+          if (evidence.status !== 'ok') throw new Error('preview rehearsal did not succeed');
+          verifyPreviewIntakeEvidence(evidence);
 
           console.log(JSON.stringify({
             status: evidence.status,
@@ -193,6 +189,7 @@ jobs:
             publicationCapable: evidence.publicationCapable,
             schedulerAuthority: evidence.schedulerAuthority,
             recoveryCheckpointCaptured: evidence.recoveryCheckpointCaptured,
+            evidenceDigest: evidence.mutation.evidence_digest,
           }, null, 2));
           NODE
 
