@@ -70,6 +70,25 @@ test('authority deployment targets only publisher Worker and pins one 15-minute 
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
+test('production intake mutation descriptor is separate, D1-only, and inert by default', () => {
+  const config = readJsonc('wrangler.mutation-production-intake.jsonc');
+
+  assert.equal(config.name, 'xqueue-mutation-production-intake');
+  assert.equal(config.main, 'cloudflare/src/mutation-production-intake-worker.mjs');
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.vars?.XQUEUE_MUTATION_ACTIVATION, 'disabled');
+  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.d1_databases?.length, 1);
+  assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
+  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
+  assert.equal(config.d1_databases?.[0]?.migrations_dir, 'cloudflare/migrations-production');
+  assert.equal(config.r2_buckets, undefined);
+  assert.equal(config.services, undefined);
+  assert.equal(config.routes, undefined);
+  assert.equal(config.dispatch_namespaces, undefined);
+  assert.equal(config.durable_objects, undefined);
+});
+
 test('status and publisher roles share storage but not deployment identity or entrypoint', () => {
   const status = readJsonc('wrangler.status.jsonc');
   const publisher = readJsonc('wrangler.publisher.jsonc');
@@ -96,6 +115,7 @@ test('explicit preview config remains isolated from all production topology conf
     readJsonc('wrangler.status.jsonc'),
     readJsonc('wrangler.publisher.jsonc'),
     readJsonc('wrangler.authority.jsonc'),
+    readJsonc('wrangler.mutation-production-intake.jsonc'),
   ];
 
   assert.equal(preview.name, 'xqueue-preview');
@@ -137,6 +157,7 @@ test('all xqueue-production descriptors are status-only', () => {
     ['wrangler.publisher.jsonc', readJsonc('wrangler.publisher.jsonc')],
     ['wrangler.authority.jsonc', readJsonc('wrangler.authority.jsonc')],
     ['wrangler.preview.jsonc', readJsonc('wrangler.preview.jsonc')],
+    ['wrangler.mutation-production-intake.jsonc', readJsonc('wrangler.mutation-production-intake.jsonc')],
   ];
   const owners = configs.filter(([, config]) => config.name === 'xqueue-production');
   assert.deepEqual(owners.map(([path]) => path), ['wrangler.jsonc', 'wrangler.status.jsonc']);
