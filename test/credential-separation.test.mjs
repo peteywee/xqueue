@@ -103,6 +103,29 @@ test('only publisher configs identify the publisher deployment', () => {
   assert.equal(authority.includes('xqueue-publisher-production'), true);
 });
 
+test('production intake mutation role is D1-only, inert by default, and has no publication surface', () => {
+  const source = text('cloudflare/src/mutation-production-intake-worker.mjs');
+  const config = jsonc('wrangler.mutation-production-intake.jsonc');
+
+  assert.match(source, /async fetch\s*\(/);
+  assert.doesNotMatch(source, /\bscheduled\s*\(/);
+  assert.doesNotMatch(source, /production-publisher|publisher-worker/);
+  assert.doesNotMatch(source, /@xdevplatform/);
+  assert.doesNotMatch(
+    source,
+    /X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET/,
+  );
+
+  assert.equal(config.name, 'xqueue-mutation-production-intake');
+  assert.equal(config.main, 'cloudflare/src/mutation-production-intake-worker.mjs');
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.vars?.XQUEUE_MUTATION_ACTIVATION, 'disabled');
+  assert.equal(config.d1_databases?.length, 1);
+  assert.equal(config.r2_buckets, undefined);
+  assert.equal(config.services, undefined);
+  assert.equal(config.triggers, undefined);
+});
+
 test('no tracked Wrangler topology descriptor embeds X write credentials', () => {
   const credential =
     /X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET|consumer_secret|oauth_token/i;
@@ -113,6 +136,7 @@ test('no tracked Wrangler topology descriptor embeds X write credentials', () =>
     'wrangler.publisher.jsonc',
     'wrangler.authority.jsonc',
     'wrangler.preview.jsonc',
+    'wrangler.mutation-production-intake.jsonc',
   ]) {
     assert.doesNotMatch(text(path), credential, path);
   }
