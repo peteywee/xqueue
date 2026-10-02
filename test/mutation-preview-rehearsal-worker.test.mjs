@@ -410,10 +410,16 @@ test('trusted workflow validates saved evidence with the same completion verifie
   assert.doesNotMatch(workflow, /pull_request/);
   assert.match(workflow, /group: xqueue-preview-schema-mutation/);
   assert.match(workflow, /XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638/);
-  assert.match(
-    workflow,
-    /HTTP_STATUS="\\$\\(curl -sS \\\\\n\\s+--output \\/tmp\\/xqueue-mutation-preview-evidence\\.json \\\\\n\\s+--write-out '%\\{http_code\\}' \\\\\n[\\s\\S]*?\\/mutation-intake-proof \\|\\| true\\\\)"/,
-  );
+  const requestStart = workflow.indexOf('HTTP_STATUS="$(curl -sS \\\\');
+  const requestEndMarker = 'http://127.0.0.1:8788/mutation-intake-proof || true)"';
+  const requestEnd = workflow.indexOf(requestEndMarker, requestStart);
+  assert.notEqual(requestStart, -1);
+  assert.notEqual(requestEnd, -1);
+  const requestBlock = workflow.slice(requestStart, requestEnd + requestEndMarker.length);
+  assert.ok(requestBlock.startsWith('HTTP_STATUS="$(curl -sS \\\\'));
+  assert.ok(requestBlock.includes('--output /tmp/xqueue-mutation-preview-evidence.json \\\\'));
+  assert.ok(requestBlock.includes("--write-out '%{http_code}' \\\\"));
+  assert.ok(requestBlock.endsWith(requestEndMarker));
   assert.ok(workflow.includes('cat /tmp/xqueue-mutation-preview-evidence.json >&2'));
 });
 
