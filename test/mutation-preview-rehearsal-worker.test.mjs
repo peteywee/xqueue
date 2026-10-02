@@ -410,7 +410,7 @@ test('trusted workflow validates saved evidence with the same completion verifie
   assert.doesNotMatch(workflow, /pull_request/);
   assert.match(workflow, /group: xqueue-preview-schema-mutation/);
   assert.match(workflow, /XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638/);
-  assert.match(workflow, /--write-out '%\\{http_code\\}'/);
+  assert.ok(workflow.includes("--write-out '%{http_code}'"));
   assert.match(workflow, /cat \/tmp\/xqueue-mutation-preview-evidence\\.json >&2/);
 });
 
