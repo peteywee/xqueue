@@ -6,6 +6,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 
 export function verifyPreviewIntakeEvidence(evidence) {
   const mutation = evidence?.mutation;
+  const planned = evidence?.planned;
   const canonical = evidence?.canonicalReadback;
   const before = evidence?.before;
   const after = evidence?.after;
@@ -18,16 +19,22 @@ export function verifyPreviewIntakeEvidence(evidence) {
     !/^mutation-intake-[a-f0-9]{24}$/.test(mutation?.operationId ?? '') ||
     !/^intake-[a-f0-9]{24}$/.test(mutation?.intakeOperationId ?? '') ||
     typeof mutation?.contentId !== 'string' || !mutation.contentId ||
+    planned?.operationId !== mutation.operationId ||
+    planned?.intakeOperationId !== mutation.intakeOperationId ||
+    planned?.contentId !== mutation.contentId ||
+    typeof planned?.assignmentId !== 'string' || !planned.assignmentId ||
+    planned.assignmentId !== planned.contentId ||
+    !SHA256.test(planned?.contentDigest ?? '') ||
     !Number.isSafeInteger(before?.generation) || before.generation < 1 ||
     !Number.isSafeInteger(after?.generation) ||
     after.generation !== before.generation + 1 ||
     !SHA256.test(before?.revisionDigest ?? '') ||
     !SHA256.test(after?.revisionDigest ?? '') ||
-    canonical?.contentId !== mutation.contentId ||
-    typeof canonical?.assignmentId !== 'string' || !canonical.assignmentId ||
+    canonical?.contentId !== planned.contentId ||
+    canonical?.assignmentId !== planned.assignmentId ||
     canonical?.contentRevision !== 1 ||
     canonical?.assignmentVersion !== 1 ||
-    !SHA256.test(canonical?.contentDigest ?? '') ||
+    canonical?.contentDigest !== planned.contentDigest ||
     canonical?.intakeState !== 'scheduled' ||
     canonical?.lifecycleState !== 'scheduled'
   ) {

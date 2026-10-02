@@ -252,6 +252,8 @@ test('preview rehearsal drives planner -> control plan -> mutation -> exact runt
   assert.equal(result.mutation.observed.runtime_revision_digest, RUNTIME_B);
   assert.equal(result.canonicalReadback.contentRevision, 1);
   assert.equal(result.canonicalReadback.contentDigest, 'c'.repeat(64));
+  assert.equal(result.planned.assignmentId, 'CQ-PREVIEW-MUT-TEST');
+  assert.equal(result.planned.contentDigest, 'c'.repeat(64));
   assert.deepEqual(verifyPreviewIntakeEvidence(result).observed, result.mutation.observed);
 });
 
@@ -380,6 +382,11 @@ test('artifact validator rejects missing and contradictory completion evidence',
     ['missing canonical digest', (e) => { delete e.canonicalReadback.contentDigest; }],
     ['malformed canonical digest', (e) => { e.canonicalReadback.contentDigest = 'unknown'; }],
     ['wrong canonical item', (e) => { e.canonicalReadback.contentId = 'unrelated'; }],
+    ['wrong canonical assignment', (e) => { e.canonicalReadback.assignmentId = 'unrelated'; }],
+    ['wrong canonical digest', (e) => { e.canonicalReadback.contentDigest = '0'.repeat(64); }],
+    ['wrong planned assignment', (e) => { e.planned.assignmentId = 'unrelated'; }],
+    ['wrong planned digest', (e) => { e.planned.contentDigest = '0'.repeat(64); }],
+    ['wrong planned operation', (e) => { e.planned.operationId = 'mutation-intake-' + '9'.repeat(24); }],
     ['wrong canonical version', (e) => { e.canonicalReadback.contentRevision = 2; }],
     ['missing checkpoint', (e) => { e.recoveryCheckpointCaptured = false; }],
     ['publication capable', (e) => { e.publicationCapable = true; }],
@@ -403,6 +410,23 @@ test('trusted workflow validates saved evidence with the same completion verifie
   assert.doesNotMatch(workflow, /pull_request/);
   assert.match(workflow, /group: xqueue-preview-schema-mutation/);
   assert.match(workflow, /XQUEUE_PREVIEW_DATABASE_ID: f5f9bea9-e88c-41ab-9407-70356079a638/);
+  const requestStartMarker = 'HTTP_STATUS="$(curl -sS';
+  const requestEndMarker = 'http://127.0.0.1:8788/mutation-intake-proof || true)"';
+  const requestStart = workflow.indexOf(requestStartMarker);
+  const requestEnd = workflow.indexOf(requestEndMarker, requestStart);
+  assert.notEqual(requestStart, -1);
+  assert.notEqual(requestEnd, -1);
+  const requestBlock = workflow.slice(requestStart, requestEnd + requestEndMarker.length);
+  assert.ok(requestBlock.startsWith(requestStartMarker));
+  assert.doesNotMatch(requestBlock, /curl -fsS/);
+  const outputPos = requestBlock.indexOf('--output /tmp/xqueue-mutation-preview-evidence.json');
+  const statusPos = requestBlock.indexOf("--write-out '%{http_code}'");
+  const endpointPos = requestBlock.indexOf('http://127.0.0.1:8788/mutation-intake-proof');
+  assert.ok(outputPos > 0);
+  assert.ok(statusPos > outputPos);
+  assert.ok(endpointPos > statusPos);
+  assert.ok(requestBlock.endsWith(requestEndMarker));
+  assert.ok(workflow.includes('cat /tmp/xqueue-mutation-preview-evidence.json >&2'));
 });
 
 test('rehearsal triggers cover every local module in its dependency graph and the lockfile', () => {

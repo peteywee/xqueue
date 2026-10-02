@@ -161,12 +161,21 @@ jobs:
             exit 1
           fi
 
-          curl -fsS \
+          HTTP_STATUS="$(curl -sS \
+            --output /tmp/xqueue-mutation-preview-evidence.json \
+            --write-out '%{http_code}' \
             -X POST \
             -H 'content-type: application/json' \
             --data-binary @/tmp/xqueue-mutation-preview-request.json \
-            http://127.0.0.1:8788/mutation-intake-proof \
-            > /tmp/xqueue-mutation-preview-evidence.json
+            http://127.0.0.1:8788/mutation-intake-proof || true)"
+
+          if ! [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+            echo "Preview rehearsal request failed with HTTP ${HTTP_STATUS:-unknown}" >&2
+            cat /tmp/xqueue-mutation-preview-evidence.json >&2 || true
+            echo "--- preview worker log ---" >&2
+            tail -200 /tmp/xqueue-mutation-preview-worker.log >&2 || true
+            exit 1
+          fi
 
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
