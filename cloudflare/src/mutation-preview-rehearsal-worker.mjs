@@ -7,6 +7,7 @@ import { createIntakeMutationControlPlan } from '../../src/mutation-intake-adapt
 import { projectIntakeRuntimeRevision } from '../../src/mutation-intake-d1.mjs';
 import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import { createD1MutationTransport } from '../../src/mutation-control-transport.mjs';
+import { verifyPreviewIntakeEvidence } from '../../src/mutation-preview-evidence.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -47,6 +48,7 @@ ORDER BY target_account,resolved_at,content_id
 const CREATED_ITEM_SQL = `
 SELECT
   c.content_id,
+  c.current_revision AS content_revision,
   c.intake_state,
   r.content_digest,
   a.assignment_id,
@@ -256,6 +258,8 @@ export async function runPreviewIntakeRehearsal(
     !created ||
     created.content_id !== item.content_id ||
     created.content_digest !== item.content_digest ||
+    Number(created.content_revision) !== 1 ||
+    created.assignment_id !== intakePlan.items[0].assignment_id ||
     Number(created.assignment_version) !== 1 ||
     created.status !== 'active' ||
     created.lifecycle_state !== 'scheduled' ||
@@ -264,7 +268,7 @@ export async function runPreviewIntakeRehearsal(
     throw new Error('preview mutation canonical readback is incomplete');
   }
 
-  return Object.freeze({
+  const evidence = Object.freeze({
     ok: true,
     publicationCapable: false,
     schedulerAuthority: false,
@@ -272,9 +276,11 @@ export async function runPreviewIntakeRehearsal(
       status: mutation.status,
       phase: mutation.phase ?? null,
       recovered: mutation.recovered === true,
-      operationId: controlPlan.operation_id,
+      operationId: mutation.operation_id,
       intakeOperationId: intakePlan.operation_id,
       contentId: item.content_id,
+      evidence_digest: mutation.evidence_digest,
+      observed: mutation.observed,
     }),
     before: Object.freeze({
       generation: before.generation,
@@ -286,6 +292,8 @@ export async function runPreviewIntakeRehearsal(
     }),
     canonicalReadback: Object.freeze({
       contentId: created.content_id,
+      contentRevision: Number(created.content_revision),
+      contentDigest: created.content_digest,
       assignmentId: created.assignment_id,
       assignmentVersion: Number(created.assignment_version),
       resolvedAt: created.resolved_at,
@@ -294,6 +302,11 @@ export async function runPreviewIntakeRehearsal(
     }),
     recoveryCheckpointCaptured: true,
   });
+  if (mutation.operation_id !== controlPlan.operation_id) {
+    throw new Error('preview mutation operation readback does not match its plan');
+  }
+  verifyPreviewIntakeEvidence(evidence);
+  return evidence;
 }
 
 export function createMutationPreviewRehearsalWorker(dependencies = {}) {
