@@ -125,7 +125,8 @@ jobs:
               title: 'Preview mutation rehearsal',
               body:
                 'Preview-only XQueue mutation-control rehearsal fixture. ' +
-                'This content exists only to prove the no-X preview D1 mutation path.',
+                'This content exists only to prove the no-X preview D1 mutation path. Run ' +
+                suffix + '.',
               source_ref: 'github-actions:preview-mutation-rehearsal:' + suffix,
             },
           };
