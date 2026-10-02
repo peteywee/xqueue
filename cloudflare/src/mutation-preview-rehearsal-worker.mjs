@@ -208,6 +208,14 @@ export async function runPreviewIntakeRehearsal(
     runtimeState: observedRuntimeState,
   });
 
+  const planned = Object.freeze({
+    operationId: controlPlan.operation_id,
+    intakeOperationId: intakePlan.operation_id,
+    contentId: item.content_id,
+    contentDigest: item.content_digest,
+    assignmentId: intakePlan.items[0].assignment_id,
+  });
+
   const runtimeRevision = await projectRevision({
     intakePlan,
     controlPlan,
@@ -235,11 +243,7 @@ export async function runPreviewIntakeRehearsal(
         generation: before.generation,
         revisionDigest: before.revisionDigest,
       }),
-      planned: Object.freeze({
-        operationId: controlPlan.operation_id,
-        intakeOperationId: intakePlan.operation_id,
-        contentId: item.content_id,
-      }),
+      planned,
     });
   }
 
@@ -272,6 +276,7 @@ export async function runPreviewIntakeRehearsal(
     ok: true,
     publicationCapable: false,
     schedulerAuthority: false,
+    planned,
     mutation: Object.freeze({
       status: mutation.status,
       phase: mutation.phase ?? null,
