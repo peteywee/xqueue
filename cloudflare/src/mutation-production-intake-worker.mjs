@@ -1,14 +1,20 @@
 import schedulePolicy from '../../config/schedule-policy.json' with { type: 'json' };
 
 import {
+  DEFAULT_TARGET_ACCOUNT,
   hashAssignmentRows,
   normalizeIntakeInput,
   planIntake,
 } from '../../src/continuous-queue-intake.mjs';
-import { createIntakeMutationControlPlan } from '../../src/mutation-intake-adapter.mjs';
+import {
+  createIntakeMutationControlPlan,
+  intakeMutationOperationId,
+} from '../../src/mutation-intake-adapter.mjs';
 import { projectIntakeRuntimeRevision } from '../../src/mutation-intake-d1.mjs';
 import { createD1MutationTransport } from '../../src/mutation-control-transport.mjs';
+import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import { runProductionIntakeMutation } from '../../src/mutation-production-preflight.mjs';
+import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -42,12 +48,28 @@ WHERE source_operation_id=?
 LIMIT 1
 `;
 
-const BOOKMARK_RE = /^[A-Za-z0-9_-]{8,}$/;
-const SHA40_RE = /^[a-f0-9]{40}$/;
-const SHA256_RE = /^[a-f0-9]{64}$/;
-const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
-const MAX_CHECKPOINT_AGE_MS = 5 * 60 * 1000;
-const MAX_CHECKPOINT_FUTURE_MS = 30 * 1000;
+export const MAX_PRODUCTION_INTAKE_ITEMS = 5;
+
+const EXISTING_MUTATION_SQL =
+  'SELECT * FROM mutation_operations WHERE operation_id=?';
+
+const EXISTING_INTAKE_SQL =
+  "SELECT operation_id,plan_digest,batch_digest,item_count,expected_frontier_generation," +
+  "expected_frontier_resolved_at,proposed_frontier_resolved_at,baseline_assignment_hash," +
+  "expected_runtime_generation,expected_runtime_revision_digest,resulting_runtime_generation," +
+  "resulting_runtime_revision_digest,target_account,policy_version,status,created_at,updated_at " +
+  "FROM queue_intake_operations WHERE batch_digest=? AND status IN ('claimed','complete') " +
+  "ORDER BY created_at DESC LIMIT 1";
+
+const EXISTING_INTAKE_ITEMS_SQL =
+  'SELECT operation_id,ordinal,content_id,content_digest,pillar,title,source_ref,' +
+  'resolved_at,scheduled_date,scheduled_time,timezone,slot_label ' +
+  'FROM queue_intake_items WHERE operation_id=? ORDER BY ordinal';
+
+const EXISTING_MUTATION_ITEMS_SQL =
+  'SELECT item_key,expected_content_revision,expected_assignment_version,' +
+  'resulting_content_revision,resulting_assignment_version,readback_status,readback_digest ' +
+  'FROM mutation_operation_items WHERE operation_id=? ORDER BY item_key';
 
 function rows(result) {
   return Array.isArray(result) ? result : (result?.results ?? []);
@@ -123,114 +145,305 @@ async function authenticated(request, env) {
   return expectedDigest === providedDigest;
 }
 
-function checkpointMessage(evidence) {
-  return [
-    'xqueue-production-checkpoint-v1',
-    evidence.databaseId,
-    evidence.candidateSha,
-    evidence.batchDigest,
-    evidence.bookmark,
-    evidence.issuedAt,
-    evidence.nonce,
-  ].join('\n');
+function productionFault(
+  faultClass,
+  message,
+  { httpStatus = 400, retryable = false, requiresReadback = false } = {},
+) {
+  const error = new Error(message);
+  error.faultClass = faultClass;
+  error.httpStatus = httpStatus;
+  error.retryable = retryable;
+  error.requiresReadback = requiresReadback;
+  return error;
 }
 
-export async function verifyProductionCheckpointEvidence(
-  env,
-  evidence,
-  {
-    candidateSha,
-    batchDigest,
-    now = new Date(),
-  } = {},
-) {
-  const item = requiredObject(evidence, 'signed production checkpoint evidence');
-  const databaseId = String(env?.XQUEUE_PRODUCTION_DATABASE_ID ?? '').toLowerCase();
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(databaseId)) {
-    throw new Error('XQUEUE_PRODUCTION_DATABASE_ID is invalid');
+function faultDescriptor(error) {
+  if (typeof error?.faultClass === 'string') {
+    return {
+      faultClass: error.faultClass,
+      httpStatus: Number(error.httpStatus) || 500,
+      retryable: error.retryable === true,
+      requiresReadback: error.requiresReadback === true,
+      message: error.message,
+    };
   }
 
-  const bookmark = String(item.bookmark ?? '');
-  if (!BOOKMARK_RE.test(bookmark)) {
-    throw new Error('production checkpoint bookmark is invalid');
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes('content_id already exists') ||
+    lower.includes('exact content digest already exists') ||
+    lower.includes('frontier is blocked') ||
+    lower.includes('duplicate')
+  ) {
+    return {
+      faultClass: 'INTAKE_CONFLICT',
+      httpStatus: 409,
+      retryable: false,
+      requiresReadback: false,
+      message,
+    };
   }
 
-  const signedDatabaseId = String(item.databaseId ?? '').toLowerCase();
-  const signedCandidateSha = String(item.candidateSha ?? '').toLowerCase();
-  const signedBatchDigest = String(item.batchDigest ?? '').toLowerCase();
-  const expectedCandidateSha = String(candidateSha ?? '').toLowerCase();
-  const expectedBatchDigest = String(batchDigest ?? '').toLowerCase();
-
-  if (signedDatabaseId !== databaseId) {
-    throw new Error('production checkpoint database binding mismatch');
-  }
-  if (!SHA40_RE.test(signedCandidateSha) || signedCandidateSha !== expectedCandidateSha) {
-    throw new Error('production checkpoint candidate binding mismatch');
-  }
-  if (!SHA256_RE.test(signedBatchDigest) || signedBatchDigest !== expectedBatchDigest) {
-    throw new Error('production checkpoint batch binding mismatch');
-  }
-  if (!NONCE_RE.test(String(item.nonce ?? ''))) {
-    throw new Error('production checkpoint nonce is invalid');
+  if (
+    lower.includes('network') ||
+    lower.includes('fetch') ||
+    lower.includes('temporarily unavailable') ||
+    lower.includes('timeout')
+  ) {
+    return {
+      faultClass: 'PRE_DISPATCH_TRANSIENT_UNAVAILABLE',
+      httpStatus: 503,
+      retryable: true,
+      requiresReadback: false,
+      message,
+    };
   }
 
-  const issued = canonicalInstant(item.issuedAt, 'production checkpoint issuedAt');
-  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
-  if (!Number.isFinite(nowMs)) throw new Error('checkpoint verification time is invalid');
-  if (nowMs - issued.ms > MAX_CHECKPOINT_AGE_MS || issued.ms - nowMs > MAX_CHECKPOINT_FUTURE_MS) {
-    throw new Error('production checkpoint evidence is stale');
+  return {
+    faultClass: 'INTERNAL_ERROR',
+    httpStatus: 500,
+    retryable: false,
+    requiresReadback: false,
+    message,
+  };
+}
+
+async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
+  try {
+    const verified = await verifyAuth({
+      token: env?.CLOUDFLARE_API_TOKEN,
+      accountId: env?.CLOUDFLARE_ACCOUNT_ID,
+      fetchImpl,
+    });
+    return Object.freeze({
+      ok: true,
+      environment: 'production',
+      tokenType: verified.tokenType,
+      status: verified.status,
+      d1Readable: true,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const transient = /request failed|network|fetch|timeout/i.test(message);
+    throw productionFault(
+      'PRODUCTION_AUTH_NOT_VERIFIED',
+      message,
+      { httpStatus: transient ? 503 : 409, retryable: transient },
+    );
   }
+}
 
-  const signature = String(item.signature ?? '').toLowerCase();
-  if (!SHA256_RE.test(signature)) {
-    throw new Error('production checkpoint signature is invalid');
-  }
-
-  const keyText = requiredSecret(
-    env?.MUTATION_CHECKPOINT_HMAC_KEY,
-    'MUTATION_CHECKPOINT_HMAC_KEY',
-  );
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(keyText),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const expectedSignature = hex(await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(checkpointMessage({
-      databaseId: signedDatabaseId,
-      candidateSha: signedCandidateSha,
-      batchDigest: signedBatchDigest,
-      bookmark,
-      issuedAt: issued.text,
-      nonce: item.nonce,
-    })),
-  ));
-
-  if (signature !== expectedSignature) {
-    throw new Error('production checkpoint signature mismatch');
-  }
-
-  return Object.freeze({
-    bookmark,
-    databaseId: signedDatabaseId,
-    candidateSha: signedCandidateSha,
-    batchDigest: signedBatchDigest,
-    issuedAt: issued.text,
-    nonce: item.nonce,
+function productionTransport(env, db, createTransport, fetchImpl) {
+  return createTransport({
+    db,
+    fetchImpl,
+    accountId: env?.CLOUDFLARE_ACCOUNT_ID,
+    databaseId: env?.XQUEUE_PRODUCTION_DATABASE_ID,
+    apiToken: env?.CLOUDFLARE_API_TOKEN,
   });
 }
 
-function productionTransport(db, bookmark, createTransport) {
-  const base = createTransport({ db });
+async function loadReplayState(db, normalized, operationId) {
+  const operation = await first(db, EXISTING_MUTATION_SQL, operationId);
+  if (!operation) return null;
+
+  const intakeOperation = await first(
+    db,
+    EXISTING_INTAKE_SQL,
+    normalized.batch_digest,
+  );
+  if (!intakeOperation) {
+    throw productionFault(
+      'IDEMPOTENCY_READBACK_CONFLICT',
+      'existing mutation operation has no matching intake operation',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const [storedItems, mutationItems, runtimeRevision] = await Promise.all([
+    all(db, EXISTING_INTAKE_ITEMS_SQL, intakeOperation.operation_id),
+    all(db, EXISTING_MUTATION_ITEMS_SQL, operationId),
+    first(db, COMMITTED_RUNTIME_SQL, operationId),
+  ]);
+
+  if (
+    Number(intakeOperation.item_count) !== normalized.items.length ||
+    storedItems.length !== normalized.items.length ||
+    mutationItems.length !== normalized.items.length
+  ) {
+    throw productionFault(
+      'IDEMPOTENCY_READBACK_CONFLICT',
+      'existing intake operation item count does not match replay input',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  for (const inputItem of normalized.items) {
+    const stored = storedItems.find((item) => item.content_id === inputItem.content_id);
+    if (!stored || stored.content_digest !== inputItem.content_digest) {
+      throw productionFault(
+        'IDEMPOTENCY_KEY_CONFLICT',
+        'existing intake operation does not match replay content identity',
+        { httpStatus: 409 },
+      );
+    }
+  }
+
+  if (
+    !['VERIFYING', 'COMPLETE'].includes(operation.state) ||
+    operation.effect_state !== 'applied' ||
+    !runtimeRevision
+  ) {
+    throw productionFault(
+      'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION',
+      'existing mutation operation is not in an exact recoverable applied state',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const laneGeneration = Number(operation.lane_generation);
+  if (!Number.isSafeInteger(laneGeneration) || laneGeneration < 2) {
+    throw productionFault(
+      'IDEMPOTENCY_READBACK_CONFLICT',
+      'existing mutation lane generation is invalid',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const intakePlan = Object.freeze({
+    operation_id: intakeOperation.operation_id,
+    plan_digest: intakeOperation.plan_digest,
+    batch_digest: intakeOperation.batch_digest,
+    count: Number(intakeOperation.item_count),
+    expected_frontier_generation: Number(intakeOperation.expected_frontier_generation),
+    expected_frontier_resolved_at: intakeOperation.expected_frontier_resolved_at,
+    proposed_frontier_resolved_at: intakeOperation.proposed_frontier_resolved_at,
+    baseline_assignment_hash: intakeOperation.baseline_assignment_hash,
+    expected_runtime_generation: Number(intakeOperation.expected_runtime_generation),
+    expected_runtime_revision_digest: intakeOperation.expected_runtime_revision_digest,
+    target_account: intakeOperation.target_account,
+    policy_version: Number(intakeOperation.policy_version),
+    items: Object.freeze(storedItems.map((item) => Object.freeze({
+      ordinal: Number(item.ordinal),
+      content_id: item.content_id,
+      content_digest: item.content_digest,
+      pillar: item.pillar,
+      title: item.title,
+      source_ref: item.source_ref,
+      assignment_id: item.content_id,
+      assignment_version: 1,
+      content_revision: 1,
+      target_account: intakeOperation.target_account,
+      policy_version: Number(intakeOperation.policy_version),
+      resolved_at: item.resolved_at,
+      scheduled_date: item.scheduled_date,
+      scheduled_time: item.scheduled_time,
+      timezone: item.timezone,
+      slot_label: item.slot_label,
+    }))),
+  });
+
+  const controlPlan = Object.freeze({
+    operation_id: operation.operation_id,
+    operation_kind: operation.operation_kind,
+    operation_digest: operation.operation_digest,
+    plan_digest: operation.plan_digest,
+    plan_context: Object.freeze({
+      intake_plan_digest: intakeOperation.plan_digest,
+      intake_operation_id: intakeOperation.operation_id,
+      expected_frontier_generation: Number(intakeOperation.expected_frontier_generation),
+      expected_frontier_resolved_at: intakeOperation.expected_frontier_resolved_at,
+      proposed_frontier_resolved_at: intakeOperation.proposed_frontier_resolved_at,
+      baseline_assignment_hash: intakeOperation.baseline_assignment_hash,
+      policy_version: Number(intakeOperation.policy_version),
+    }),
+    expected_halt_generation: Number(operation.expected_halt_generation),
+    expected_lane_generation: laneGeneration - 1,
+    expected_runtime_generation: Number(operation.expected_runtime_generation),
+    expected_runtime_revision_digest: operation.expected_runtime_revision_digest,
+    retry_budgets: Object.freeze({
+      plan: Number(operation.max_plan_retries),
+      read: Number(operation.max_read_retries),
+      operation: Number(operation.max_operation_retries),
+    }),
+    items: Object.freeze(mutationItems.map((item) => Object.freeze({
+      item_key: item.item_key,
+      expected_content_revision:
+        item.expected_content_revision == null ? null : Number(item.expected_content_revision),
+      expected_assignment_version:
+        item.expected_assignment_version == null ? null : Number(item.expected_assignment_version),
+      resulting_content_revision:
+        item.resulting_content_revision == null ? null : Number(item.resulting_content_revision),
+      resulting_assignment_version:
+        item.resulting_assignment_version == null ? null : Number(item.resulting_assignment_version),
+    }))),
+  });
+
   return Object.freeze({
-    ...base,
-    async captureCheckpoint() {
-      return bookmark;
-    },
+    intakePlan,
+    controlPlan,
+    runtimeRevision: Object.freeze({
+      generation: Number(runtimeRevision.generation),
+      revision_digest: runtimeRevision.revision_digest,
+      previous_revision_digest: runtimeRevision.previous_revision_digest,
+      source_operation_id: runtimeRevision.source_operation_id,
+      created_at: runtimeRevision.created_at,
+    }),
+  });
+}
+
+async function verifyCommittedResult({
+  db,
+  verifyRuntime,
+  mutation,
+  controlPlan,
+  runtimeRevision,
+}) {
+  if (mutation.operation_id !== controlPlan.operation_id) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production mutation operation readback does not match its plan',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const committedRuntime = await first(
+    db,
+    COMMITTED_RUNTIME_SQL,
+    controlPlan.operation_id,
+  );
+  if (
+    !committedRuntime ||
+    Number(committedRuntime.generation) !== Number(runtimeRevision.generation) ||
+    committedRuntime.revision_digest !== runtimeRevision.revision_digest ||
+    committedRuntime.previous_revision_digest !== runtimeRevision.previous_revision_digest ||
+    committedRuntime.source_operation_id !== controlPlan.operation_id
+  ) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production committed runtime revision readback is not exact',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const after = await verifyRuntime(null, {
+    verifyMedia: false,
+    includeSnapshot: false,
+  });
+  if (!after?.ok || Number(after.generation) < Number(runtimeRevision.generation)) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production runtime head is not healthy after mutation',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  return Object.freeze({
+    committedRuntime,
+    after,
   });
 }
 
@@ -245,81 +458,223 @@ export async function runProductionIntakeRequest(
   payload,
   {
     verifyRuntime = verifyDynamicRuntime,
-    verifyCheckpoint = verifyProductionCheckpointEvidence,
+    verifyAuth = verifyCloudflareApiToken,
     normalizeInput = normalizeIntakeInput,
     plan = planIntake,
     assignmentHash = hashAssignmentRows,
+    deriveOperationId = intakeMutationOperationId,
     createControlPlan = createIntakeMutationControlPlan,
     projectRevision = projectIntakeRuntimeRevision,
     createTransport = createD1MutationTransport,
     runMutation = runProductionIntakeMutation,
+    resumeMutation = runIntakeMutation,
+    fetchImpl = globalThis.fetch,
     now = () => new Date(),
   } = {},
 ) {
   const db = env?.DB;
   if (!db || typeof db.prepare !== 'function') {
-    throw new Error('production D1 binding is unavailable');
+    throw productionFault(
+      'PRODUCTION_D1_UNAVAILABLE',
+      'production D1 binding is unavailable',
+      { httpStatus: 503, retryable: true },
+    );
   }
   if (payload?.environment !== 'production') {
-    throw new Error('production intake requires environment=production');
+    throw productionFault(
+      'ENVIRONMENT_NOT_PRODUCTION',
+      'production intake requires environment=production',
+      { httpStatus: 400 },
+    );
   }
 
-  const auth = requiredObject(payload?.auth, 'typed production auth evidence');
   const candidate = requiredObject(payload?.candidate, 'exact-main candidate evidence');
   const input = payload?.input;
-  if (input == null) throw new Error('intake input is required');
-  const mode = requiredMode(payload?.mode);
-  const sourceMode = requiredSourceMode(payload?.sourceMode);
-  const recordedAt = now().toISOString();
-
-  const normalized = normalizeInput(input, {
-    mode,
-    sourceMode,
-    ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
-  });
-
-  const checkpoint = await verifyCheckpoint(
-    env,
-    payload?.checkpoint,
-    {
-      candidateSha: candidate.headSha ?? candidate.head_sha,
-      batchDigest: normalized.batch_digest,
-      now: new Date(recordedAt),
-    },
-  );
-
-  const before = await verifyRuntime(env, {
-    verifyMedia: false,
-    includeSnapshot: true,
-  });
-  if (!before?.ok || !before.snapshot) {
-    throw new Error('production runtime is not healthy before mutation');
+  if (input == null) {
+    throw productionFault('INVALID_INTAKE', 'intake input is required', { httpStatus: 400 });
   }
 
-  const [frontier, activeAssignments, contentIndex] = await Promise.all([
-    first(db, FRONTIER_SQL),
-    all(db, ACTIVE_ASSIGNMENTS_SQL),
-    all(db, CONTENT_INDEX_SQL),
-  ]);
-  if (!frontier) throw new Error('production intake frontier is missing');
+  let mode;
+  let sourceMode;
+  let normalized;
+  try {
+    mode = requiredMode(payload?.mode);
+    sourceMode = requiredSourceMode(payload?.sourceMode);
+    normalized = normalizeInput(input, {
+      mode,
+      sourceMode,
+      ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
+    });
+  } catch (error) {
+    throw productionFault(
+      'INVALID_INTAKE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 400 },
+    );
+  }
+
+  if (normalized.count > MAX_PRODUCTION_INTAKE_ITEMS) {
+    throw productionFault(
+      'PRODUCTION_BATCH_LIMIT_EXCEEDED',
+      'production intake is limited to ' + MAX_PRODUCTION_INTAKE_ITEMS + ' items per mutation',
+      { httpStatus: 413 },
+    );
+  }
+
+  const recordedAt = now().toISOString();
+  const trustedAuth = await trustedProductionAuth(env, verifyAuth, fetchImpl);
+  const transport = productionTransport(env, db, createTransport, fetchImpl);
+  const operationId = deriveOperationId({
+    batchDigest: normalized.batch_digest,
+    targetAccount: DEFAULT_TARGET_ACCOUNT,
+    contentIds: normalized.items.map((item) => item.content_id),
+  });
+
+  let existingOperation;
+  try {
+    existingOperation = await transport.readOperation(operationId);
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+
+  if (existingOperation) {
+    const replay = await loadReplayState(db, normalized, operationId);
+    const mutation = await resumeMutation({
+      intakePlan: replay.intakePlan,
+      controlPlan: replay.controlPlan,
+      runtimeRevision: replay.runtimeRevision,
+      transport,
+      recordedAt,
+    });
+
+    if (!['applied', 'already_applied'].includes(mutation?.status)) {
+      return Object.freeze({
+        ok: false,
+        publicationCapable: false,
+        schedulerAuthority: false,
+        replay: true,
+        planned: Object.freeze({
+          operationId,
+          intakeOperationId: replay.intakePlan.operation_id,
+          itemCount: replay.intakePlan.items.length,
+          contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
+          contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
+        }),
+        mutation,
+      });
+    }
+
+    const verified = await verifyCommittedResult({
+      db,
+      verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
+      mutation,
+      controlPlan: replay.controlPlan,
+      runtimeRevision: replay.runtimeRevision,
+    });
+
+    return Object.freeze({
+      ok: true,
+      replay: true,
+      publicationCapable: false,
+      schedulerAuthority: false,
+      recoveryCheckpointCaptured:
+        typeof existingOperation.checkpoint_bookmark === 'string' &&
+        existingOperation.checkpoint_bookmark.length >= 8,
+      planned: Object.freeze({
+        operationId,
+        intakeOperationId: replay.intakePlan.operation_id,
+        itemCount: replay.intakePlan.items.length,
+        contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
+        contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
+      }),
+      mutation,
+      committedRuntimeRevision: Object.freeze({
+        generation: Number(verified.committedRuntime.generation),
+        revisionDigest: verified.committedRuntime.revision_digest,
+        previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
+        sourceOperationId: verified.committedRuntime.source_operation_id,
+      }),
+      after: Object.freeze({
+        generation: verified.after.generation,
+        revisionDigest: verified.after.revisionDigest,
+      }),
+    });
+  }
+
+  let before;
+  try {
+    before = await verifyRuntime(env, {
+      verifyMedia: false,
+      includeSnapshot: true,
+    });
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+  if (!before?.ok || !before.snapshot) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_CONFLICT',
+      'production runtime is not healthy before mutation',
+      { httpStatus: 409 },
+    );
+  }
+
+  let frontier;
+  let activeAssignments;
+  let contentIndex;
+  try {
+    [frontier, activeAssignments, contentIndex] = await Promise.all([
+      first(db, FRONTIER_SQL),
+      all(db, ACTIVE_ASSIGNMENTS_SQL),
+      all(db, CONTENT_INDEX_SQL),
+    ]);
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+  if (!frontier) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_CONFLICT',
+      'production intake frontier is missing',
+      { httpStatus: 409 },
+    );
+  }
 
   const ids = new Set(normalized.items.map((item) => item.content_id));
   const digests = new Set(normalized.items.map((item) => item.content_digest));
 
-  const intakePlan = plan({
-    normalized,
-    frontier,
-    policy: schedulePolicy,
-    existingContent: contentIndex.filter((row) => ids.has(row.content_id)),
-    existingDigests: contentIndex.filter((row) => digests.has(row.content_digest)),
-    baselineAssignmentHash: assignmentHash(activeAssignments),
-    runtimeState: {
-      generation: Number(before.generation),
-      revision_digest: before.revisionDigest,
-    },
-  });
+  let intakePlan;
+  try {
+    intakePlan = plan({
+      normalized,
+      frontier,
+      policy: schedulePolicy,
+      existingContent: contentIndex.filter((row) => ids.has(row.content_id)),
+      existingDigests: contentIndex.filter((row) => digests.has(row.content_digest)),
+      baselineAssignmentHash: assignmentHash(activeAssignments),
+      runtimeState: {
+        generation: Number(before.generation),
+        revision_digest: before.revisionDigest,
+      },
+    });
+  } catch (error) {
+    throw productionFault(
+      'INTAKE_CONFLICT',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 409 },
+    );
+  }
 
-  const transport = productionTransport(db, checkpoint.bookmark, createTransport);
   const [haltState, laneState, runtimeState] = await Promise.all([
     transport.readHaltState(),
     transport.readLaneState(),
@@ -332,6 +687,13 @@ export async function runProductionIntakeRequest(
     laneState,
     runtimeState,
   });
+  if (controlPlan.operation_id !== operationId) {
+    throw productionFault(
+      'OPERATION_IDENTITY_MISMATCH',
+      'derived production mutation identity does not match planned mutation identity',
+      { httpStatus: 409 },
+    );
+  }
 
   const runtimeRevision = await projectRevision({
     intakePlan,
@@ -346,7 +708,7 @@ export async function runProductionIntakeRequest(
 
   const mutation = await runMutation({
     environment: 'production',
-    auth,
+    auth: trustedAuth,
     candidate,
     transport,
     intakePlan,
@@ -368,66 +730,42 @@ export async function runProductionIntakeRequest(
       ok: false,
       publicationCapable: false,
       schedulerAuthority: false,
+      replay: false,
       planned,
       mutation,
     });
   }
 
-  if (mutation.operation_id !== controlPlan.operation_id) {
-    throw new Error('production mutation operation readback does not match its plan');
-  }
-
-  const committedRuntime = await first(
+  const verified = await verifyCommittedResult({
     db,
-    COMMITTED_RUNTIME_SQL,
-    controlPlan.operation_id,
-  );
-  if (
-    !committedRuntime ||
-    Number(committedRuntime.generation) !== Number(runtimeRevision.generation) ||
-    committedRuntime.revision_digest !== runtimeRevision.revision_digest ||
-    committedRuntime.previous_revision_digest !== runtimeRevision.previous_revision_digest ||
-    committedRuntime.source_operation_id !== controlPlan.operation_id
-  ) {
-    throw new Error('production committed runtime revision readback is not exact');
-  }
-
-  const after = await verifyRuntime(env, {
-    verifyMedia: false,
-    includeSnapshot: false,
+    verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
+    mutation,
+    controlPlan,
+    runtimeRevision,
   });
-  if (!after?.ok || Number(after.generation) < Number(runtimeRevision.generation)) {
-    throw new Error('production runtime head is not healthy after mutation');
-  }
 
   return Object.freeze({
     ok: true,
+    replay: false,
     publicationCapable: false,
     schedulerAuthority: false,
     recoveryCheckpointCaptured: true,
-    checkpoint: Object.freeze({
-      databaseId: checkpoint.databaseId ?? null,
-      candidateSha: checkpoint.candidateSha ?? null,
-      batchDigest: checkpoint.batchDigest ?? null,
-      issuedAt: checkpoint.issuedAt ?? null,
-      nonce: checkpoint.nonce ?? null,
-    }),
     planned,
     mutation,
     productionPreflight: mutation.production_preflight ?? null,
     committedRuntimeRevision: Object.freeze({
-      generation: Number(committedRuntime.generation),
-      revisionDigest: committedRuntime.revision_digest,
-      previousRevisionDigest: committedRuntime.previous_revision_digest,
-      sourceOperationId: committedRuntime.source_operation_id,
+      generation: Number(verified.committedRuntime.generation),
+      revisionDigest: verified.committedRuntime.revision_digest,
+      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
+      sourceOperationId: verified.committedRuntime.source_operation_id,
     }),
     before: Object.freeze({
       generation: before.generation,
       revisionDigest: before.revisionDigest,
     }),
     after: Object.freeze({
-      generation: after.generation,
-      revisionDigest: after.revisionDigest,
+      generation: verified.after.generation,
+      revisionDigest: verified.after.revisionDigest,
     }),
   });
 }
@@ -465,22 +803,64 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
         return json({ error: 'unauthorized' }, { status: 401 });
       }
 
+      let payload;
+      try {
+        payload = await request.json();
+      } catch {
+        return json({
+          service: 'xqueue-mutation-production-intake',
+          status: 'error',
+          faultClass: 'INVALID_JSON',
+          retryable: false,
+          requiresReadback: false,
+          error: 'request body must be valid JSON',
+        }, { status: 400 });
+      }
+
       try {
         const result = await runProductionIntakeRequest(
           env,
-          await request.json(),
+          payload,
           dependencies,
         );
+        if (!result.ok) {
+          const phase = result.mutation?.phase ?? 'unknown';
+          const postDispatch = [
+            'apply',
+            'completion_readback',
+            'finalize',
+            'finalize_readback',
+          ].includes(phase);
+          return json({
+            service: 'xqueue-mutation-production-intake',
+            role: 'production-mutation-intake',
+            environment: 'production',
+            publicationCapable: false,
+            schedulerAuthority: false,
+            status: 'blocked',
+            faultClass: postDispatch
+              ? 'POST_DISPATCH_RECONCILIATION_REQUIRED'
+              : 'MUTATION_BLOCKED',
+            retryable:
+              !postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY',
+            requiresReadback: postDispatch,
+            ...result,
+          }, { status: 409 });
+        }
+
         return json({
           service: 'xqueue-mutation-production-intake',
           role: 'production-mutation-intake',
           environment: 'production',
           publicationCapable: false,
           schedulerAuthority: false,
-          status: result.ok ? 'ok' : 'blocked',
+          status: 'ok',
+          retryable: false,
+          requiresReadback: false,
           ...result,
-        }, result.ok ? {} : { status: 409 });
+        });
       } catch (error) {
+        const fault = faultDescriptor(error);
         return json({
           service: 'xqueue-mutation-production-intake',
           role: 'production-mutation-intake',
@@ -488,8 +868,11 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
           publicationCapable: false,
           schedulerAuthority: false,
           status: 'error',
-          error: error instanceof Error ? error.message : String(error),
-        }, { status: 503 });
+          faultClass: fault.faultClass,
+          retryable: fault.retryable,
+          requiresReadback: fault.requiresReadback,
+          error: fault.message,
+        }, { status: fault.httpStatus });
       }
     },
   };

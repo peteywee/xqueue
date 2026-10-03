@@ -15,6 +15,7 @@
     }
   },
   "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "aab09adea145e6da8fa57b0f73b073da",
     "XQUEUE_PRODUCTION_DATABASE_ID": "fc85026e-bfc8-435f-8bb0-c60e139178a3"
   },
   "d1_databases": [
