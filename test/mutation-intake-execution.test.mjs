@@ -54,7 +54,6 @@ function schema(db) {
     );
   `);
   db.exec(readFileSync(new URL('../cloudflare/migrations/0016_mutation_completion_item_guard.sql', import.meta.url),'utf8'));
-  db.exec(readFileSync(new URL('../cloudflare/migrations/0017_publication_mutation_mutex.sql', import.meta.url),'utf8'));
   db.exec(`
     CREATE TABLE queue_content(content_id TEXT PRIMARY KEY,pillar TEXT NOT NULL,current_revision INTEGER NOT NULL,status TEXT NOT NULL,generation INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,intake_state TEXT NOT NULL);
     CREATE TABLE queue_content_revisions(content_id TEXT NOT NULL,revision INTEGER NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,publication_text TEXT NOT NULL,content_digest TEXT NOT NULL,figure INTEGER,source_ref TEXT,created_at TEXT NOT NULL,PRIMARY KEY(content_id,revision),FOREIGN KEY(content_id) REFERENCES queue_content(content_id));
