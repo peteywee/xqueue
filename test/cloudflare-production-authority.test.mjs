@@ -751,9 +751,13 @@ test('publisher durably defers overdue assignments under the publication lease a
           };
         },
         publicationQueueFromSnapshot() { return queue(); },
-        async deferMissedAssignments() {
+        async deferMissedAssignments(_db, options) {
           order.push('defer');
           deferralCalls += 1;
+          assert.equal(options.publicationLease.leaseName, 'publisher');
+          assert.equal(options.publicationLease.acquisitionId, 'deferral-acquisition');
+          assert.equal(options.publicationLease.generation, 3);
+          assert.equal(typeof options.leaseNowMs, 'function');
           return {
             outcomes: [{
               status: 'deferred',

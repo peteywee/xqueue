@@ -432,6 +432,8 @@ export async function runScheduledPublication(
       deferral = await deferMissed(env.DB, {
         now,
         graceMinutes: eligibilityOptions.graceMinutes,
+        publicationLease: deferralLease,
+        leaseNowMs: () => Date.now(),
       });
     } catch {
       deferralFailed = true;

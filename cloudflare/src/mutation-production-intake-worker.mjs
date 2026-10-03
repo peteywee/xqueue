@@ -1100,10 +1100,19 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
             'finalize',
             'finalize_readback',
           ].includes(phase);
+          const retryableRunnerRead =
+            !postDispatch &&
+            ['initial_readback', 'preflight_read'].includes(phase) &&
+            result.mutation?.decision?.outcome === 'AUTO_RETRY';
           const transientPreDispatch =
             !postDispatch &&
-            result.mutation?.fault_class === 'PRE_DISPATCH_STATE_UNAVAILABLE' &&
-            result.mutation?.retryable === true;
+            (
+              (
+                result.mutation?.fault_class === 'PRE_DISPATCH_STATE_UNAVAILABLE' &&
+                result.mutation?.retryable === true
+              ) ||
+              retryableRunnerRead
+            );
           return json({
             service: 'xqueue-mutation-production-intake',
             role: 'production-mutation-intake',
@@ -1113,7 +1122,11 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
             status: 'blocked',
             faultClass: postDispatch
               ? 'POST_DISPATCH_RECONCILIATION_REQUIRED'
-              : (result.mutation?.fault_class ?? 'MUTATION_BLOCKED'),
+              : (
+                  result.mutation?.fault_class ??
+                  result.mutation?.error_class ??
+                  'MUTATION_BLOCKED'
+                ),
             retryable:
               transientPreDispatch ||
               (!postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY'),

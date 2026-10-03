@@ -64,6 +64,35 @@ WHERE
   AND generation = ?8
 `;
 
+const UPDATE_ASSIGNMENT_WITH_LEASE_SQL = `
+UPDATE queue_assignments
+SET
+  lifecycle_state = 'deferred',
+  updated_at = ?1,
+  generation = generation + 1
+WHERE
+  assignment_id = ?2
+  AND assignment_version = ?3
+  AND content_id = ?4
+  AND content_digest = ?5
+  AND policy_version = ?6
+  AND resolved_at = ?7
+  AND status = 'active'
+  AND lifecycle_state = 'scheduled'
+  AND generation = ?8
+  AND EXISTS (
+    SELECT 1
+    FROM publication_leases
+    WHERE lease_name = ?9
+      AND owner_token = ?10
+      AND acquisition_id = ?11
+      AND generation = ?12
+      AND acquired_at_ms = ?13
+      AND expires_at_ms = ?14
+      AND expires_at_ms > ?15
+  )
+`;
+
 const INSERT_DEFERRAL_SQL = `
 INSERT INTO queue_deferrals (
   content_id,
@@ -187,6 +216,64 @@ function positiveInt(value, label) {
   return n;
 }
 
+function nonNegativeInt(value, label) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return n;
+}
+
+function requiredString(value, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${label} is required`);
+  }
+  return value;
+}
+
+function sqlString(value) {
+  return "'" + String(value).replaceAll("'", "''") + "'";
+}
+
+function publicationLeaseFence(lease, nowMs) {
+  if (!lease || typeof lease !== 'object') {
+    throw new Error('publication lease handle is required');
+  }
+  const fence = Object.freeze({
+    leaseName: requiredString(lease.leaseName, 'publication lease name'),
+    ownerToken: requiredString(lease.ownerToken, 'publication lease owner token'),
+    acquisitionId: requiredString(lease.acquisitionId, 'publication lease acquisition id'),
+    generation: positiveInt(lease.generation, 'publication lease generation'),
+    acquiredAtMs: nonNegativeInt(lease.acquiredAtMs, 'publication lease acquiredAtMs'),
+    expiresAtMs: nonNegativeInt(lease.expiresAtMs, 'publication lease expiresAtMs'),
+    nowMs: nonNegativeInt(nowMs, 'publication lease verification time'),
+  });
+  if (fence.expiresAtMs <= fence.nowMs) {
+    throw new Error('publication lease is expired');
+  }
+  return fence;
+}
+
+function publicationLeaseGuardSql(fence) {
+  return (
+    'EXISTS (SELECT 1 FROM publication_leases WHERE lease_name=' +
+    sqlString(fence.leaseName) +
+    ' AND owner_token=' +
+    sqlString(fence.ownerToken) +
+    ' AND acquisition_id=' +
+    sqlString(fence.acquisitionId) +
+    ' AND generation=' +
+    String(fence.generation) +
+    ' AND acquired_at_ms=' +
+    String(fence.acquiredAtMs) +
+    ' AND expires_at_ms=' +
+    String(fence.expiresAtMs) +
+    ' AND expires_at_ms > ' +
+    String(fence.nowMs) +
+    ')'
+  );
+}
+
 function firstResult(result) {
   return result?.results?.[0] ?? null;
 }
@@ -287,6 +374,8 @@ async function transitionAssignmentToDeferred(
   {
     now = new Date(),
     reason = MISSED_REASON,
+    publicationLease = null,
+    publicationLeaseNowMs = null,
   } = {},
 ) {
   if (!db || typeof db.prepare !== 'function' || typeof db.batch !== 'function') {
@@ -301,6 +390,10 @@ async function transitionAssignmentToDeferred(
   const assignmentGeneration = positiveInt(row.assignment_generation, 'assignment generation');
   const policyVersion = positiveInt(row.policy_version, 'policy version');
   const contentRevision = positiveInt(row.content_revision, 'content revision');
+  const leaseFence =
+    publicationLease === null
+      ? null
+      : publicationLeaseFence(publicationLease, publicationLeaseNowMs);
 
   const detail = JSON.stringify({
     contentId: row.content_id,
@@ -321,17 +414,38 @@ async function transitionAssignmentToDeferred(
   });
 
   try {
+    const updateStatement =
+      leaseFence === null
+        ? db.prepare(UPDATE_ASSIGNMENT_SQL).bind(
+            at,
+            row.assignment_id,
+            assignmentVersion,
+            row.content_id,
+            row.content_digest,
+            policyVersion,
+            row.resolved_at,
+            assignmentGeneration,
+          )
+        : db.prepare(UPDATE_ASSIGNMENT_WITH_LEASE_SQL).bind(
+            at,
+            row.assignment_id,
+            assignmentVersion,
+            row.content_id,
+            row.content_digest,
+            policyVersion,
+            row.resolved_at,
+            assignmentGeneration,
+            leaseFence.leaseName,
+            leaseFence.ownerToken,
+            leaseFence.acquisitionId,
+            leaseFence.generation,
+            leaseFence.acquiredAtMs,
+            leaseFence.expiresAtMs,
+            leaseFence.nowMs,
+          );
+
     const results = await db.batch([
-      db.prepare(UPDATE_ASSIGNMENT_SQL).bind(
-        at,
-        row.assignment_id,
-        assignmentVersion,
-        row.content_id,
-        row.content_digest,
-        policyVersion,
-        row.resolved_at,
-        assignmentGeneration,
-      ),
+      updateStatement,
       db.prepare(DIRECT_CHANGES_SQL),
       db.prepare(INSERT_DEFERRAL_SQL).bind(
         row.content_id,
@@ -416,6 +530,8 @@ export async function deferOneMissedAssignment(
   {
     now = new Date(),
     graceMinutes = 20,
+    publicationLease = null,
+    publicationLeaseNowMs = null,
   } = {},
 ) {
   const classification = classifyMissedAssignment(row, { now, graceMinutes });
@@ -430,6 +546,8 @@ export async function deferOneMissedAssignment(
   return transitionAssignmentToDeferred(db, row, {
     now,
     reason: MISSED_REASON,
+    publicationLease,
+    publicationLeaseNowMs,
   });
 }
 
@@ -459,7 +577,14 @@ export function publicationDeferralHandoff(result) {
   return null;
 }
 
-async function promoteRuntimeRevisionIfNeeded(db, recordedAt) {
+async function promoteRuntimeRevisionIfNeeded(
+  db,
+  recordedAt,
+  {
+    publicationLease = null,
+    publicationLeaseNowMs = null,
+  } = {},
+) {
   const current = await readRuntimeState(db);
   if (!current) {
     throw new Error('runtime revision state is missing; refusing deferred lifecycle mutation');
@@ -495,7 +620,14 @@ async function promoteRuntimeRevisionIfNeeded(db, recordedAt) {
     sourceOperationId,
     recordedAt,
   });
-  const sql = renderRuntimeRevisionInsertSql(revision);
+  const leaseFence =
+    publicationLease === null
+      ? null
+      : publicationLeaseFence(publicationLease, publicationLeaseNowMs);
+  const sql = renderRuntimeRevisionInsertSql(revision, {
+    additionalGuardSql:
+      leaseFence === null ? null : publicationLeaseGuardSql(leaseFence),
+  });
 
   try {
     const statement = db.prepare(sql);
@@ -571,6 +703,11 @@ export async function deferConfirmedPublicationHandoff(
   const runtimeRevision = await promoteRuntimeRevisionIfNeeded(
     db,
     isoNow(now),
+    {
+      publicationLease,
+      publicationLeaseNowMs:
+        publicationLease === null ? null : leaseNowMs(),
+    },
   );
 
   return Object.freeze({
@@ -584,10 +721,15 @@ export async function deferMissedAssignments(
   {
     now = new Date(),
     graceMinutes = 20,
+    publicationLease = null,
+    leaseNowMs = () => Date.now(),
   } = {},
 ) {
   isoNow(now);
   graceMs(graceMinutes);
+  if (publicationLease !== null && typeof leaseNowMs !== 'function') {
+    throw new Error('leaseNowMs must be a function when publicationLease is provided');
+  }
 
   const result = await db.prepare(CANDIDATES_SQL).all();
   const rows = Array.isArray(result) ? result : (result?.results ?? []);
@@ -597,7 +739,13 @@ export async function deferMissedAssignments(
     const classification = classifyMissedAssignment(row, { now, graceMinutes });
 
     if (classification.action === 'defer') {
-      outcomes.push(await deferOneMissedAssignment(db, row, { now, graceMinutes }));
+      outcomes.push(await deferOneMissedAssignment(db, row, {
+        now,
+        graceMinutes,
+        publicationLease,
+        publicationLeaseNowMs:
+          publicationLease === null ? null : leaseNowMs(),
+      }));
       continue;
     }
 
@@ -624,6 +772,7 @@ export async function deferMissedAssignments(
 export const deferredLifecycleSql = Object.freeze({
   candidates: CANDIDATES_SQL,
   updateAssignment: UPDATE_ASSIGNMENT_SQL,
+  updateAssignmentWithLease: UPDATE_ASSIGNMENT_WITH_LEASE_SQL,
   insertDeferral: INSERT_DEFERRAL_SQL,
   insertAssignmentEvent: INSERT_ASSIGNMENT_EVENT_SQL,
   insertDeferralEvent: INSERT_DEFERRAL_EVENT_SQL,
