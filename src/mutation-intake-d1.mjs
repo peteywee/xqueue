@@ -74,6 +74,26 @@ function stmt(db, sql, ...args) {
   return db.prepare(sql).bind(...args);
 }
 
+function completionReadbackError(readback, message, cause = null) {
+  const error = new Error(message);
+  error.readback = readback;
+  if (cause !== null) error.cause = cause;
+  return error;
+}
+
+async function completionReadFirst(db, sql, ...args) {
+  try {
+    return await stmt(db, sql, ...args).first();
+  } catch (cause) {
+    throw completionReadbackError(
+      'unavailable',
+      'mutation completion readback unavailable: ' +
+        (cause instanceof Error ? cause.message : String(cause)),
+      cause,
+    );
+  }
+}
+
 function assertStmt(db, predicateSql, predicateArgs, operationId, recordedAt) {
   return stmt(
     db,
@@ -171,12 +191,12 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
   const d1 = ensureDb(db);
   validatePair(controlPlan, intakePlan);
 
-  const operation = await stmt(
+  const operation = await completionReadFirst(
     d1,
     'SELECT operation_id,plan_digest,state,effect_state,resulting_runtime_generation,resulting_runtime_revision_digest ' +
       'FROM mutation_operations WHERE operation_id=?',
     controlPlan.operation_id,
-  ).first();
+  );
 
   const operationState = operation?.state;
   if (
@@ -185,15 +205,15 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
     !['VERIFYING', 'COMPLETE'].includes(operationState) ||
     operation.effect_state !== 'applied'
   ) {
-    throw new Error('mutation operation readback is not exact applied state');
+    throw completionReadbackError('contradictory', 'mutation operation readback is not exact applied state');
   }
 
-  const intakeOperation = await stmt(
+  const intakeOperation = await completionReadFirst(
     d1,
     'SELECT operation_id,plan_digest,status,resulting_runtime_generation,resulting_runtime_revision_digest ' +
       'FROM queue_intake_operations WHERE operation_id=?',
     intakePlan.operation_id,
-  ).first();
+  );
 
   const expectedIntakeStatus = operationState === 'COMPLETE' ? 'complete' : 'claimed';
   if (
@@ -201,14 +221,14 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
     intakeOperation.plan_digest !== intakePlan.plan_digest ||
     intakeOperation.status !== expectedIntakeStatus
   ) {
-    throw new Error('intake operation readback does not match mutation state');
+    throw completionReadbackError('contradictory', 'intake operation readback does not match mutation state');
   }
 
-  const runtime = await stmt(
+  const runtime = await completionReadFirst(
     d1,
     'SELECT generation,revision_digest,source_operation_id FROM queue_runtime_revisions WHERE source_operation_id=?',
     controlPlan.operation_id,
-  ).first();
+  );
 
   if (
     !runtime ||
@@ -217,15 +237,15 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
     Number(runtime.generation) !== Number(intakeOperation.resulting_runtime_generation) ||
     runtime.revision_digest !== intakeOperation.resulting_runtime_revision_digest
   ) {
-    throw new Error('runtime completion readback does not match operation evidence');
+    throw completionReadbackError('contradictory', 'runtime completion readback does not match operation evidence');
   }
 
   const items = [];
   for (const expected of controlPlan.items) {
     const intakeItem = intakePlan.items.find((item) => item.content_id === expected.item_key);
-    if (!intakeItem) throw new Error('intake item missing for mutation item ' + expected.item_key);
+    if (!intakeItem) throw completionReadbackError('contradictory', 'intake item missing for mutation item ' + expected.item_key);
 
-    const row = await stmt(
+    const row = await completionReadFirst(
       d1,
       'SELECT c.current_revision AS content_revision,c.intake_state,' +
         'r.content_digest AS revision_digest,a.assignment_version,' +
@@ -237,7 +257,7 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
         'WHERE c.content_id=? ORDER BY a.assignment_version DESC LIMIT 1',
       intakeItem.assignment_id,
       intakeItem.content_id,
-    ).first();
+    );
 
     const exact = Boolean(
       row &&

@@ -349,6 +349,14 @@ function deps({
           preflight: { ok: false, authority: 'unknown' },
         };
       }
+      const blockedPhase =
+        mutationStatus === 'post-dispatch-blocked'
+          ? 'apply'
+          : mutationStatus === 'complete-readback-blocked'
+            ? 'complete_readback'
+            : mutationStatus === 'existing-operation-blocked'
+              ? 'existing_operation'
+              : 'production_preflight';
       return mutationStatus === 'applied'
         ? {
             status: 'applied',
@@ -370,7 +378,7 @@ function deps({
           }
         : {
             status: 'blocked',
-            phase: mutationStatus === 'post-dispatch-blocked' ? 'apply' : 'production_preflight',
+            phase: blockedPhase,
             decision: { outcome: 'SYSTEM_HALT' },
             preflight: { ok: false },
           };
@@ -596,6 +604,28 @@ test('production endpoint requires independent bearer service identity', async (
   assert.equal(authenticatedResponse.status, 200);
 });
 
+test('worker returns stable non-retryable 400 for missing or array candidate evidence', async () => {
+  for (const candidate of [null, []]) {
+    const worker = createMutationProductionIntakeWorker(deps());
+    const response = await worker.fetch(
+      new Request('https://example.test/production-intake', {
+        method: 'POST',
+        body: JSON.stringify(payload({ candidate })),
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer ' + CONTROL_TOKEN,
+        },
+      }),
+      env(),
+    );
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.faultClass, 'INVALID_CANDIDATE');
+    assert.equal(body.retryable, false);
+    assert.equal(body.requiresReadback, false);
+  }
+});
+
 test('worker returns stable non-retryable 400 for malformed JSON', async () => {
   const worker = createMutationProductionIntakeWorker(deps());
   const response = await worker.fetch(
@@ -636,6 +666,28 @@ test('transient pre-dispatch safety read failure is retryable 503', async () => 
   assert.equal(body.faultClass, 'PRE_DISPATCH_STATE_UNAVAILABLE');
   assert.equal(body.retryable, true);
   assert.equal(body.requiresReadback, false);
+});
+
+test('complete_readback and existing_operation are conservatively post-dispatch', async () => {
+  for (const mutationStatus of ['complete-readback-blocked', 'existing-operation-blocked']) {
+    const worker = createMutationProductionIntakeWorker(deps({ mutationStatus }));
+    const response = await worker.fetch(
+      new Request('https://example.test/production-intake', {
+        method: 'POST',
+        body: JSON.stringify(payload()),
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer ' + CONTROL_TOKEN,
+        },
+      }),
+      env(),
+    );
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.faultClass, 'POST_DISPATCH_RECONCILIATION_REQUIRED');
+    assert.equal(body.retryable, false);
+    assert.equal(body.requiresReadback, true);
+  }
 });
 
 test('post-dispatch blocked result is 409 and explicitly requires readback', async () => {

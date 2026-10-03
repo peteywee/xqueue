@@ -517,7 +517,16 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const candidate = requiredObject(payload?.candidate, 'exact-main candidate evidence');
+  let candidate;
+  try {
+    candidate = requiredObject(payload?.candidate, 'exact-main candidate evidence');
+  } catch (error) {
+    throw productionFault(
+      'INVALID_CANDIDATE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 400 },
+    );
+  }
   const input = payload?.input;
   if (input == null) {
     throw productionFault('INVALID_INTAKE', 'intake input is required', { httpStatus: 400 });
@@ -949,6 +958,8 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
           const postDispatch = [
             'apply',
             'completion_readback',
+            'complete_readback',
+            'existing_operation',
             'finalize',
             'finalize_readback',
           ].includes(phase);

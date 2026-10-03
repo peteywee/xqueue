@@ -71,6 +71,9 @@ async function exactCompletion({ transport, controlPlan, intakePlan }) {
       intakePlan,
     });
   } catch (cause) {
+    if (cause?.readback === 'unavailable' || cause?.readback === 'contradictory') {
+      throw cause;
+    }
     const error = new Error(
       'mutation completion readback unavailable: ' +
         (cause instanceof Error ? cause.message : String(cause)),
