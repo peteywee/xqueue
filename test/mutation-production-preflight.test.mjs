@@ -50,6 +50,8 @@ function safety(overrides = {}) {
     },
     unresolvedAttemptCount: 0,
     activeLeaseCount: 0,
+    publicationLeaseGeneration: 5,
+    publicationEventCursor: 0,
     runtimeSnapshotObserved: true,
     inflight: null,
     ...overrides,
@@ -207,6 +209,12 @@ function mutationFixture(options = {}) {
   raw.prepare(
     "INSERT INTO runtime_metadata (key,value,updated_at) VALUES ('state.snapshot_json',?,?)",
   ).run(JSON.stringify({ inflight: null }), '2026-09-29T10:00:00.000Z');
+
+  raw.prepare(
+    'INSERT INTO publication_leases ' +
+      '(lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms) ' +
+      "VALUES ('publisher',NULL,NULL,5,0,0,0)",
+  ).run();
 
   let checkpointCalls = 0;
   const base = createD1MutationTransport({
@@ -389,6 +397,43 @@ test('production publication safety is reasserted atomically at mutation-lane cl
     auth: auth(),
     candidate: candidate(),
     transport,
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(fx.checkpointCalls(), 1);
+  assert.equal(
+    fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
+    0,
+  );
+  assert.equal(
+    fx.raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id,
+    null,
+  );
+
+  fx.raw.close();
+});
+
+
+test('completed publication lease cycle after safety read invalidates the recovery bookmark fence', async () => {
+  const fx = mutationFixture({
+    beforeBatch(raw) {
+      raw.prepare(
+        "UPDATE publication_leases SET generation=generation+1,updated_at_ms=updated_at_ms+1 WHERE lease_name='publisher'",
+      ).run();
+    },
+  });
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+
+  const result = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport: fx.base,
     intakePlan,
     controlPlan,
     runtimeRevision,

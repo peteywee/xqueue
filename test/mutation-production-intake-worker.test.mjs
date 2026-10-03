@@ -42,6 +42,13 @@ function fakeDb({
           return this;
         },
         async all() {
+          if (
+            replay &&
+            (sql.includes('FROM queue_intake_items') ||
+              sql.includes('FROM mutation_operation_items'))
+          ) {
+            assert.equal(state.args.length, 1, 'replay query placeholder must be bound');
+          }
           if (replay && sql.includes('FROM queue_intake_items')) {
             return {
               results: [{

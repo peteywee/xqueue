@@ -72,8 +72,9 @@ function rows(result) {
   return Array.isArray(result) ? result : (result?.results ?? []);
 }
 
-async function all(db, sql) {
-  return rows(await db.prepare(sql).all());
+async function all(db, sql, ...args) {
+  const statement = args.length ? db.prepare(sql).bind(...args) : db.prepare(sql);
+  return rows(await statement.all());
 }
 
 async function first(db, sql, ...args) {
