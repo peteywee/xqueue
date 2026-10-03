@@ -78,7 +78,8 @@
     "production:precutover:normalize": "node -e \"console.error('STOP: retired after #46; publisher handles missed-slot deferral'); process.exit(1)\"",
     "production:authority": "node scripts/production-authority-control.mjs",
     "production:acceptance": "node scripts/production-acceptance-batch.mjs",
-    "production:status": "node scripts/production-operator-status.mjs"
+    "production:status": "node scripts/production-operator-status.mjs",
+    "production:intake": "node scripts/production-mutation-intake.mjs"
   },
   "dependencies": {
     "@xdevplatform/xdk": "^0.6.6",
