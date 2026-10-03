@@ -50,9 +50,6 @@ LIMIT 1
 
 export const MAX_PRODUCTION_INTAKE_ITEMS = 5;
 
-const EXISTING_MUTATION_SQL =
-  'SELECT * FROM mutation_operations WHERE operation_id=?';
-
 const EXISTING_INTAKE_SQL =
   "SELECT operation_id,plan_digest,batch_digest,item_count,expected_frontier_generation," +
   "expected_frontier_resolved_at,proposed_frontier_resolved_at,baseline_assignment_hash," +
@@ -246,9 +243,15 @@ function productionTransport(env, db, createTransport, fetchImpl) {
   });
 }
 
-async function loadReplayState(db, normalized, operationId) {
-  const operation = await first(db, EXISTING_MUTATION_SQL, operationId);
-  if (!operation) return null;
+async function loadReplayState(db, normalized, operation) {
+  const operationId = operation?.operation_id;
+  if (!operationId) {
+    throw productionFault(
+      'IDEMPOTENCY_READBACK_CONFLICT',
+      'existing mutation operation identity is missing',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
 
   const intakeOperation = await first(
     db,
@@ -542,7 +545,7 @@ export async function runProductionIntakeRequest(
   }
 
   if (existingOperation) {
-    const replay = await loadReplayState(db, normalized, operationId);
+    const replay = await loadReplayState(db, normalized, existingOperation);
     const mutation = await resumeMutation({
       intakePlan: replay.intakePlan,
       controlPlan: replay.controlPlan,
