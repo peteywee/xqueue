@@ -5,6 +5,7 @@ import {
   hashAssignmentRows,
   normalizeIntakeInput,
   planIntake,
+  sha256Hex,
 } from '../../src/continuous-queue-intake.mjs';
 import {
   createIntakeMutationControlPlan,
@@ -18,6 +19,7 @@ import {
   runProductionIntakeMutation,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
+import { assertAuthenticatedOwnerApprovalForDigest } from '../../src/authoring/owner-approval.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -90,6 +92,87 @@ function requiredObject(value, label) {
     throw new Error(label + ' is required');
   }
   return value;
+}
+
+function rawIntakeItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw?.items && Array.isArray(raw.items)) return raw.items;
+  if (raw && typeof raw === 'object') return [raw];
+  throw new Error('intake input must be an object, array, or {items:[...]}');
+}
+
+function authorizeAutomatedInput({
+  raw,
+  mode,
+  ownerApproval,
+  ownerApprovalDigest,
+  ownerPublicKeyPem,
+  verifyOwnerApproval,
+}) {
+  if (ownerApprovalDigest != null) {
+    throw new Error('automated intake rejects caller-supplied ownerApprovalDigest');
+  }
+  if (typeof ownerPublicKeyPem !== 'string' || !ownerPublicKeyPem.trim()) {
+    const error = new Error('owner approval public key is unavailable');
+    error.authorityUnavailable = true;
+    throw error;
+  }
+
+  const source = rawIntakeItems(raw);
+  if (mode === 'single' && source.length !== 1) {
+    throw new Error('single intake requires exactly one item');
+  }
+  if (source.length > 1 && ownerApproval != null) {
+    throw new Error('batch automated intake requires signed owner_approval evidence per item');
+  }
+
+  return source.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`item ${index + 1} must be an object`);
+    }
+    if (item.owner_approval_digest != null || item.ownerApprovalDigest != null) {
+      throw new Error(`item ${index + 1} rejects caller-supplied owner approval digest`);
+    }
+    if (item.source_mode != null && item.source_mode !== 'automated') {
+      throw new Error(`item ${index + 1} source_mode cannot override automated authority`);
+    }
+    if (typeof item.body !== 'string' || item.body.length === 0) {
+      throw new Error(`item ${index + 1} body is required`);
+    }
+
+    const contentHex = sha256Hex(item.body);
+    const suppliedId = item.content_id ?? item.id ?? null;
+    const candidateId = suppliedId == null
+      ? `CQ-${contentHex.slice(0, 20).toUpperCase()}`
+      : String(suppliedId);
+    const approval = item.owner_approval ?? (source.length === 1 ? ownerApproval : null);
+    if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
+      throw new Error(`item ${index + 1} requires signed owner_approval evidence`);
+    }
+
+    verifyOwnerApproval(
+      { candidateId, candidateDigest: `sha256:${contentHex}` },
+      approval,
+      ownerPublicKeyPem,
+    );
+
+    const trustedDigest = approval?.owner_proof?.payload_digest;
+    if (typeof trustedDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(trustedDigest)) {
+      throw new Error(`item ${index + 1} verified owner approval lacks canonical payload digest`);
+    }
+
+    const {
+      owner_approval: _ownerApproval,
+      owner_approval_digest: _ownerApprovalDigest,
+      ownerApprovalDigest: _ownerApprovalDigestCamel,
+      ...rest
+    } = item;
+    return Object.freeze({
+      ...rest,
+      source_mode: 'automated',
+      owner_approval_digest: trustedDigest,
+    });
+  });
 }
 
 function requiredSecret(value, label) {
@@ -488,6 +571,7 @@ export async function runProductionIntakeRequest(
   {
     verifyRuntime = verifyDynamicRuntime,
     verifyAuth = verifyCloudflareApiToken,
+    verifyOwnerApproval = assertAuthenticatedOwnerApprovalForDigest,
     normalizeInput = normalizeIntakeInput,
     plan = planIntake,
     assignmentHash = hashAssignmentRows,
@@ -538,14 +622,32 @@ export async function runProductionIntakeRequest(
   try {
     mode = requiredMode(payload?.mode);
     sourceMode = requiredSourceMode(payload?.sourceMode);
-    normalized = normalizeInput(input, {
+    const authorizedInput = sourceMode === 'automated'
+      ? authorizeAutomatedInput({
+          raw: input,
+          mode,
+          ownerApproval: payload?.ownerApproval ?? null,
+          ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
+          ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
+          verifyOwnerApproval,
+        })
+      : input;
+    normalized = normalizeInput(authorizedInput, {
       mode,
       sourceMode,
-      ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
+      ownerApprovalDigest:
+        sourceMode === 'automated' ? null : (payload?.ownerApprovalDigest ?? null),
     });
   } catch (error) {
+    if (error?.authorityUnavailable === true) {
+      throw productionFault(
+        'OWNER_APPROVAL_AUTHORITY_UNAVAILABLE',
+        error.message,
+        { httpStatus: 503 },
+      );
+    }
     throw productionFault(
-      'INVALID_INTAKE',
+      sourceMode === 'automated' ? 'INVALID_OWNER_APPROVAL' : 'INVALID_INTAKE',
       error instanceof Error ? error.message : String(error),
       { httpStatus: 400 },
     );

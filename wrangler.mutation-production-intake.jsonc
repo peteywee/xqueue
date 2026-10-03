@@ -16,7 +16,8 @@
   },
   "vars": {
     "CLOUDFLARE_ACCOUNT_ID": "aab09adea145e6da8fa57b0f73b073da",
-    "XQUEUE_PRODUCTION_DATABASE_ID": "fc85026e-bfc8-435f-8bb0-c60e139178a3"
+    "XQUEUE_PRODUCTION_DATABASE_ID": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
+    "OWNER_APPROVAL_PUBLIC_KEY_PEM": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5JoMHKP6tJfk0/QoqGqIfrvXYMzzwMgswmgEjznzXho=\n-----END PUBLIC KEY-----\n"
   },
   "d1_databases": [
     {

@@ -50,7 +50,8 @@ function readbackKind(error) {
 }
 
 function postDispatchReadbackBlocked(phase, recovered, readback = 'unavailable') {
-  const errorClass = 'D1_READ_UNAVAILABLE';
+  const errorClass =
+    readback === 'contradictory' ? 'D1_READ_CONTRADICTORY' : 'D1_READ_UNAVAILABLE';
   const decision = decideMutationError(errorClass, {
     postDispatch: true,
     readback,

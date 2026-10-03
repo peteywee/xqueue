@@ -5,6 +5,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { candidateDigest } from '../src/authoring/contracts.mjs';
 import {
   assertAuthenticatedOwnerApprovalForCandidate,
+  assertAuthenticatedOwnerApprovalForDigest,
   createAuthenticatedOwnerApproval,
   createOwnerApprovalPayload,
   ownerPublicKeyFingerprint,
@@ -52,6 +53,37 @@ test('valid detached owner signature authorizes only the exact candidate', () =>
   const approval = signedApproval(value);
   assert.equal(assertAuthenticatedOwnerApprovalForCandidate(value, approval, ownerPublicKeyPem), true);
   assert.equal(approval.owner_proof.public_key_fingerprint, ownerPublicKeyFingerprint(ownerPublicKeyPem));
+});
+
+test('digest-only approval verification binds signed authority to exact intake identity and digest', () => {
+  const value = candidate();
+  const approval = signedApproval(value);
+
+  assert.equal(
+    assertAuthenticatedOwnerApprovalForDigest(
+      { candidateId: value.candidate_id, candidateDigest: value.content_digest },
+      approval,
+      ownerPublicKeyPem,
+    ),
+    true,
+  );
+
+  assert.throws(
+    () => assertAuthenticatedOwnerApprovalForDigest(
+      { candidateId: 'other-candidate', candidateDigest: value.content_digest },
+      approval,
+      ownerPublicKeyPem,
+    ),
+    (error) => error?.code === 'approval_candidate_mismatch',
+  );
+  assert.throws(
+    () => assertAuthenticatedOwnerApprovalForDigest(
+      { candidateId: value.candidate_id, candidateDigest: 'sha256:' + '0'.repeat(64) },
+      approval,
+      ownerPublicKeyPem,
+    ),
+    (error) => error?.code === 'approval_digest_mismatch',
+  );
 });
 
 test('candidate data alone is insufficient to create authenticated approval', () => {

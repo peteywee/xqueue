@@ -203,8 +203,7 @@ export function createAuthenticatedOwnerApproval({
   return Object.freeze({ ...approval, owner_proof: Object.freeze({ ...approval.owner_proof }) });
 }
 
-export function assertAuthenticatedOwnerApprovalForCandidate(candidate, approval, publicKeyPem) {
-  assertApprovalForCandidate(candidate, approval);
+function assertAuthenticatedOwnerApprovalProof(approval, publicKeyPem) {
   const proof = approval?.owner_proof;
   if (!proof || typeof proof !== 'object' || Array.isArray(proof)) {
     fail('owner_signature_required', 'authoritative promotion requires detached owner signature proof');
@@ -238,4 +237,31 @@ export function assertAuthenticatedOwnerApprovalForCandidate(candidate, approval
     fail('owner_signature_invalid', 'detached owner signature does not verify');
   }
   return true;
+}
+
+export function assertAuthenticatedOwnerApprovalForDigest(
+  { candidateId, candidateDigest },
+  approval,
+  publicKeyPem,
+) {
+  if (typeof candidateId !== 'string' || !candidateId.trim()) {
+    fail('invalid_owner_candidate_id', 'candidate id is required');
+  }
+  assertDigest(candidateDigest);
+  assertApproval(approval);
+  if (approval.decision !== 'approve') {
+    fail('approval_required', 'candidate is not approved');
+  }
+  if (approval.candidate_id !== candidateId) {
+    fail('approval_candidate_mismatch', 'approval is for a different candidate id');
+  }
+  if (approval.candidate_digest !== candidateDigest) {
+    fail('approval_digest_mismatch', 'approval does not bind to the exact candidate digest');
+  }
+  return assertAuthenticatedOwnerApprovalProof(approval, publicKeyPem);
+}
+
+export function assertAuthenticatedOwnerApprovalForCandidate(candidate, approval, publicKeyPem) {
+  assertApprovalForCandidate(candidate, approval);
+  return assertAuthenticatedOwnerApprovalProof(approval, publicKeyPem);
 }

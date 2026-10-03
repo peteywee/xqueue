@@ -217,6 +217,43 @@ test('final completion readback failure stays post-dispatch and blocked', async 
   fx.raw.close();
 });
 
+test('contradictory completion readback uses dedicated contradictory fault class', async () => {
+  const fx = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const revision = await runtimeRevision(intakePlan, controlPlan, state);
+
+  let batchCalls = 0;
+  const transport = {
+    ...fx.transport,
+    async batch(statements) {
+      const result = await fx.transport.batch(statements);
+      batchCalls++;
+      if (batchCalls === 1) {
+        fx.raw.prepare(
+          "UPDATE queue_content SET intake_state='approved_unscheduled' WHERE content_id=?",
+        ).run('I-RUNNER-1');
+      }
+      return result;
+    },
+  };
+
+  const result = await runIntakeMutation({
+    intakePlan,
+    controlPlan,
+    runtimeRevision: revision,
+    transport,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.phase, 'completion_readback');
+  assert.equal(result.error_class, 'D1_READ_CONTRADICTORY');
+  assert.equal(result.readback, 'contradictory');
+  assert.equal(result.decision.outcome, 'SYSTEM_HALT');
+
+  fx.raw.close();
+});
+
 test('runner performs checkpoint -> atomic apply -> exact readback -> finalize', async () => {
   const fx = fixture();
   const { intakePlan, controlPlan, state } = plans();

@@ -65,6 +65,16 @@ test('preflight clean resolves; blocked lane defers; stale fences replan', () =>
   assert.equal(decideMutationPreflight(p, current(p, { laneGeneration: 8 })).outcome, 'AUTO_RETRY');
 });
 
+test('contradictory canonical readback maps to inconsistent-read system halt', () => {
+  const decision = decideMutationError('D1_READ_CONTRADICTORY', {
+    postDispatch: true,
+    readback: 'contradictory',
+  });
+  assert.equal(decision.outcome, 'SYSTEM_HALT');
+  assert.equal(decision.haltScope, 'system');
+  assert.equal(decision.primaryReason, 'canonical_corruption');
+});
+
 test('post-dispatch D1 outcomes map through Batch 0 semantics', () => {
   assert.equal(decideMutationError('D1_BATCH_APPLIED', { postDispatch: true }).outcome, 'AUTO_RESOLVE');
   assert.equal(decideMutationError('D1_BATCH_AMBIGUOUS', { postDispatch: true }).outcome, 'SYSTEM_HALT');

@@ -16,6 +16,10 @@ const ACCOUNT_ID = 'aab09adea145e6da8fa57b0f73b073da';
 const CONTROL_TOKEN = 'control-token-' + 'x'.repeat(32);
 const CF_TOKEN = 'cfat_' + 'z'.repeat(40);
 const OPERATION_ID = 'mutation-intake-' + '2'.repeat(24);
+const OWNER_PUBLIC_KEY_PEM =
+  '-----BEGIN PUBLIC KEY-----\n' +
+  'MCowBQYDK2VwAyEA5JoMHKP6tJfk0/QoqGqIfrvXYMzzwMgswmgEjznzXho=\n' +
+  '-----END PUBLIC KEY-----\n';
 const INTAKE_ID = 'intake-' + '1'.repeat(24);
 
 function env(db = fakeDb()) {
@@ -25,6 +29,7 @@ function env(db = fakeDb()) {
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
     CLOUDFLARE_API_TOKEN: CF_TOKEN,
+    OWNER_APPROVAL_PUBLIC_KEY_PEM: OWNER_PUBLIC_KEY_PEM,
   };
 }
 
@@ -626,6 +631,91 @@ test('worker returns stable non-retryable 400 for missing or array candidate evi
   }
 });
 
+test('automated intake rejects caller-supplied approval digests before normalization', async () => {
+  const d = deps();
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(),
+      payload({
+        sourceMode: 'automated',
+        ownerApprovalDigest: 'sha256:' + '1'.repeat(64),
+      }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      error?.httpStatus === 400 &&
+      /caller-supplied ownerApprovalDigest/.test(error.message),
+  );
+
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(),
+      payload({
+        sourceMode: 'automated',
+        input: {
+          ...payload().input,
+          owner_approval_digest: 'sha256:' + '2'.repeat(64),
+        },
+      }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      error?.httpStatus === 400 &&
+      /caller-supplied owner approval digest/.test(error.message),
+  );
+});
+
+test('automated intake derives durable approval digest only from verified signed evidence', async () => {
+  const seen = [];
+  const approvalDigest = 'sha256:' + '3'.repeat(64);
+  const approval = {
+    approval_id: 'approval:test-owner-signed',
+    candidate_id: 'I-PRODUCTION-TEST-1',
+    candidate_digest:
+      'sha256:' +
+      '0'.repeat(64),
+    decision: 'approve',
+    decided_by: 'Patrick Craven',
+    decided_at: '2026-10-03T06:59:00.000Z',
+    owner_proof: {
+      type: 'ed25519-detached',
+      public_key_fingerprint: 'sha256:' + '4'.repeat(64),
+      payload_digest: approvalDigest,
+      signature_base64: 'signed-proof',
+    },
+  };
+  const d = deps();
+  d.verifyOwnerApproval = (candidateRef, provided, publicKeyPem) => {
+    seen.push({ candidateRef, provided, publicKeyPem });
+    return true;
+  };
+  const originalNormalize = d.normalizeInput;
+  d.normalizeInput = (input, options) => {
+    assert.equal(options.ownerApprovalDigest, null);
+    assert.equal(input[0].source_mode, 'automated');
+    assert.equal(input[0].owner_approval_digest, approvalDigest);
+    assert.equal('owner_approval' in input[0], false);
+    return originalNormalize(input, options);
+  };
+
+  const result = await runProductionIntakeRequest(
+    env(),
+    payload({
+      sourceMode: 'automated',
+      ownerApproval: approval,
+    }),
+    d,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].candidateRef.candidateId, 'I-PRODUCTION-TEST-1');
+  assert.match(seen[0].candidateRef.candidateDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(seen[0].publicKeyPem, OWNER_PUBLIC_KEY_PEM);
+});
+
 test('worker returns stable non-retryable 400 for malformed JSON', async () => {
   const worker = createMutationProductionIntakeWorker(deps());
   const response = await worker.fetch(
@@ -762,6 +852,8 @@ test('production mutation worker config contains D1 only and no embedded secrets
   assert.match(config, /"binding": "DB"/);
   assert.match(config, /"CLOUDFLARE_ACCOUNT_ID"/);
   assert.match(config, /"XQUEUE_PRODUCTION_DATABASE_ID"/);
+  assert.match(config, /"OWNER_APPROVAL_PUBLIC_KEY_PEM"/);
+  assert.match(config, /BEGIN PUBLIC KEY/);
   assert.doesNotMatch(config, /CLOUDFLARE_API_TOKEN/);
   assert.doesNotMatch(config, /MUTATION_CONTROL_TOKEN/);
   assert.doesNotMatch(config, /MUTATION_CHECKPOINT_HMAC_KEY/);
