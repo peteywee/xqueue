@@ -13,7 +13,10 @@ import {
 import { projectIntakeRuntimeRevision } from '../../src/mutation-intake-d1.mjs';
 import { createD1MutationTransport } from '../../src/mutation-control-transport.mjs';
 import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
-import { runProductionIntakeMutation } from '../../src/mutation-production-preflight.mjs';
+import {
+  evaluateProductionMutationPreflight,
+  runProductionIntakeMutation,
+} from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
@@ -568,21 +571,83 @@ export async function runProductionIntakeRequest(
   }
 
   if (existingOperation) {
-    const replay = await loadReplayState(db, normalized, existingOperation);
-    const mutation = await resumeMutation({
-      intakePlan: replay.intakePlan,
-      controlPlan: replay.controlPlan,
-      runtimeRevision: replay.runtimeRevision,
-      transport,
-      recordedAt,
+    let replaySafety;
+    try {
+      replaySafety = await transport.readPublicationSafety();
+    } catch (error) {
+      throw productionFault(
+        'PRE_DISPATCH_STATE_UNAVAILABLE',
+        error instanceof Error ? error.message : String(error),
+        { httpStatus: 503, retryable: true },
+      );
+    }
+
+    const replayPreflight = evaluateProductionMutationPreflight({
+      environment: 'production',
+      auth: trustedAuth,
+      candidate,
+      safety: replaySafety,
     });
+    if (!replayPreflight.ok) {
+      throw productionFault(
+        'PRE_DISPATCH_STATE_CONFLICT',
+        'production replay preflight blocked: ' +
+          replayPreflight.blockers.map((item) => item.id).join(','),
+        { httpStatus: 409 },
+      );
+    }
+
+    const appliedReplay = existingOperation.effect_state === 'applied';
+    let replay;
+    try {
+      replay = await loadReplayState(db, normalized, existingOperation);
+    } catch (error) {
+      if (appliedReplay) {
+        throw productionFault(
+          'POST_DISPATCH_READBACK_AMBIGUOUS',
+          'production replay state readback failed: ' +
+            (error instanceof Error ? error.message : String(error)),
+          { httpStatus: 409, requiresReadback: true },
+        );
+      }
+      throw error;
+    }
+
+    let mutation;
+    try {
+      mutation = await resumeMutation({
+        intakePlan: replay.intakePlan,
+        controlPlan: replay.controlPlan,
+        runtimeRevision: replay.runtimeRevision,
+        transport,
+        recordedAt,
+      });
+    } catch (error) {
+      if (appliedReplay) {
+        throw productionFault(
+          'POST_DISPATCH_READBACK_AMBIGUOUS',
+          'production applied-operation resume readback failed: ' +
+            (error instanceof Error ? error.message : String(error)),
+          { httpStatus: 409, requiresReadback: true },
+        );
+      }
+      throw error;
+    }
 
     if (!['applied', 'already_applied'].includes(mutation?.status)) {
+      if (appliedReplay) {
+        throw productionFault(
+          'POST_DISPATCH_READBACK_AMBIGUOUS',
+          'production applied-operation resume did not produce exact completion',
+          { httpStatus: 409, requiresReadback: true },
+        );
+      }
       return Object.freeze({
         ok: false,
         publicationCapable: false,
         schedulerAuthority: false,
         replay: true,
+        productionPreflight: replayPreflight,
         planned: Object.freeze({
           operationId,
           intakeOperationId: replay.intakePlan.operation_id,
@@ -607,6 +672,7 @@ export async function runProductionIntakeRequest(
       replay: true,
       publicationCapable: false,
       schedulerAuthority: false,
+      productionPreflight: replayPreflight,
       recoveryCheckpointCaptured:
         typeof existingOperation.checkpoint_bookmark === 'string' &&
         existingOperation.checkpoint_bookmark.length >= 8,
@@ -701,18 +767,38 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const [haltState, laneState, runtimeState] = await Promise.all([
-    transport.readHaltState(),
-    transport.readLaneState(),
-    transport.readRuntimeState(),
-  ]);
+  let haltState;
+  let laneState;
+  let runtimeState;
+  try {
+    [haltState, laneState, runtimeState] = await Promise.all([
+      transport.readHaltState(),
+      transport.readLaneState(),
+      transport.readRuntimeState(),
+    ]);
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
 
-  const controlPlan = createControlPlan({
-    intakePlan,
-    haltState,
-    laneState,
-    runtimeState,
-  });
+  let controlPlan;
+  try {
+    controlPlan = createControlPlan({
+      intakePlan,
+      haltState,
+      laneState,
+      runtimeState,
+    });
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_REPLAN_REQUIRED',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 409, retryable: true },
+    );
+  }
   if (controlPlan.operation_id !== operationId) {
     throw productionFault(
       'OPERATION_IDENTITY_MISMATCH',
@@ -721,16 +807,25 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const runtimeRevision = await projectRevision({
-    intakePlan,
-    controlPlan,
-    currentRuntimeState: runtimeState,
-    assignments: before.snapshot.assignments,
-    deferred: before.snapshot.deferred,
-    approvedUnscheduled: before.snapshot.approvedUnscheduled,
-    media: before.snapshot.media,
-    recordedAt,
-  });
+  let runtimeRevision;
+  try {
+    runtimeRevision = await projectRevision({
+      intakePlan,
+      controlPlan,
+      currentRuntimeState: runtimeState,
+      assignments: before.snapshot.assignments,
+      deferred: before.snapshot.deferred,
+      approvedUnscheduled: before.snapshot.approvedUnscheduled,
+      media: before.snapshot.media,
+      recordedAt,
+    });
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_REPLAN_REQUIRED',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 409, retryable: true },
+    );
+  }
 
   const mutation = await runMutation({
     environment: 'production',

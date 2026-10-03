@@ -160,6 +160,9 @@ function deps({
   replayOperation = null,
   normalizeCount = 1,
   postDispatchVerifyError = null,
+  resumeMutationStatus = 'already_applied',
+  resumeMutationError = null,
+  controlPlanError = null,
 } = {}) {
   let verifyCalls = 0;
   const events = [];
@@ -183,6 +186,26 @@ function deps({
     async captureCheckpoint() {
       events.push('capture-checkpoint');
       return 'bookmark_12345';
+    },
+    async readPublicationSafety() {
+      events.push('read-publication-safety');
+      return {
+        authority: {
+          owner: 'cloudflare',
+          generation: 9,
+          transition_state: 'stable',
+          candidate_sha: 'a'.repeat(40),
+          deployment_id:
+            'cloudflare-worker:xqueue-publisher-production:version:' +
+            '11111111-1111-4111-8111-111111111111',
+        },
+        unresolvedAttemptCount: 0,
+        activeLeaseCount: 0,
+        publicationLeaseGeneration: 5,
+        publicationEventCursor: 17,
+        runtimeSnapshotObserved: true,
+        inflight: null,
+      };
     },
   };
 
@@ -282,6 +305,7 @@ function deps({
       return transport;
     },
     createControlPlan: ({ intakePlan, haltState, laneState }) => {
+      if (controlPlanError) throw controlPlanError;
       assert.equal(intakePlan.operation_id, INTAKE_ID);
       assert.equal(haltState.generation, 3);
       assert.equal(laneState.generation, 7);
@@ -342,24 +366,35 @@ function deps({
             preflight: { ok: false },
           };
     },
-    resumeMutation: async ({ controlPlan }) => ({
-      status: 'already_applied',
-      phase: 'complete_readback',
-      recovered: true,
-      operation_id: controlPlan.operation_id,
-      evidence_digest: 'f'.repeat(64),
-      observed: {
+    resumeMutation: async ({ controlPlan }) => {
+      if (resumeMutationError) throw resumeMutationError;
+      if (resumeMutationStatus !== 'already_applied') {
+        return {
+          status: resumeMutationStatus,
+          phase: 'initial_readback',
+          recovered: false,
+          decision: { outcome: 'AUTO_RETRY' },
+        };
+      }
+      return {
+        status: 'already_applied',
+        phase: 'complete_readback',
+        recovered: true,
         operation_id: controlPlan.operation_id,
-        runtime_generation: 12,
-        runtime_revision_digest: RUNTIME_B,
-        items: [{
-          item_key: 'I-PRODUCTION-TEST-1',
-          readback_status: 'applied',
-          resulting_content_revision: 1,
-          resulting_assignment_version: 1,
-        }],
-      },
-    }),
+        evidence_digest: 'f'.repeat(64),
+        observed: {
+          operation_id: controlPlan.operation_id,
+          runtime_generation: 12,
+          runtime_revision_digest: RUNTIME_B,
+          items: [{
+            item_key: 'I-PRODUCTION-TEST-1',
+            readback_status: 'applied',
+            resulting_content_revision: 1,
+            resulting_assignment_version: 1,
+          }],
+        },
+      };
+    },
     now: () => new Date('2026-10-03T07:00:00.000Z'),
   };
 }
@@ -419,6 +454,60 @@ test('request replay is recovered before duplicate-content planning', async () =
   assert.equal(result.replay, true);
   assert.equal(result.mutation.status, 'already_applied');
   assert.equal(planned, false);
+});
+
+test('request replay still requires exact-main production preflight', async () => {
+  const d = deps({ replayOperation: existingOperation() });
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      payload({
+        candidate: {
+          branch: 'main',
+          clean: false,
+          headSha: '1'.repeat(40),
+          originMainSha: '1'.repeat(40),
+        },
+      }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'PRE_DISPATCH_STATE_CONFLICT' &&
+      error?.httpStatus === 409 &&
+      /candidate_dirty/.test(error.message),
+  );
+});
+
+test('applied replay resume failures are non-retryable post-dispatch ambiguity', async () => {
+  const d = deps({
+    replayOperation: existingOperation(),
+    resumeMutationError: new Error('network timeout during applied replay readback'),
+  });
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      payload(),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+      error?.httpStatus === 409 &&
+      error?.retryable === false &&
+      error?.requiresReadback === true,
+  );
+});
+
+test('pre-dispatch runtime planning races return stable replan-required conflict', async () => {
+  const d = deps({
+    controlPlanError: new Error('intake runtime snapshot does not match its plan fence'),
+  });
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(), payload(), d),
+    (error) =>
+      error?.faultClass === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+      error?.httpStatus === 409 &&
+      error?.retryable === true,
+  );
 });
 
 test('post-commit verification accepts a later healthy runtime head', async () => {
