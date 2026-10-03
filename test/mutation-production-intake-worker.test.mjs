@@ -214,7 +214,9 @@ function deps({
         content_id: index === 0
           ? 'I-PRODUCTION-TEST-1'
           : 'I-PRODUCTION-TEST-' + (index + 1),
-        content_digest: String(index + 1).padStart(64, 'd').slice(-64),
+        content_digest: index === 0
+          ? 'd'.repeat(64)
+          : String(index + 1).padStart(64, 'e').slice(-64),
       }));
       return {
         format: 1,
