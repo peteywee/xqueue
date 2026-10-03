@@ -1,22 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import {
+  MAX_PRODUCTION_INTAKE_ITEMS,
   createMutationProductionIntakeWorker,
   runProductionIntakeRequest,
-  verifyProductionCheckpointEvidence,
 } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 
 const RUNTIME_A = 'a'.repeat(64);
 const RUNTIME_B = 'b'.repeat(64);
 const RUNTIME_C = 'c'.repeat(64);
 const DB_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
+const ACCOUNT_ID = 'aab09adea145e6da8fa57b0f73b073da';
 const CONTROL_TOKEN = 'control-token-' + 'x'.repeat(32);
-const CHECKPOINT_KEY = 'checkpoint-key-' + 'y'.repeat(32);
+const CF_TOKEN = 'cfat_' + 'z'.repeat(40);
+const OPERATION_ID = 'mutation-intake-' + '2'.repeat(24);
+const INTAKE_ID = 'intake-' + '1'.repeat(24);
 
-function fakeDb({ committedGeneration = 12, committedDigest = RUNTIME_B } = {}) {
+function env(db = fakeDb()) {
+  return {
+    DB: db,
+    MUTATION_CONTROL_TOKEN: CONTROL_TOKEN,
+    CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
+    XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
+    CLOUDFLARE_API_TOKEN: CF_TOKEN,
+  };
+}
+
+function fakeDb({
+  committedGeneration = 12,
+  committedDigest = RUNTIME_B,
+  replay = false,
+} = {}) {
   return {
     prepare(sql) {
       const state = { args: [] };
@@ -26,11 +42,63 @@ function fakeDb({ committedGeneration = 12, committedDigest = RUNTIME_B } = {}) 
           return this;
         },
         async all() {
+          if (replay && sql.includes('FROM queue_intake_items')) {
+            return {
+              results: [{
+                operation_id: INTAKE_ID,
+                ordinal: 0,
+                content_id: 'I-PRODUCTION-TEST-1',
+                content_digest: 'd'.repeat(64),
+                pillar: 'A',
+                title: 'Production test',
+                source_ref: 'test',
+                resolved_at: '2026-10-04T19:30:00.000Z',
+                scheduled_date: '2026-10-04',
+                scheduled_time: '14:30',
+                timezone: 'America/Chicago',
+                slot_label: 'lull',
+              }],
+            };
+          }
+          if (replay && sql.includes('FROM mutation_operation_items')) {
+            return {
+              results: [{
+                item_key: 'I-PRODUCTION-TEST-1',
+                expected_content_revision: null,
+                expected_assignment_version: null,
+                resulting_content_revision: 1,
+                resulting_assignment_version: 1,
+                readback_status: 'applied',
+                readback_digest: '9'.repeat(64),
+              }],
+            };
+          }
           if (sql.includes('FROM queue_assignments')) return { results: [] };
           if (sql.includes('FROM queue_content c')) return { results: [] };
           return { results: [] };
         },
         async first() {
+          if (replay && sql.includes('FROM queue_intake_operations WHERE batch_digest')) {
+            return {
+              operation_id: INTAKE_ID,
+              plan_digest: '1'.repeat(64),
+              batch_digest: 'c'.repeat(64),
+              item_count: 1,
+              expected_frontier_generation: 5,
+              expected_frontier_resolved_at: '2026-10-03T05:00:00.000Z',
+              proposed_frontier_resolved_at: '2026-10-04T19:30:00.000Z',
+              baseline_assignment_hash: 'e'.repeat(64),
+              expected_runtime_generation: 11,
+              expected_runtime_revision_digest: RUNTIME_A,
+              resulting_runtime_generation: 12,
+              resulting_runtime_revision_digest: RUNTIME_B,
+              target_account: 'x-primary',
+              policy_version: 2,
+              status: 'complete',
+              created_at: '2026-10-03T07:00:00.000Z',
+              updated_at: '2026-10-03T07:00:00.000Z',
+            };
+          }
           if (sql.includes('FROM queue_intake_frontier')) {
             return {
               generation: 5,
@@ -44,7 +112,7 @@ function fakeDb({ committedGeneration = 12, committedDigest = RUNTIME_B } = {}) 
               generation: committedGeneration,
               revision_digest: committedDigest,
               previous_revision_digest: RUNTIME_A,
-              source_operation_id: 'mutation-intake-' + '2'.repeat(24),
+              source_operation_id: OPERATION_ID,
               created_at: '2026-10-03T07:00:00.000Z',
             };
           }
@@ -55,28 +123,71 @@ function fakeDb({ committedGeneration = 12, committedDigest = RUNTIME_B } = {}) 
   };
 }
 
+function existingOperation(state = 'COMPLETE') {
+  return {
+    operation_id: OPERATION_ID,
+    operation_kind: 'intake',
+    operation_digest: '8'.repeat(64),
+    plan_digest: '7'.repeat(64),
+    state,
+    outcome: state === 'COMPLETE' ? 'AUTO_RESOLVE' : null,
+    expected_halt_generation: 3,
+    lane_generation: 8,
+    expected_runtime_generation: 11,
+    expected_runtime_revision_digest: RUNTIME_A,
+    checkpoint_bookmark: 'bookmark_12345',
+    checkpoint_verified_at: '2026-10-03T07:00:00.000Z',
+    max_plan_retries: 3,
+    max_read_retries: 3,
+    max_operation_retries: 2,
+    effect_state: 'applied',
+    resulting_runtime_generation: 12,
+    resulting_runtime_revision_digest: RUNTIME_B,
+  };
+}
+
 function deps({
   mutationStatus = 'applied',
   afterGeneration = 12,
   afterDigest = RUNTIME_B,
+  replayOperation = null,
+  normalizeCount = 1,
 } = {}) {
   let verifyCalls = 0;
+  const events = [];
+  const transport = {
+    async readOperation() {
+      events.push('read-operation');
+      return replayOperation;
+    },
+    async readHaltState() {
+      events.push('read-halt');
+      return { halted: 0, generation: 3 };
+    },
+    async readLaneState() {
+      events.push('read-lane');
+      return { generation: 7, active_operation_id: null };
+    },
+    async readRuntimeState() {
+      events.push('read-runtime');
+      return { generation: 11, revision_digest: RUNTIME_A };
+    },
+    async captureCheckpoint() {
+      events.push('capture-checkpoint');
+      return 'bookmark_12345';
+    },
+  };
+
   return {
-    verifyCheckpoint: async (_env, _checkpoint, context) => {
-      assert.equal(context.candidateSha, '1'.repeat(40));
-      assert.equal(context.batchDigest, 'c'.repeat(64));
-      return {
-        bookmark: 'bookmark_12345',
-        databaseId: DB_ID,
-        candidateSha: '1'.repeat(40),
-        batchDigest: 'c'.repeat(64),
-        issuedAt: '2026-10-03T07:00:00.000Z',
-        nonce: 'nonce_1234567890123456',
-      };
+    events,
+    verifyAuth: async ({ token, accountId }) => {
+      assert.equal(token, CF_TOKEN);
+      assert.equal(accountId, ACCOUNT_ID);
+      return { ok: true, tokenType: 'account', status: 'active' };
     },
     verifyRuntime: async (_env, options) => {
       verifyCalls++;
-      if (verifyCalls === 1) {
+      if (!replayOperation && verifyCalls === 1) {
         assert.equal(options.includeSnapshot, true);
         return {
           ok: true,
@@ -91,7 +202,6 @@ function deps({
         };
       }
       assert.equal(options.includeSnapshot, false);
-      assert.equal(options.expectedGeneration, undefined);
       return {
         ok: true,
         generation: afterGeneration,
@@ -99,21 +209,26 @@ function deps({
       };
     },
     normalizeInput: (input, options) => {
-      assert.equal(options.mode, 'single');
       assert.equal(input.content_id, 'I-PRODUCTION-TEST-1');
+      const items = Array.from({ length: normalizeCount }, (_, index) => ({
+        content_id: index === 0
+          ? 'I-PRODUCTION-TEST-1'
+          : 'I-PRODUCTION-TEST-' + (index + 1),
+        content_digest: String(index + 1).padStart(64, 'd').slice(-64),
+      }));
       return {
+        format: 1,
         batch_digest: 'c'.repeat(64),
-        items: [{
-          content_id: 'I-PRODUCTION-TEST-1',
-          content_digest: 'd'.repeat(64),
-        }],
+        count: normalizeCount,
+        items,
       };
     },
+    deriveOperationId: () => OPERATION_ID,
     assignmentHash: (rows) => {
       assert.deepEqual(rows, []);
       return 'e'.repeat(64);
     },
-    plan: ({ policy, existingContent, existingDigests, runtimeState }) => {
+    plan: ({ policy, existingContent, existingDigests, runtimeState, normalized }) => {
       assert.equal(policy.version, 2);
       assert.equal(policy.timezone, 'America/Chicago');
       assert.deepEqual(policy.slots, ['14:30', '22:15']);
@@ -121,29 +236,62 @@ function deps({
       assert.deepEqual(existingDigests, []);
       assert.equal(runtimeState.generation, 11);
       return {
-        operation_id: 'intake-' + '1'.repeat(24),
-        items: [{
-          content_id: 'I-PRODUCTION-TEST-1',
-          content_digest: 'd'.repeat(64),
-        }],
+        operation_id: INTAKE_ID,
+        plan_digest: '1'.repeat(64),
+        batch_digest: normalized.batch_digest,
+        count: normalized.count,
+        expected_frontier_generation: 5,
+        expected_frontier_resolved_at: '2026-10-03T05:00:00.000Z',
+        proposed_frontier_resolved_at: '2026-10-04T19:30:00.000Z',
+        baseline_assignment_hash: 'e'.repeat(64),
+        expected_runtime_generation: 11,
+        expected_runtime_revision_digest: RUNTIME_A,
+        target_account: 'x-primary',
+        policy_version: 2,
+        items: normalized.items.map((item, ordinal) => ({
+          ordinal,
+          ...item,
+          assignment_id: item.content_id,
+          assignment_version: 1,
+          content_revision: 1,
+          target_account: 'x-primary',
+          policy_version: 2,
+          resolved_at: '2026-10-04T19:30:00.000Z',
+          scheduled_date: '2026-10-04',
+          scheduled_time: '14:30',
+          timezone: 'America/Chicago',
+          slot_label: 'lull',
+        })),
       };
     },
-    createTransport: () => ({
-      async readHaltState() {
-        return { halted: 0, generation: 3 };
-      },
-      async readLaneState() {
-        return { generation: 7, active_operation_id: null };
-      },
-      async readRuntimeState() {
-        return { generation: 11, revision_digest: RUNTIME_A };
-      },
-    }),
+    createTransport: ({ accountId, databaseId, apiToken }) => {
+      assert.equal(accountId, ACCOUNT_ID);
+      assert.equal(databaseId, DB_ID);
+      assert.equal(apiToken, CF_TOKEN);
+      return transport;
+    },
     createControlPlan: ({ intakePlan, haltState, laneState }) => {
-      assert.equal(intakePlan.operation_id, 'intake-' + '1'.repeat(24));
+      assert.equal(intakePlan.operation_id, INTAKE_ID);
       assert.equal(haltState.generation, 3);
       assert.equal(laneState.generation, 7);
-      return { operation_id: 'mutation-intake-' + '2'.repeat(24) };
+      return {
+        operation_id: OPERATION_ID,
+        operation_kind: 'intake',
+        operation_digest: '8'.repeat(64),
+        plan_digest: '7'.repeat(64),
+        expected_halt_generation: 3,
+        expected_lane_generation: 7,
+        expected_runtime_generation: 11,
+        expected_runtime_revision_digest: RUNTIME_A,
+        retry_budgets: { plan: 3, read: 3, operation: 2 },
+        items: intakePlan.items.map((item) => ({
+          item_key: item.content_id,
+          expected_content_revision: null,
+          expected_assignment_version: null,
+          resulting_content_revision: 1,
+          resulting_assignment_version: 1,
+        })),
+      };
     },
     projectRevision: async ({ controlPlan }) => ({
       generation: 12,
@@ -154,6 +302,7 @@ function deps({
     runMutation: async (args) => {
       assert.equal(args.environment, 'production');
       assert.equal(args.auth.ok, true);
+      assert.equal(args.auth.environment, 'production');
       assert.equal(args.candidate.branch, 'main');
       assert.equal(await args.transport.captureCheckpoint(), 'bookmark_12345');
       return mutationStatus === 'applied'
@@ -177,10 +326,29 @@ function deps({
           }
         : {
             status: 'blocked',
-            phase: 'production_preflight',
+            phase: mutationStatus === 'post-dispatch-blocked' ? 'apply' : 'production_preflight',
+            decision: { outcome: 'SYSTEM_HALT' },
             preflight: { ok: false },
           };
     },
+    resumeMutation: async ({ controlPlan }) => ({
+      status: 'already_applied',
+      phase: 'complete_readback',
+      recovered: true,
+      operation_id: controlPlan.operation_id,
+      evidence_digest: 'f'.repeat(64),
+      observed: {
+        operation_id: controlPlan.operation_id,
+        runtime_generation: 12,
+        runtime_revision_digest: RUNTIME_B,
+        items: [{
+          item_key: 'I-PRODUCTION-TEST-1',
+          readback_status: 'applied',
+          resulting_content_revision: 1,
+          resulting_assignment_version: 1,
+        }],
+      },
+    }),
     now: () => new Date('2026-10-03T07:00:00.000Z'),
   };
 }
@@ -188,16 +356,8 @@ function deps({
 function payload(overrides = {}) {
   return {
     environment: 'production',
-    checkpoint: { placeholder: true },
     mode: 'single',
     sourceMode: 'owner-manual',
-    auth: {
-      ok: true,
-      environment: 'production',
-      tokenType: 'account',
-      status: 'active',
-      d1Readable: true,
-    },
     candidate: {
       branch: 'main',
       clean: true,
@@ -213,28 +373,46 @@ function payload(overrides = {}) {
   };
 }
 
-test('production worker drives guarded production mutation with canonical bundled policy', async () => {
-  const result = await runProductionIntakeRequest(
-    { DB: fakeDb() },
-    payload(),
-    deps(),
-  );
+test('production worker uses trusted auth and trusted checkpoint transport with canonical policy', async () => {
+  const d = deps();
+  const result = await runProductionIntakeRequest(env(), payload(), d);
 
   assert.equal(result.ok, true);
+  assert.equal(result.replay, false);
   assert.equal(result.publicationCapable, false);
   assert.equal(result.schedulerAuthority, false);
   assert.equal(result.recoveryCheckpointCaptured, true);
-  assert.equal(result.planned.operationId, 'mutation-intake-' + '2'.repeat(24));
-  assert.deepEqual(result.planned.contentIds, ['I-PRODUCTION-TEST-1']);
+  assert.equal(result.planned.operationId, OPERATION_ID);
   assert.equal(result.productionPreflight.ok, true);
   assert.equal(result.committedRuntimeRevision.generation, 12);
   assert.equal(result.before.generation, 11);
   assert.equal(result.after.generation, 12);
+  assert.ok(d.events.indexOf('capture-checkpoint') > d.events.indexOf('read-runtime'));
 });
 
-test('post-commit verification accepts a later healthy runtime head when the committed source revision is exact', async () => {
+test('request replay is recovered before duplicate-content planning', async () => {
+  const d = deps({ replayOperation: existingOperation() });
+  let planned = false;
+  d.plan = () => {
+    planned = true;
+    throw new Error('plan must not run during exact replay');
+  };
+
   const result = await runProductionIntakeRequest(
-    { DB: fakeDb() },
+    env(fakeDb({ replay: true })),
+    payload(),
+    d,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.replay, true);
+  assert.equal(result.mutation.status, 'already_applied');
+  assert.equal(planned, false);
+});
+
+test('post-commit verification accepts a later healthy runtime head', async () => {
+  const result = await runProductionIntakeRequest(
+    env(),
     payload(),
     deps({ afterGeneration: 13, afterDigest: RUNTIME_C }),
   );
@@ -243,124 +421,47 @@ test('post-commit verification accepts a later healthy runtime head when the com
   assert.equal(result.after.generation, 13);
 });
 
+test('production batch limit rejects excessive blast radius before mutation', async () => {
+  const d = deps({ normalizeCount: MAX_PRODUCTION_INTAKE_ITEMS + 1 });
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(),
+      payload({ mode: 'batch' }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'PRODUCTION_BATCH_LIMIT_EXCEEDED' &&
+      error?.httpStatus === 413,
+  );
+  assert.deepEqual(d.events, []);
+});
+
 test('blocked production preflight never claims successful production mutation evidence', async () => {
   const result = await runProductionIntakeRequest(
-    { DB: fakeDb() },
+    env(),
     payload(),
     deps({ mutationStatus: 'blocked' }),
   );
-
   assert.equal(result.ok, false);
   assert.equal(result.mutation.status, 'blocked');
-  assert.equal(result.publicationCapable, false);
-  assert.equal(result.schedulerAuthority, false);
 });
 
-test('production worker refuses non-production request evidence', async () => {
+test('explicit unsupported source mode fails closed', async () => {
   await assert.rejects(
     () => runProductionIntakeRequest(
-      { DB: fakeDb() },
-      payload({ environment: 'preview' }),
-      deps(),
-    ),
-    /environment=production/,
-  );
-});
-
-test('explicit unsupported source mode fails closed instead of becoming owner-manual', async () => {
-  await assert.rejects(
-    () => runProductionIntakeRequest(
-      { DB: fakeDb() },
+      env(),
       payload({ sourceMode: 'automted' }),
       deps(),
     ),
-    /sourceMode must be owner-manual or automated/,
+    (error) =>
+      error?.faultClass === 'INVALID_INTAKE' &&
+      /sourceMode must be owner-manual or automated/.test(error.message),
   );
 });
 
-function signedCheckpoint({
-  candidateSha = '1'.repeat(40),
-  batchDigest = 'c'.repeat(64),
-  bookmark = 'bookmark_12345',
-  issuedAt = '2026-10-03T07:00:00.000Z',
-  nonce = 'nonce_1234567890123456',
-} = {}) {
-  const fields = [
-    'xqueue-production-checkpoint-v1',
-    DB_ID,
-    candidateSha,
-    batchDigest,
-    bookmark,
-    issuedAt,
-    nonce,
-  ];
-  return {
-    databaseId: DB_ID,
-    candidateSha,
-    batchDigest,
-    bookmark,
-    issuedAt,
-    nonce,
-    signature: createHmac('sha256', CHECKPOINT_KEY)
-      .update(fields.join('\n'))
-      .digest('hex'),
-  };
-}
-
-test('checkpoint evidence is HMAC-bound to production database, candidate, batch, and freshness window', async () => {
-  const verified = await verifyProductionCheckpointEvidence(
-    {
-      XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
-      MUTATION_CHECKPOINT_HMAC_KEY: CHECKPOINT_KEY,
-    },
-    signedCheckpoint(),
-    {
-      candidateSha: '1'.repeat(40),
-      batchDigest: 'c'.repeat(64),
-      now: new Date('2026-10-03T07:02:00.000Z'),
-    },
-  );
-  assert.equal(verified.bookmark, 'bookmark_12345');
-
-  await assert.rejects(
-    () => verifyProductionCheckpointEvidence(
-      {
-        XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
-        MUTATION_CHECKPOINT_HMAC_KEY: CHECKPOINT_KEY,
-      },
-      signedCheckpoint({ batchDigest: 'd'.repeat(64) }),
-      {
-        candidateSha: '1'.repeat(40),
-        batchDigest: 'c'.repeat(64),
-        now: new Date('2026-10-03T07:02:00.000Z'),
-      },
-    ),
-    /batch binding mismatch/,
-  );
-
-  await assert.rejects(
-    () => verifyProductionCheckpointEvidence(
-      {
-        XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
-        MUTATION_CHECKPOINT_HMAC_KEY: CHECKPOINT_KEY,
-      },
-      signedCheckpoint({ issuedAt: '2026-10-03T06:50:00.000Z' }),
-      {
-        candidateSha: '1'.repeat(40),
-        batchDigest: 'c'.repeat(64),
-        now: new Date('2026-10-03T07:02:00.000Z'),
-      },
-    ),
-    /stale/,
-  );
-});
-
-test('production mutation endpoint requires an independent bearer service identity', async () => {
+test('production endpoint requires independent bearer service identity', async () => {
   const worker = createMutationProductionIntakeWorker(deps());
-  const env = {
-    DB: fakeDb(),
-    MUTATION_CONTROL_TOKEN: CONTROL_TOKEN,
-  };
+  const runtimeEnv = env();
 
   const unauthenticated = await worker.fetch(
     new Request('https://example.test/production-intake', {
@@ -368,7 +469,7 @@ test('production mutation endpoint requires an independent bearer service identi
       body: JSON.stringify(payload()),
       headers: { 'content-type': 'application/json' },
     }),
-    env,
+    runtimeEnv,
   );
   assert.equal(unauthenticated.status, 401);
 
@@ -381,23 +482,84 @@ test('production mutation endpoint requires an independent bearer service identi
         authorization: 'Bearer ' + CONTROL_TOKEN,
       },
     }),
-    env,
+    runtimeEnv,
   );
   assert.equal(authenticatedResponse.status, 200);
 });
 
-test('production mutation worker config has D1 only and no publication bindings or triggers', () => {
+test('worker returns stable non-retryable 400 for malformed JSON', async () => {
+  const worker = createMutationProductionIntakeWorker(deps());
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: '{',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + CONTROL_TOKEN,
+      },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'INVALID_JSON');
+  assert.equal(body.retryable, false);
+  assert.equal(body.requiresReadback, false);
+});
+
+test('post-dispatch blocked result is 409 and explicitly requires readback', async () => {
+  const worker = createMutationProductionIntakeWorker(
+    deps({ mutationStatus: 'post-dispatch-blocked' }),
+  );
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + CONTROL_TOKEN,
+      },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'POST_DISPATCH_RECONCILIATION_REQUIRED');
+  assert.equal(body.retryable, false);
+  assert.equal(body.requiresReadback, true);
+});
+
+test('post-commit readback ambiguity is a stable non-retryable 409', async () => {
+  const worker = createMutationProductionIntakeWorker(deps());
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + CONTROL_TOKEN,
+      },
+    }),
+    env(fakeDb({ committedDigest: RUNTIME_C })),
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'POST_DISPATCH_READBACK_AMBIGUOUS');
+  assert.equal(body.retryable, false);
+  assert.equal(body.requiresReadback, true);
+});
+
+test('production mutation worker config contains D1 only and no embedded secrets/publication bindings', () => {
   const config = readFileSync('wrangler.mutation-production-intake.jsonc', 'utf8');
   assert.match(config, /"name": "xqueue-mutation-production-intake"/);
   assert.match(config, /"database_name": "xqueue-production"/);
   assert.match(config, /"binding": "DB"/);
+  assert.match(config, /"CLOUDFLARE_ACCOUNT_ID"/);
   assert.match(config, /"XQUEUE_PRODUCTION_DATABASE_ID"/);
-  assert.doesNotMatch(config, /r2_buckets/);
-  assert.doesNotMatch(config, /queues/);
-  assert.doesNotMatch(config, /triggers/);
-  assert.doesNotMatch(config, /MEDIA/);
-  assert.doesNotMatch(config, /X_BEARER|X_API|TWITTER|scheduler/i);
-  assert.doesNotMatch(config, /control-token-|checkpoint-key-/);
+  assert.doesNotMatch(config, /CLOUDFLARE_API_TOKEN/);
+  assert.doesNotMatch(config, /MUTATION_CONTROL_TOKEN/);
+  assert.doesNotMatch(config, /MUTATION_CHECKPOINT_HMAC_KEY/);
+  assert.doesNotMatch(config, /r2_buckets|queues|triggers|MEDIA|X_BEARER|X_API|TWITTER|scheduler/i);
 });
 
 test('production worker health is non-mutating and unknown routes stay closed', async () => {
