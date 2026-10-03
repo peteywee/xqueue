@@ -241,7 +241,7 @@ export async function runProductionIntakeMutation({
   let safety;
   try {
     safety = await transport.readPublicationSafety();
-  } catch {
+  } catch (error) {
     const preflight = Object.freeze({
       ok: false,
       authority: 'unknown',
@@ -256,6 +256,9 @@ export async function runProductionIntakeMutation({
     return Object.freeze({
       status: 'blocked',
       phase: 'production_preflight',
+      fault_class: 'PRE_DISPATCH_STATE_UNAVAILABLE',
+      retryable: true,
+      error: error instanceof Error ? error.message : String(error),
       preflight,
     });
   }

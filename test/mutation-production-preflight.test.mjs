@@ -332,6 +332,37 @@ test('production wrapper runs guarded intake only after clean production preflig
   fx.raw.close();
 });
 
+test('production wrapper preserves transient pre-dispatch safety read failure', async () => {
+  const fx = mutationFixture();
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const transport = {
+    ...fx.base,
+    async readPublicationSafety() {
+      throw new Error('network timeout reading production safety');
+    },
+  };
+
+  const result = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport,
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.phase, 'production_preflight');
+  assert.equal(result.fault_class, 'PRE_DISPATCH_STATE_UNAVAILABLE');
+  assert.equal(result.retryable, true);
+  assert.equal(fx.checkpointCalls(), 0);
+
+  fx.raw.close();
+});
+
 test('production wrapper blocks dirty publication state before checkpoint or mutation', async () => {
   const fx = mutationFixture();
   const { intakePlan, controlPlan, state } = mutationPlans();

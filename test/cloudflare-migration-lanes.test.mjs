@@ -24,6 +24,7 @@ const SHARED = [
   '0012_reconciliation_determinations.sql',
   '0015_mutation_control_plane.sql',
   '0016_mutation_completion_item_guard.sql',
+  '0017_publication_mutation_mutex.sql',
 ];
 
 test('default production config uses the production-safe migration lane', () => {
@@ -49,17 +50,20 @@ test('production-safe lane preserves history and admits only production authorit
     ...SHARED.filter((name) => ![
       '0015_mutation_control_plane.sql',
       '0016_mutation_completion_item_guard.sql',
+      '0017_publication_mutation_mutex.sql',
     ].includes(name)),
     '0013_authority_ownership.sql',
     '0014_authority_event_projection.sql',
     '0015_mutation_control_plane.sql',
     '0016_mutation_completion_item_guard.sql',
+    '0017_publication_mutation_mutex.sql',
   ]);
   assert.equal(files.includes('0004_authority_ownership.sql'), false);
   assert.match(text('cloudflare/migrations-production/0013_authority_ownership.sql'), /CREATE TABLE authority_state/);
   assert.match(text('cloudflare/migrations-production/0013_authority_ownership.sql'), /CREATE TABLE authority_events/);
   assert.match(text('cloudflare/migrations-production/0014_authority_event_projection.sql'), /CREATE TRIGGER authority_events_project_state/);
   assert.match(text('cloudflare/migrations-production/0014_authority_event_projection.sql'), /RAISE\(ABORT, 'authority event projection failed'\)/);
+  assert.match(text('cloudflare/migrations-production/0017_publication_mutation_mutex.sql'), /publication lease acquisition blocked by active mutation lane/);
 });
 
 test('production-safe migrations are byte-identical to their canonical shared counterparts', () => {

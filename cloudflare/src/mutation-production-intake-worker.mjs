@@ -952,6 +952,10 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
             'finalize',
             'finalize_readback',
           ].includes(phase);
+          const transientPreDispatch =
+            !postDispatch &&
+            result.mutation?.fault_class === 'PRE_DISPATCH_STATE_UNAVAILABLE' &&
+            result.mutation?.retryable === true;
           return json({
             service: 'xqueue-mutation-production-intake',
             role: 'production-mutation-intake',
@@ -961,12 +965,13 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
             status: 'blocked',
             faultClass: postDispatch
               ? 'POST_DISPATCH_RECONCILIATION_REQUIRED'
-              : 'MUTATION_BLOCKED',
+              : (result.mutation?.fault_class ?? 'MUTATION_BLOCKED'),
             retryable:
-              !postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY',
+              transientPreDispatch ||
+              (!postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY'),
             requiresReadback: postDispatch,
             ...result,
-          }, { status: 409 });
+          }, { status: transientPreDispatch ? 503 : 409 });
         }
 
         return json({

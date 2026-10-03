@@ -206,6 +206,7 @@ test('final completion readback failure stays post-dispatch and blocked', async 
   assert.equal(result.status, 'blocked');
   assert.equal(result.phase, 'finalize_readback');
   assert.equal(result.error_class, 'D1_READ_UNAVAILABLE');
+  assert.equal(result.readback, 'unavailable');
   assert.equal(result.recovered, false);
   assert.equal(batchCalls, 2);
   assert.equal(

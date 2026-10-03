@@ -340,6 +340,15 @@ function deps({
       assert.equal(args.auth.environment, 'production');
       assert.equal(args.candidate.branch, 'main');
       assert.equal(await args.transport.captureCheckpoint(), 'bookmark_12345');
+      if (mutationStatus === 'pre-dispatch-unavailable') {
+        return {
+          status: 'blocked',
+          phase: 'production_preflight',
+          fault_class: 'PRE_DISPATCH_STATE_UNAVAILABLE',
+          retryable: true,
+          preflight: { ok: false, authority: 'unknown' },
+        };
+      }
       return mutationStatus === 'applied'
         ? {
             status: 'applied',
@@ -604,6 +613,28 @@ test('worker returns stable non-retryable 400 for malformed JSON', async () => {
   const body = await response.json();
   assert.equal(body.faultClass, 'INVALID_JSON');
   assert.equal(body.retryable, false);
+  assert.equal(body.requiresReadback, false);
+});
+
+test('transient pre-dispatch safety read failure is retryable 503', async () => {
+  const worker = createMutationProductionIntakeWorker(
+    deps({ mutationStatus: 'pre-dispatch-unavailable' }),
+  );
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + CONTROL_TOKEN,
+      },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'PRE_DISPATCH_STATE_UNAVAILABLE');
+  assert.equal(body.retryable, true);
   assert.equal(body.requiresReadback, false);
 });
 

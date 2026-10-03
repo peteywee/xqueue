@@ -377,6 +377,7 @@ test('contradictory item readback blocks finalize and leaves the lane claimed', 
 
   assert.equal(result.status, 'blocked');
   assert.equal(result.phase, 'completion_readback');
+  assert.equal(result.readback, 'contradictory');
   assert.equal(batchCalls, 1);
   assert.deepEqual(
     { ...fx.raw.prepare(
