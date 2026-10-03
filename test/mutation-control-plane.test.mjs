@@ -72,7 +72,7 @@ test('contradictory canonical readback maps to inconsistent-read system halt', (
   });
   assert.equal(decision.outcome, 'SYSTEM_HALT');
   assert.equal(decision.haltScope, 'system');
-  assert.equal(decision.primaryReason, 'canonical_corruption');
+  assert.equal(decision.primaryReason, 'canonical_corrupt_after_dispatch');
 });
 
 test('post-dispatch D1 outcomes map through Batch 0 semantics', () => {

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { normalizeIntakeInput } from '../src/continuous-queue-intake.mjs';
 import {
   MAX_PRODUCTION_INTAKE_ITEMS,
   createMutationProductionIntakeWorker,
@@ -691,7 +692,7 @@ test('automated intake derives durable approval digest only from verified signed
     seen.push({ candidateRef, provided, publicKeyPem });
     return true;
   };
-  const originalNormalize = d.normalizeInput;
+  const originalNormalize = normalizeIntakeInput;
   d.normalizeInput = (input, options) => {
     assert.equal(options.ownerApprovalDigest, null);
     assert.equal(input[0].source_mode, 'automated');
