@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "xqueue-mutation-production-intake",
+  "main": "cloudflare/src/mutation-production-intake-worker.mjs",
+  "compatibility_date": "2026-10-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false
+    }
+  },
+  "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "aab09adea145e6da8fa57b0f73b073da",
+    "XQUEUE_PRODUCTION_DATABASE_ID": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
+    "OWNER_APPROVAL_PUBLIC_KEY_PEM": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5JoMHKP6tJfk0/QoqGqIfrvXYMzzwMgswmgEjznzXho=\n-----END PUBLIC KEY-----\n"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xqueue-production",
+      "database_id": "fc85026e-bfc8-435f-8bb0-c60e139178a3",
+      "migrations_dir": "cloudflare/migrations-production"
+    }
+  ]
+}

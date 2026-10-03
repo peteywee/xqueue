@@ -512,6 +512,101 @@ test('durable missed deferral promotes a new runtime revision and remains fail-c
   assert.equal(replay.runtimeRevision.generation, 2);
 });
 
+test('missed deferral fences assignment and runtime writes to the exact unexpired publication lease', async () => {
+  const db = new DatabaseSync(':memory:');
+  for (const name of [
+    '0001_xqueue_runtime.sql',
+    '0002_runtime_evidence.sql',
+    '0003_publication_lease.sql',
+    '0004_authority_ownership.sql',
+    '0005_publication_state_generation.sql',
+    '0006_continuous_queue_shadow.sql',
+    '0007_continuous_queue_intake.sql',
+    '0008_dynamic_runtime_integrity.sql',
+    '0009_deferred_lifecycle.sql',
+  ]) {
+    db.exec(migration(`cloudflare/migrations/${name}`));
+  }
+
+  const body = 'lease-fenced body';
+  const digest = createHash('sha256').update(body, 'utf8').digest('hex');
+  const at = '2026-09-21T11:00:00.000Z';
+  db.exec(`
+    INSERT INTO queue_content
+      (content_id,pillar,current_revision,status,generation,created_at,updated_at,intake_state)
+    VALUES ('P1','A',1,'active',1,'${at}','${at}','scheduled');
+    INSERT INTO queue_content_revisions
+      (content_id,revision,title,body,publication_text,content_digest,figure,source_ref,created_at)
+    VALUES ('P1',1,'p1','${body}','${body}','${digest}',NULL,'fixture','${at}');
+    INSERT INTO queue_assignments
+      (assignment_id,assignment_version,content_id,content_revision,content_digest,target_account,
+       policy_version,resolved_at,scheduled_date,scheduled_time,timezone,slot_label,status,
+       superseded_by_version,generation,created_at,updated_at,lifecycle_state)
+    VALUES
+      ('P1',1,'P1',1,'${digest}','x-primary',2,
+       '2026-09-21T12:00:00.000Z','2026-09-21','07:00','America/Chicago','lull',
+       'active',NULL,1,'${at}','${at}','scheduled');
+    INSERT INTO publication_state
+      (post_id,status,scheduled_at,tweet_id,prepared_at,publishing_at,posted_at,
+       skipped_at,skip_reason,last_error,updated_at,generation)
+    VALUES
+      ('P1','scheduled','2026-09-21T12:00:00.000Z',NULL,NULL,NULL,NULL,
+       NULL,NULL,NULL,'${at}',1);
+    INSERT INTO publication_leases
+      (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms)
+    VALUES
+      ('publisher','owner-token-alpha','acquisition-alpha',7,1000,5000,1000);
+  `);
+
+  const api = d1Adapter(db);
+  const initialSnapshot = await buildDynamicRuntimeSnapshot(await readDynamicRuntimeRows(api));
+  db.exec(renderRuntimeRevisionInsertSql(nextRuntimeRevision({
+    currentState: null,
+    snapshot: initialSnapshot,
+    sourceOperationId: 'fixture-bootstrap',
+    recordedAt: at,
+  })));
+
+  const lease = {
+    leaseName: 'publisher',
+    ownerToken: 'owner-token-alpha',
+    acquisitionId: 'acquisition-alpha',
+    generation: 7,
+    acquiredAtMs: 1000,
+    expiresAtMs: 5000,
+  };
+
+  await assert.rejects(
+    deferMissedAssignments(api, {
+      now: new Date('2026-09-21T12:20:00.001Z'),
+      graceMinutes: 20,
+      publicationLease: lease,
+    }),
+    /ambiguous or conflicted/,
+  );
+  assert.equal(
+    db.prepare("SELECT lifecycle_state FROM queue_assignments WHERE assignment_id='P1'").get().lifecycle_state,
+    'scheduled',
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM queue_deferrals').get().n, 0);
+
+  const futureExpiry = 4102444800000;
+  db.prepare(
+    "UPDATE publication_leases SET expires_at_ms=?,updated_at_ms=? WHERE lease_name='publisher'",
+  ).run(futureExpiry, futureExpiry);
+  const renewedLease = { ...lease, expiresAtMs: futureExpiry };
+
+  const result = await deferMissedAssignments(api, {
+    now: new Date('2026-09-21T12:20:00.001Z'),
+    graceMinutes: 20,
+    publicationLease: renewedLease,
+  });
+  assert.equal(result.outcomes[0].status, 'deferred');
+  assert.equal(result.runtimeRevision.status, 'promoted');
+
+  db.close();
+});
+
 test('confirmed handoff defers within grace and advances runtime revision', async () => {
   const db = new DatabaseSync(':memory:');
   for (const name of [

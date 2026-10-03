@@ -45,15 +45,52 @@ function decisionResult(status, phase, decision, extra = {}) {
   });
 }
 
-async function exactCompletion({ transport, controlPlan, intakePlan }) {
-  const observed = await readIntakeMutationCompletion({
-    db: transport,
-    controlPlan,
-    intakePlan,
+function readbackKind(error) {
+  return error?.readback === 'contradictory' ? 'contradictory' : 'unavailable';
+}
+
+function postDispatchReadbackBlocked(phase, recovered, readback = 'unavailable') {
+  const errorClass =
+    readback === 'contradictory' ? 'D1_READ_CONTRADICTORY' : 'D1_READ_UNAVAILABLE';
+  const decision = decideMutationError(errorClass, {
+    postDispatch: true,
+    readback,
   });
+  return decisionResult('blocked', phase, decision, {
+    error_class: errorClass,
+    readback,
+    recovered,
+  });
+}
+
+async function exactCompletion({ transport, controlPlan, intakePlan }) {
+  let observed;
+  try {
+    observed = await readIntakeMutationCompletion({
+      db: transport,
+      controlPlan,
+      intakePlan,
+    });
+  } catch (cause) {
+    if (cause?.readback === 'unavailable' || cause?.readback === 'contradictory') {
+      throw cause;
+    }
+    const error = new Error(
+      'mutation completion readback unavailable: ' +
+        (cause instanceof Error ? cause.message : String(cause)),
+    );
+    error.readback = 'unavailable';
+    throw error;
+  }
+
   const verification = verifyIntakeMutationCompletion(controlPlan, observed);
   if (!verification.ok) {
-    throw new Error('mutation completion readback failed: ' + verification.reason);
+    const error = new Error(
+      'mutation completion readback contradicted canonical state: ' +
+        verification.reason,
+    );
+    error.readback = 'contradictory';
+    throw error;
   }
   return intakeCompletionEvidence(controlPlan, observed);
 }
@@ -99,11 +136,20 @@ async function recoverOrFail({
     operation?.state === 'COMPLETE' &&
     operation?.effect_state === 'applied'
   ) {
-    const completion = await exactCompletion({
-      transport,
-      controlPlan,
-      intakePlan,
-    });
+    let completion;
+    try {
+      completion = await exactCompletion({
+        transport,
+        controlPlan,
+        intakePlan,
+      });
+    } catch (error) {
+      return postDispatchReadbackBlocked(
+        'complete_readback',
+        true,
+        readbackKind(error),
+      );
+    }
     return Object.freeze({
       status: 'already_applied',
       phase: 'complete_readback',
@@ -139,14 +185,12 @@ async function finalizeApplied({
       controlPlan,
       intakePlan,
     });
-  } catch {
-    const decision = decideMutationError('D1_READ_UNAVAILABLE', {
-      postDispatch: true,
-      readback: 'contradictory',
-    });
-    return decisionResult('blocked', 'completion_readback', decision, {
+  } catch (error) {
+    return postDispatchReadbackBlocked(
+      'completion_readback',
       recovered,
-    });
+      readbackKind(error),
+    );
   }
 
   const finalize = prepareIntakeAtomicFinalize({
@@ -173,11 +217,20 @@ async function finalizeApplied({
       operation?.state === 'COMPLETE' &&
       operation?.effect_state === 'applied'
     ) {
-      const completed = await exactCompletion({
-        transport,
-        controlPlan,
-        intakePlan,
-      });
+      let completed;
+      try {
+        completed = await exactCompletion({
+          transport,
+          controlPlan,
+          intakePlan,
+        });
+      } catch (error) {
+        return postDispatchReadbackBlocked(
+          'finalize_readback',
+          true,
+          readbackKind(error),
+        );
+      }
       return Object.freeze({
         status: 'applied',
         phase: 'finalize_readback',
@@ -198,11 +251,20 @@ async function finalizeApplied({
     });
   }
 
-  const completed = await exactCompletion({
-    transport,
-    controlPlan,
-    intakePlan,
-  });
+  let completed;
+  try {
+    completed = await exactCompletion({
+      transport,
+      controlPlan,
+      intakePlan,
+    });
+  } catch (error) {
+    return postDispatchReadbackBlocked(
+      'finalize_readback',
+      recovered,
+      readbackKind(error),
+    );
+  }
 
   return Object.freeze({
     status: 'applied',
@@ -220,6 +282,7 @@ export async function runIntakeMutation({
   runtimeRevision,
   transport,
   authority = 'bound',
+  publicationSafetyFence = null,
   recordedAt = new Date().toISOString(),
 }) {
   const t = requiredTransport(transport);
@@ -255,11 +318,20 @@ export async function runIntakeMutation({
     existingOperation?.state === 'COMPLETE' &&
     existingOperation?.effect_state === 'applied'
   ) {
-    const completion = await exactCompletion({
-      transport: t,
-      controlPlan,
-      intakePlan,
-    });
+    let completion;
+    try {
+      completion = await exactCompletion({
+        transport: t,
+        controlPlan,
+        intakePlan,
+      });
+    } catch (error) {
+      return postDispatchReadbackBlocked(
+        'complete_readback',
+        true,
+        readbackKind(error),
+      );
+    }
     return Object.freeze({
       status: 'already_applied',
       phase: 'complete_readback',
@@ -337,6 +409,7 @@ export async function runIntakeMutation({
     intakePlan,
     runtimeRevision,
     checkpointEvidence,
+    publicationSafetyFence,
     recordedAt,
   });
 

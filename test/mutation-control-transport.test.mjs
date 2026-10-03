@@ -37,6 +37,8 @@ function fakeDb() {
           if (sql.startsWith('SELECT COUNT(*) AS unresolved')) return { unresolved: 0 };
           if (sql.startsWith('SELECT COUNT(*) AS active_leases')) return { active_leases: 0 };
           if (sql.startsWith('SELECT json_extract')) return { inflight: null };
+          if (sql.startsWith("SELECT generation FROM publication_leases")) return { generation: 5 };
+          if (sql.startsWith('SELECT COALESCE(MAX(id),0) AS event_cursor')) return { event_cursor: 17 };
           return rows.get(sql) ?? null;
         },
         async all() {
@@ -116,6 +118,8 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
   assert.equal(safety.authority.owner, 'cloudflare');
   assert.equal(safety.unresolvedAttemptCount, 0);
   assert.equal(safety.activeLeaseCount, 0);
+  assert.equal(safety.publicationLeaseGeneration, 5);
+  assert.equal(safety.publicationEventCursor, 17);
   assert.equal(safety.runtimeSnapshotObserved, true);
   assert.equal(safety.inflight, null);
   assert.equal(await transport.captureCheckpoint(), 'bookmark_12345');

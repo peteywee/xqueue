@@ -9,6 +9,7 @@ on:
       - 'wrangler.mutation-preview-proof.jsonc'
       - 'cloudflare/migrations/0015_mutation_control_plane.sql'
       - 'cloudflare/migrations/0016_mutation_completion_item_guard.sql'
+      - 'cloudflare/migrations/0017_publication_mutation_mutex.sql'
       - 'src/continuous-queue-intake.mjs'
       - 'src/continuous-queue-runtime-write.mjs'
       - 'src/schedule-slot.mjs'
