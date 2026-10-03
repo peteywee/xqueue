@@ -146,7 +146,7 @@ export async function verifyProductionCheckpointEvidence(
 ) {
   const item = requiredObject(evidence, 'signed production checkpoint evidence');
   const databaseId = String(env?.XQUEUE_PRODUCTION_DATABASE_ID ?? '').toLowerCase();
-  if (!/^[a-f0-9]{32}$/.test(databaseId)) {
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(databaseId)) {
     throw new Error('XQUEUE_PRODUCTION_DATABASE_ID is invalid');
   }
 
