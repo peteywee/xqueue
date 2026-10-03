@@ -18,6 +18,12 @@ function positiveInteger(value, label) {
   return n;
 }
 
+function nonNegativeInteger(value, label) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(label + ' must be a non-negative integer');
+  return n;
+}
+
 function canonicalInstant(value, label) {
   const text = requiredString(value, label);
   const ms = Date.parse(text);
