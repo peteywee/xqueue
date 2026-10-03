@@ -89,7 +89,7 @@ WHERE
       AND generation = ?12
       AND acquired_at_ms = ?13
       AND expires_at_ms = ?14
-      AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000
+      AND expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   )
 `;
 
@@ -264,7 +264,7 @@ function publicationLeaseGuardSql(fence) {
     String(fence.acquiredAtMs) +
     ' AND expires_at_ms=' +
     String(fence.expiresAtMs) +
-    " AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000" +
+    " AND expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)" +
     ')'
   );
 }
