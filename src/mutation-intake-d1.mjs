@@ -5,6 +5,7 @@ import { nextRuntimeRevision } from './continuous-queue-runtime-write.mjs';
 import { verifyMutationCompletion } from './mutation-control-plane.mjs';
 
 const SHA_RE = /^[a-f0-9]{64}$/;
+const SHA40_RE = /^[a-f0-9]{40}$/;
 
 function requiredString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') throw new Error(label + ' is required');
@@ -29,6 +30,12 @@ function canonicalInstant(value, label) {
 function digest(value, label) {
   const text = String(value ?? '').toLowerCase();
   if (!SHA_RE.test(text)) throw new Error(label + ' must be sha256 hex');
+  return text;
+}
+
+function sha40(value, label) {
+  const text = String(value ?? '').toLowerCase();
+  if (!SHA40_RE.test(text)) throw new Error(label + ' must be sha40 hex');
   return text;
 }
 
@@ -282,6 +289,7 @@ export function prepareIntakeAtomicApply({
   intakePlan,
   runtimeRevision,
   checkpointEvidence,
+  publicationSafetyFence = null,
   recordedAt,
 }) {
   const d1 = ensureDb(db);
@@ -311,6 +319,35 @@ export function prepareIntakeAtomicApply({
   const claimedLane = expectedLane + 1;
 
   const statements = [];
+
+  if (publicationSafetyFence !== null) {
+    const authorityGeneration = positiveInteger(
+      publicationSafetyFence.authority_generation,
+      'publication authority generation',
+    );
+    const authorityCandidateSha = sha40(
+      publicationSafetyFence.candidate_sha,
+      'publication authority candidate sha',
+    );
+    const deploymentId = requiredString(
+      publicationSafetyFence.deployment_id,
+      'publication authority deployment id',
+    );
+
+    statements.push(assertStmt(
+      d1,
+      "EXISTS (SELECT 1 FROM authority_state WHERE singleton_id=1 AND owner='cloudflare' " +
+        "AND generation=? AND transition_state='stable' AND lower(candidate_sha)=? AND deployment_id=?) " +
+        "AND NOT EXISTS (SELECT 1 FROM publication_state WHERE status IN ('prepared','publishing','needs_reconciliation')) " +
+        "AND NOT EXISTS (SELECT 1 FROM publication_leases WHERE owner_token IS NOT NULL " +
+        "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000) " +
+        "AND EXISTS (SELECT 1 FROM runtime_metadata WHERE key='state.snapshot_json' " +
+        "AND json_extract(value, '$.inflight') IS NULL)",
+      [authorityGeneration, authorityCandidateSha, deploymentId],
+      controlPlan.operation_id,
+      recordedAt,
+    ));
+  }
 
   statements.push(stmt(
     d1,

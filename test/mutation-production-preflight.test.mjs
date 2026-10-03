@@ -146,8 +146,9 @@ class D1Statement {
 }
 
 class SqliteD1 {
-  constructor(db) {
+  constructor(db, { beforeBatch = null } = {}) {
     this.db = db;
+    this.beforeBatch = beforeBatch;
   }
 
   prepare(sql) {
@@ -155,6 +156,11 @@ class SqliteD1 {
   }
 
   async batch(statements) {
+    if (this.beforeBatch) {
+      const hook = this.beforeBatch;
+      this.beforeBatch = null;
+      hook(this.db);
+    }
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const out = [];
@@ -175,7 +181,7 @@ function loadSchema(db) {
   }
 }
 
-function mutationFixture() {
+function mutationFixture(options = {}) {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys=ON');
   loadSchema(raw);
@@ -192,9 +198,19 @@ function mutationFixture() {
       'previous_revision_digest,source_operation_id,created_at) VALUES (11,?,0,0,0,0,?,NULL,?)',
   ).run('a'.repeat(64), 'b'.repeat(64), '2026-09-29T10:00:00.000Z');
 
+  raw.prepare(
+    'INSERT INTO authority_state ' +
+      '(singleton_id,owner,generation,transition_state,transition_id,previous_owner,candidate_sha,deployment_id,transitioned_at,updated_at) ' +
+      "VALUES (1,'cloudflare',9,'stable','test-transition','none',?,?,?,?)",
+  ).run('a'.repeat(40), DEPLOYMENT, '2026-09-29T10:00:00.000Z', '2026-09-29T10:00:00.000Z');
+
+  raw.prepare(
+    "INSERT INTO runtime_metadata (key,value,updated_at) VALUES ('state.snapshot_json',?,?)",
+  ).run(JSON.stringify({ inflight: null }), '2026-09-29T10:00:00.000Z');
+
   let checkpointCalls = 0;
   const base = createD1MutationTransport({
-    db: new SqliteD1(raw),
+    db: new SqliteD1(raw, options),
     accountId: 'acct',
     databaseId: 'db',
     apiToken: 'token',
@@ -341,6 +357,53 @@ test('production wrapper blocks dirty publication state before checkpoint or mut
   assert.equal(
     fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
     0,
+  );
+
+  fx.raw.close();
+});
+
+
+test('production publication safety is reasserted atomically at mutation-lane claim', async () => {
+  const fx = mutationFixture({
+    beforeBatch(raw) {
+      raw.prepare(
+        "INSERT INTO publication_state (post_id,status,scheduled_at,updated_at) VALUES (?,'publishing',?,?)",
+      ).run(
+        'TOCTOU-PUBLISH',
+        '2026-09-30T10:00:00.000Z',
+        '2026-09-29T10:05:00.000Z',
+      );
+    },
+  });
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const transport = {
+    ...fx.base,
+    async readPublicationSafety() {
+      return safety();
+    },
+  };
+
+  const result = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport,
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(fx.checkpointCalls(), 1);
+  assert.equal(
+    fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
+    0,
+  );
+  assert.equal(
+    fx.raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id,
+    null,
   );
 
   fx.raw.close();

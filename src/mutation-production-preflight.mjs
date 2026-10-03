@@ -257,10 +257,18 @@ export async function runProductionIntakeMutation({
     });
   }
 
+  const publicationAuthority = preflight.observed.publicationAuthority;
+  const publicationSafetyFence = Object.freeze({
+    authority_generation: publicationAuthority.generation,
+    candidate_sha: publicationAuthority.candidateSha,
+    deployment_id: publicationAuthority.deploymentId,
+  });
+
   const result = await runIntakeMutation({
     ...mutationArgs,
     transport,
     authority: preflight.authority,
+    publicationSafetyFence,
   });
 
   return Object.freeze({

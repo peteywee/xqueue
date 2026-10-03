@@ -1,3 +1,5 @@
+import schedulePolicy from '../../config/schedule-policy.json' with { type: 'json' };
+
 import {
   hashAssignmentRows,
   normalizeIntakeInput,
@@ -33,6 +35,20 @@ JOIN queue_content_revisions r
  AND r.revision=c.current_revision
 `;
 
+const COMMITTED_RUNTIME_SQL = `
+SELECT generation,revision_digest,previous_revision_digest,source_operation_id,created_at
+FROM queue_runtime_revisions
+WHERE source_operation_id=?
+LIMIT 1
+`;
+
+const BOOKMARK_RE = /^[A-Za-z0-9_-]{8,}$/;
+const SHA40_RE = /^[a-f0-9]{40}$/;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
+const MAX_CHECKPOINT_AGE_MS = 5 * 60 * 1000;
+const MAX_CHECKPOINT_FUTURE_MS = 30 * 1000;
+
 function rows(result) {
   return Array.isArray(result) ? result : (result?.results ?? []);
 }
@@ -41,8 +57,9 @@ async function all(db, sql) {
   return rows(await db.prepare(sql).all());
 }
 
-async function first(db, sql) {
-  return await db.prepare(sql).first();
+async function first(db, sql, ...args) {
+  const statement = args.length ? db.prepare(sql).bind(...args) : db.prepare(sql);
+  return await statement.first();
 }
 
 function requiredObject(value, label) {
@@ -52,12 +69,12 @@ function requiredObject(value, label) {
   return value;
 }
 
-function requiredBookmark(value) {
-  const bookmark = String(value ?? '');
-  if (!/^[A-Za-z0-9_-]{8,}$/.test(bookmark)) {
-    throw new Error('verified production recovery bookmark is required');
+function requiredSecret(value, label) {
+  const text = String(value ?? '');
+  if (text.length < 32 || /\s/.test(text)) {
+    throw new Error(label + ' must be a whitespace-free secret of at least 32 characters');
   }
-  return bookmark;
+  return text;
 }
 
 function requiredMode(value) {
@@ -66,6 +83,145 @@ function requiredMode(value) {
     throw new Error('mode must be single or batch');
   }
   return mode;
+}
+
+function requiredSourceMode(value) {
+  if (value === undefined || value === null) return 'owner-manual';
+  if (!['owner-manual', 'automated'].includes(value)) {
+    throw new Error('sourceMode must be owner-manual or automated');
+  }
+  return value;
+}
+
+function canonicalInstant(value, label) {
+  const text = String(value ?? '');
+  const ms = Date.parse(text);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== text) {
+    throw new Error(label + ' must be canonical ISO-8601 UTC with milliseconds');
+  }
+  return { text, ms };
+}
+
+function hex(bytes) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256(value) {
+  return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+}
+
+async function authenticated(request, env) {
+  const expected = requiredSecret(env?.MUTATION_CONTROL_TOKEN, 'MUTATION_CONTROL_TOKEN');
+  const header = request.headers.get('authorization') ?? '';
+  if (!header.startsWith('Bearer ')) return false;
+  const provided = header.slice('Bearer '.length);
+  if (provided === '') return false;
+  const [expectedDigest, providedDigest] = await Promise.all([
+    sha256(expected),
+    sha256(provided),
+  ]);
+  return expectedDigest === providedDigest;
+}
+
+function checkpointMessage(evidence) {
+  return [
+    'xqueue-production-checkpoint-v1',
+    evidence.databaseId,
+    evidence.candidateSha,
+    evidence.batchDigest,
+    evidence.bookmark,
+    evidence.issuedAt,
+    evidence.nonce,
+  ].join('\n');
+}
+
+export async function verifyProductionCheckpointEvidence(
+  env,
+  evidence,
+  {
+    candidateSha,
+    batchDigest,
+    now = new Date(),
+  } = {},
+) {
+  const item = requiredObject(evidence, 'signed production checkpoint evidence');
+  const databaseId = String(env?.XQUEUE_PRODUCTION_DATABASE_ID ?? '').toLowerCase();
+  if (!/^[a-f0-9]{32}$/.test(databaseId)) {
+    throw new Error('XQUEUE_PRODUCTION_DATABASE_ID is invalid');
+  }
+
+  const bookmark = String(item.bookmark ?? '');
+  if (!BOOKMARK_RE.test(bookmark)) {
+    throw new Error('production checkpoint bookmark is invalid');
+  }
+
+  const signedDatabaseId = String(item.databaseId ?? '').toLowerCase();
+  const signedCandidateSha = String(item.candidateSha ?? '').toLowerCase();
+  const signedBatchDigest = String(item.batchDigest ?? '').toLowerCase();
+  const expectedCandidateSha = String(candidateSha ?? '').toLowerCase();
+  const expectedBatchDigest = String(batchDigest ?? '').toLowerCase();
+
+  if (signedDatabaseId !== databaseId) {
+    throw new Error('production checkpoint database binding mismatch');
+  }
+  if (!SHA40_RE.test(signedCandidateSha) || signedCandidateSha !== expectedCandidateSha) {
+    throw new Error('production checkpoint candidate binding mismatch');
+  }
+  if (!SHA256_RE.test(signedBatchDigest) || signedBatchDigest !== expectedBatchDigest) {
+    throw new Error('production checkpoint batch binding mismatch');
+  }
+  if (!NONCE_RE.test(String(item.nonce ?? ''))) {
+    throw new Error('production checkpoint nonce is invalid');
+  }
+
+  const issued = canonicalInstant(item.issuedAt, 'production checkpoint issuedAt');
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  if (!Number.isFinite(nowMs)) throw new Error('checkpoint verification time is invalid');
+  if (nowMs - issued.ms > MAX_CHECKPOINT_AGE_MS || issued.ms - nowMs > MAX_CHECKPOINT_FUTURE_MS) {
+    throw new Error('production checkpoint evidence is stale');
+  }
+
+  const signature = String(item.signature ?? '').toLowerCase();
+  if (!SHA256_RE.test(signature)) {
+    throw new Error('production checkpoint signature is invalid');
+  }
+
+  const keyText = requiredSecret(
+    env?.MUTATION_CHECKPOINT_HMAC_KEY,
+    'MUTATION_CHECKPOINT_HMAC_KEY',
+  );
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(keyText),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const expectedSignature = hex(await crypto.subtle.sign(
+    'HMAC',
+    key,
+    new TextEncoder().encode(checkpointMessage({
+      databaseId: signedDatabaseId,
+      candidateSha: signedCandidateSha,
+      batchDigest: signedBatchDigest,
+      bookmark,
+      issuedAt: issued.text,
+      nonce: item.nonce,
+    })),
+  ));
+
+  if (signature !== expectedSignature) {
+    throw new Error('production checkpoint signature mismatch');
+  }
+
+  return Object.freeze({
+    bookmark,
+    databaseId: signedDatabaseId,
+    candidateSha: signedCandidateSha,
+    batchDigest: signedBatchDigest,
+    issuedAt: issued.text,
+    nonce: item.nonce,
+  });
 }
 
 function productionTransport(db, bookmark, createTransport) {
@@ -89,6 +245,7 @@ export async function runProductionIntakeRequest(
   payload,
   {
     verifyRuntime = verifyDynamicRuntime,
+    verifyCheckpoint = verifyProductionCheckpointEvidence,
     normalizeInput = normalizeIntakeInput,
     plan = planIntake,
     assignmentHash = hashAssignmentRows,
@@ -109,13 +266,27 @@ export async function runProductionIntakeRequest(
 
   const auth = requiredObject(payload?.auth, 'typed production auth evidence');
   const candidate = requiredObject(payload?.candidate, 'exact-main candidate evidence');
-  const policy = requiredObject(payload?.policy, 'schedule policy');
   const input = payload?.input;
   if (input == null) throw new Error('intake input is required');
-  const bookmark = requiredBookmark(payload?.bookmark);
   const mode = requiredMode(payload?.mode);
-  const sourceMode = payload?.sourceMode === 'automated' ? 'automated' : 'owner-manual';
+  const sourceMode = requiredSourceMode(payload?.sourceMode);
   const recordedAt = now().toISOString();
+
+  const normalized = normalizeInput(input, {
+    mode,
+    sourceMode,
+    ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
+  });
+
+  const checkpoint = await verifyCheckpoint(
+    env,
+    payload?.checkpoint,
+    {
+      candidateSha: candidate.headSha ?? candidate.head_sha,
+      batchDigest: normalized.batch_digest,
+      now: new Date(recordedAt),
+    },
+  );
 
   const before = await verifyRuntime(env, {
     verifyMedia: false,
@@ -124,12 +295,6 @@ export async function runProductionIntakeRequest(
   if (!before?.ok || !before.snapshot) {
     throw new Error('production runtime is not healthy before mutation');
   }
-
-  const normalized = normalizeInput(input, {
-    mode,
-    sourceMode,
-    ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
-  });
 
   const [frontier, activeAssignments, contentIndex] = await Promise.all([
     first(db, FRONTIER_SQL),
@@ -144,7 +309,7 @@ export async function runProductionIntakeRequest(
   const intakePlan = plan({
     normalized,
     frontier,
-    policy,
+    policy: schedulePolicy,
     existingContent: contentIndex.filter((row) => ids.has(row.content_id)),
     existingDigests: contentIndex.filter((row) => digests.has(row.content_digest)),
     baselineAssignmentHash: assignmentHash(activeAssignments),
@@ -154,7 +319,7 @@ export async function runProductionIntakeRequest(
     },
   });
 
-  const transport = productionTransport(db, bookmark, createTransport);
+  const transport = productionTransport(db, checkpoint.bookmark, createTransport);
   const [haltState, laneState, runtimeState] = await Promise.all([
     transport.readHaltState(),
     transport.readLaneState(),
@@ -212,14 +377,27 @@ export async function runProductionIntakeRequest(
     throw new Error('production mutation operation readback does not match its plan');
   }
 
+  const committedRuntime = await first(
+    db,
+    COMMITTED_RUNTIME_SQL,
+    controlPlan.operation_id,
+  );
+  if (
+    !committedRuntime ||
+    Number(committedRuntime.generation) !== Number(runtimeRevision.generation) ||
+    committedRuntime.revision_digest !== runtimeRevision.revision_digest ||
+    committedRuntime.previous_revision_digest !== runtimeRevision.previous_revision_digest ||
+    committedRuntime.source_operation_id !== controlPlan.operation_id
+  ) {
+    throw new Error('production committed runtime revision readback is not exact');
+  }
+
   const after = await verifyRuntime(env, {
-    expectedGeneration: runtimeRevision.generation,
-    expectedRevisionDigest: runtimeRevision.revision_digest,
     verifyMedia: false,
     includeSnapshot: false,
   });
-  if (!after?.ok) {
-    throw new Error('production runtime is not healthy after mutation');
+  if (!after?.ok || Number(after.generation) < Number(runtimeRevision.generation)) {
+    throw new Error('production runtime head is not healthy after mutation');
   }
 
   return Object.freeze({
@@ -227,9 +405,22 @@ export async function runProductionIntakeRequest(
     publicationCapable: false,
     schedulerAuthority: false,
     recoveryCheckpointCaptured: true,
+    checkpoint: Object.freeze({
+      databaseId: checkpoint.databaseId ?? null,
+      candidateSha: checkpoint.candidateSha ?? null,
+      batchDigest: checkpoint.batchDigest ?? null,
+      issuedAt: checkpoint.issuedAt ?? null,
+      nonce: checkpoint.nonce ?? null,
+    }),
     planned,
     mutation,
     productionPreflight: mutation.production_preflight ?? null,
+    committedRuntimeRevision: Object.freeze({
+      generation: Number(committedRuntime.generation),
+      revisionDigest: committedRuntime.revision_digest,
+      previousRevisionDigest: committedRuntime.previous_revision_digest,
+      sourceOperationId: committedRuntime.source_operation_id,
+    }),
     before: Object.freeze({
       generation: before.generation,
       revisionDigest: before.revisionDigest,
@@ -262,6 +453,16 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       }
       if (request.method !== 'POST') {
         return json({ error: 'method_not_allowed' }, { status: 405 });
+      }
+
+      let isAuthenticated = false;
+      try {
+        isAuthenticated = await authenticated(request, env);
+      } catch {
+        isAuthenticated = false;
+      }
+      if (!isAuthenticated) {
+        return json({ error: 'unauthorized' }, { status: 401 });
       }
 
       try {

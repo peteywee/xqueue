@@ -14,6 +14,9 @@
       "enabled": false
     }
   },
+  "vars": {
+    "XQUEUE_PRODUCTION_DATABASE_ID": "fc85026e-bfc8-435f-8bb0-c60e139178a3"
+  },
   "d1_databases": [
     {
       "binding": "DB",

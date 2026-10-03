@@ -220,6 +220,7 @@ export async function runIntakeMutation({
   runtimeRevision,
   transport,
   authority = 'bound',
+  publicationSafetyFence = null,
   recordedAt = new Date().toISOString(),
 }) {
   const t = requiredTransport(transport);
@@ -337,6 +338,7 @@ export async function runIntakeMutation({
     intakePlan,
     runtimeRevision,
     checkpointEvidence,
+    publicationSafetyFence,
     recordedAt,
   });
 
