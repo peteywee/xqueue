@@ -38,12 +38,13 @@ WHERE status='active'
 ORDER BY target_account,resolved_at,content_id
 `;
 
-const CONTENT_INDEX_SQL = `
+const CONTENT_CONFLICT_SQL = `
 SELECT c.content_id,c.intake_state,r.content_digest
 FROM queue_content c
 JOIN queue_content_revisions r
   ON r.content_id=c.content_id
  AND r.revision=c.current_revision
+WHERE c.content_id=? OR r.content_digest=?
 `;
 
 const COMMITTED_RUNTIME_SQL = `
@@ -82,6 +83,22 @@ async function all(db, sql, ...args) {
   return rows(await statement.all());
 }
 
+async function readContentConflicts(db, items) {
+  const groups = await Promise.all(
+    items.map((item) =>
+      all(db, CONTENT_CONFLICT_SQL, item.content_id, item.content_digest)),
+  );
+  const seen = new Set();
+  const conflicts = [];
+  for (const row of groups.flat()) {
+    const key = `${row.content_id}\u0000${row.content_digest}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    conflicts.push(row);
+  }
+  return conflicts;
+}
+
 async function first(db, sql, ...args) {
   const statement = args.length ? db.prepare(sql).bind(...args) : db.prepare(sql);
   return await statement.first();
@@ -99,6 +116,21 @@ function rawIntakeItems(raw) {
   if (raw?.items && Array.isArray(raw.items)) return raw.items;
   if (raw && typeof raw === 'object') return [raw];
   throw new Error('intake input must be an object, array, or {items:[...]}');
+}
+
+function assertSourceModeConsistency(raw, sourceMode) {
+  const source = rawIntakeItems(raw);
+  for (let index = 0; index < source.length; index += 1) {
+    const item = source[index];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (item.source_mode != null && item.source_mode !== sourceMode) {
+      const error = new Error(
+        `item ${index + 1} source_mode cannot override top-level ${sourceMode} authority`,
+      );
+      error.authorizationModeMismatch = true;
+      throw error;
+    }
+  }
 }
 
 function authorizeAutomatedInput({
@@ -622,6 +654,7 @@ export async function runProductionIntakeRequest(
   try {
     mode = requiredMode(payload?.mode);
     sourceMode = requiredSourceMode(payload?.sourceMode);
+    assertSourceModeConsistency(input, sourceMode);
     const authorizedInput = sourceMode === 'automated'
       ? authorizeAutomatedInput({
           raw: input,
@@ -647,7 +680,9 @@ export async function runProductionIntakeRequest(
       );
     }
     throw productionFault(
-      sourceMode === 'automated' ? 'INVALID_OWNER_APPROVAL' : 'INVALID_INTAKE',
+      sourceMode === 'automated' || error?.authorizationModeMismatch === true
+        ? 'INVALID_OWNER_APPROVAL'
+        : 'INVALID_INTAKE',
       error instanceof Error ? error.message : String(error),
       { httpStatus: 400 },
     );
@@ -836,7 +871,7 @@ export async function runProductionIntakeRequest(
     [frontier, activeAssignments, contentIndex] = await Promise.all([
       first(db, FRONTIER_SQL),
       all(db, ACTIVE_ASSIGNMENTS_SQL),
-      all(db, CONTENT_INDEX_SQL),
+      readContentConflicts(db, normalized.items),
     ]);
   } catch (error) {
     throw productionFault(

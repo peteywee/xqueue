@@ -409,13 +409,50 @@ export async function runScheduledPublication(
       });
     }
 
+    let deferralLease;
+    try {
+      const identity = createPublicationLeaseIdentity();
+      const acquired = await acquireLease(env.DB, {
+        ...identity,
+        ttlMs: LEASE_TTL_MS,
+        nowMs: Date.now(),
+      });
+      if (!acquired?.acquired || !acquired.lease) {
+        return idle('missed_deferral_mutex_unavailable', { eligibility });
+      }
+      deferralLease = acquired.lease;
+    } catch {
+      return idle('missed_deferral_mutex_unavailable', { eligibility });
+    }
+
     let deferral;
+    let deferralFailed = false;
+    let releaseFailed = false;
     try {
       deferral = await deferMissed(env.DB, {
         now,
         graceMinutes: eligibilityOptions.graceMinutes,
       });
     } catch {
+      deferralFailed = true;
+    } finally {
+      try {
+        const released = await releaseLease(env.DB, deferralLease, {
+          nowMs: Date.now(),
+        });
+        releaseFailed = released?.released !== true;
+      } catch {
+        releaseFailed = true;
+      }
+    }
+
+    if (releaseFailed) {
+      return idle('missed_deferral_mutex_release_failed', {
+        eligibility,
+        deferral: deferral ?? null,
+      });
+    }
+    if (deferralFailed) {
       return idle('missed_deferral_failed', { eligibility });
     }
 

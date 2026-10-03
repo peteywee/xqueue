@@ -87,7 +87,11 @@ function fakeDb({
             };
           }
           if (sql.includes('FROM queue_assignments')) return { results: [] };
-          if (sql.includes('FROM queue_content c')) return { results: [] };
+          if (sql.includes('FROM queue_content c')) {
+            assert.match(sql, /WHERE c\.content_id=\? OR r\.content_digest=\?/);
+            assert.equal(state.args.length, 2, 'content conflict lookup must bind id and digest');
+            return { results: [] };
+          }
           return { results: [] };
         },
         async first() {
@@ -630,6 +634,27 @@ test('worker returns stable non-retryable 400 for missing or array candidate evi
     assert.equal(body.retryable, false);
     assert.equal(body.requiresReadback, false);
   }
+});
+
+test('manual top-level authority rejects nested automated source mode and forged digest', async () => {
+  const d = deps();
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(),
+      payload({
+        input: {
+          ...payload().input,
+          source_mode: 'automated',
+          owner_approval_digest: 'sha256:' + '9'.repeat(64),
+        },
+      }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      error?.httpStatus === 400 &&
+      /cannot override top-level owner-manual authority/.test(error.message),
+  );
 });
 
 test('automated intake rejects caller-supplied approval digests before normalization', async () => {
