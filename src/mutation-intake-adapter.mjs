@@ -33,6 +33,33 @@ function canonicalInstant(value, label) {
   return text;
 }
 
+
+export function intakeMutationOperationId({
+  batchDigest,
+  targetAccount,
+  contentIds,
+}) {
+  const ids = Array.isArray(contentIds) ? contentIds : [];
+  if (ids.length === 0) throw new Error('intake content ids are required');
+  return createMutationPlan({
+    kind: 'intake',
+    mutation: Object.freeze({
+      batch_digest: digest(batchDigest, 'intake batch digest'),
+      target_account: requiredString(targetAccount, 'intake target account'),
+    }),
+    items: ids.map((contentId, index) => Object.freeze({
+      item_key: requiredString(contentId, `intake item ${index + 1} content_id`),
+      expected_content_revision: null,
+      expected_assignment_version: null,
+      resulting_content_revision: 1,
+      resulting_assignment_version: 1,
+    })),
+    haltState: { halted: 0, generation: 1 },
+    laneState: { generation: 1, active_operation_id: null },
+    runtimeState: { generation: 1, revision_digest: '0'.repeat(64) },
+  }).operation_id;
+}
+
 export function createIntakeMutationControlPlan({
   intakePlan,
   haltState,

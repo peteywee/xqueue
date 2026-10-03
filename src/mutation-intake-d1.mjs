@@ -320,6 +320,21 @@ export function prepareIntakeAtomicApply({
 
   const statements = [];
 
+  let laneClaimSql =
+    "UPDATE mutation_lane_state SET generation=generation+1,active_operation_id=?,actor_class='automation',updated_at=? " +
+    "WHERE singleton_id=1 AND generation=? AND active_operation_id IS NULL " +
+    "AND EXISTS (SELECT 1 FROM mutation_lane_halt_state WHERE singleton_id=1 AND halted=0 AND generation=?) " +
+    "AND EXISTS (SELECT 1 FROM queue_runtime_revisions WHERE generation=? AND revision_digest=? " +
+    "AND generation=(SELECT MAX(generation) FROM queue_runtime_revisions))";
+  const laneClaimArgs = [
+    controlPlan.operation_id,
+    recordedAt,
+    expectedLane,
+    controlPlan.expected_halt_generation,
+    expectedRuntime,
+    expectedRuntimeDigest,
+  ];
+
   if (publicationSafetyFence !== null) {
     const authorityGeneration = positiveInteger(
       publicationSafetyFence.authority_generation,
@@ -333,36 +348,18 @@ export function prepareIntakeAtomicApply({
       publicationSafetyFence.deployment_id,
       'publication authority deployment id',
     );
-
-    statements.push(assertStmt(
-      d1,
-      "EXISTS (SELECT 1 FROM authority_state WHERE singleton_id=1 AND owner='cloudflare' " +
-        "AND generation=? AND transition_state='stable' AND lower(candidate_sha)=? AND deployment_id=?) " +
-        "AND NOT EXISTS (SELECT 1 FROM publication_state WHERE status IN ('prepared','publishing','needs_reconciliation')) " +
-        "AND NOT EXISTS (SELECT 1 FROM publication_leases WHERE owner_token IS NOT NULL " +
-        "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000) " +
-        "AND EXISTS (SELECT 1 FROM runtime_metadata WHERE key='state.snapshot_json' " +
-        "AND json_extract(value, '$.inflight') IS NULL)",
-      [authorityGeneration, authorityCandidateSha, deploymentId],
-      controlPlan.operation_id,
-      recordedAt,
-    ));
+    laneClaimSql +=
+      " AND EXISTS (SELECT 1 FROM authority_state WHERE singleton_id=1 AND owner='cloudflare' " +
+      "AND generation=? AND transition_state='stable' AND lower(candidate_sha)=? AND deployment_id=?) " +
+      "AND NOT EXISTS (SELECT 1 FROM publication_state WHERE status IN ('prepared','publishing','needs_reconciliation')) " +
+      "AND NOT EXISTS (SELECT 1 FROM publication_leases WHERE owner_token IS NOT NULL " +
+      "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000) " +
+      "AND EXISTS (SELECT 1 FROM runtime_metadata WHERE key='state.snapshot_json' " +
+      "AND json_extract(value, '$.inflight') IS NULL)";
+    laneClaimArgs.push(authorityGeneration, authorityCandidateSha, deploymentId);
   }
 
-  statements.push(stmt(
-    d1,
-    "UPDATE mutation_lane_state SET generation=generation+1,active_operation_id=?,actor_class='automation',updated_at=? " +
-      "WHERE singleton_id=1 AND generation=? AND active_operation_id IS NULL " +
-      "AND EXISTS (SELECT 1 FROM mutation_lane_halt_state WHERE singleton_id=1 AND halted=0 AND generation=?) " +
-      "AND EXISTS (SELECT 1 FROM queue_runtime_revisions WHERE generation=? AND revision_digest=? " +
-      "AND generation=(SELECT MAX(generation) FROM queue_runtime_revisions))",
-    controlPlan.operation_id,
-    recordedAt,
-    expectedLane,
-    controlPlan.expected_halt_generation,
-    expectedRuntime,
-    expectedRuntimeDigest,
-  ));
+  statements.push(stmt(d1, laneClaimSql, ...laneClaimArgs));
 
   statements.push(assertStmt(
     d1,
