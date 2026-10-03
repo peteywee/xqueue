@@ -159,6 +159,7 @@ function deps({
   afterDigest = RUNTIME_B,
   replayOperation = null,
   normalizeCount = 1,
+  postDispatchVerifyError = null,
 } = {}) {
   let verifyCalls = 0;
   const events = [];
@@ -209,6 +210,7 @@ function deps({
         };
       }
       assert.equal(options.includeSnapshot, false);
+      if (postDispatchVerifyError) throw postDispatchVerifyError;
       return {
         ok: true,
         generation: afterGeneration,
@@ -556,6 +558,29 @@ test('post-commit readback ambiguity is a stable non-retryable 409', async () =>
   assert.equal(body.faultClass, 'POST_DISPATCH_READBACK_AMBIGUOUS');
   assert.equal(body.retryable, false);
   assert.equal(body.requiresReadback, true);
+});
+
+test('thrown post-dispatch runtime readback is non-retryable ambiguity and requires readback', async () => {
+  const worker = createMutationProductionIntakeWorker(
+    deps({ postDispatchVerifyError: new Error('network timeout during runtime readback') }),
+  );
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer ' + CONTROL_TOKEN,
+      },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'POST_DISPATCH_READBACK_AMBIGUOUS');
+  assert.equal(body.retryable, false);
+  assert.equal(body.requiresReadback, true);
+  assert.match(body.error, /runtime head readback failed/i);
 });
 
 test('production mutation worker config contains D1 only and no embedded secrets/publication bindings', () => {

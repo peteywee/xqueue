@@ -414,11 +414,22 @@ async function verifyCommittedResult({
     );
   }
 
-  const committedRuntime = await first(
-    db,
-    COMMITTED_RUNTIME_SQL,
-    controlPlan.operation_id,
-  );
+  let committedRuntime;
+  try {
+    committedRuntime = await first(
+      db,
+      COMMITTED_RUNTIME_SQL,
+      controlPlan.operation_id,
+    );
+  } catch (error) {
+    if (error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production committed runtime revision readback failed: ' +
+        (error instanceof Error ? error.message : String(error)),
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
   if (
     !committedRuntime ||
     Number(committedRuntime.generation) !== Number(runtimeRevision.generation) ||
@@ -433,10 +444,21 @@ async function verifyCommittedResult({
     );
   }
 
-  const after = await verifyRuntime(null, {
-    verifyMedia: false,
-    includeSnapshot: false,
-  });
+  let after;
+  try {
+    after = await verifyRuntime(null, {
+      verifyMedia: false,
+      includeSnapshot: false,
+    });
+  } catch (error) {
+    if (error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production runtime head readback failed: ' +
+        (error instanceof Error ? error.message : String(error)),
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
   if (!after?.ok || Number(after.generation) < Number(runtimeRevision.generation)) {
     throw productionFault(
       'POST_DISPATCH_READBACK_AMBIGUOUS',
