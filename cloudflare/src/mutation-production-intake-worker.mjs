@@ -5,7 +5,6 @@ import {
   hashAssignmentRows,
   normalizeIntakeInput,
   planIntake,
-  sha256Hex,
 } from '../../src/continuous-queue-intake.mjs';
 import {
   createIntakeMutationControlPlan,
@@ -19,7 +18,7 @@ import {
   runProductionIntakeMutation,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
-import { assertAuthenticatedOwnerApprovalForDigest } from '../../src/authoring/owner-approval.mjs';
+import { assertAuthenticatedOwnerApprovalForCandidate } from '../../src/authoring/owner-approval.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -137,6 +136,7 @@ function authorizeAutomatedInput({
   raw,
   mode,
   ownerApproval,
+  approvedCandidate,
   ownerApprovalDigest,
   ownerPublicKeyPem,
   verifyOwnerApproval,
@@ -154,8 +154,10 @@ function authorizeAutomatedInput({
   if (mode === 'single' && source.length !== 1) {
     throw new Error('single intake requires exactly one item');
   }
-  if (source.length > 1 && ownerApproval != null) {
-    throw new Error('batch automated intake requires signed owner_approval evidence per item');
+  if (source.length > 1 && (ownerApproval != null || approvedCandidate != null)) {
+    throw new Error(
+      'batch automated intake requires signed owner_approval and approved_candidate evidence per item',
+    );
   }
 
   return source.map((item, index) => {
@@ -171,22 +173,49 @@ function authorizeAutomatedInput({
     if (typeof item.body !== 'string' || item.body.length === 0) {
       throw new Error(`item ${index + 1} body is required`);
     }
+    if (typeof item.content_id !== 'string' || !item.content_id.trim()) {
+      throw new Error(`item ${index + 1} automated intake requires explicit content_id`);
+    }
+    if (typeof item.title !== 'string') {
+      throw new Error(`item ${index + 1} automated intake requires explicit title`);
+    }
+    if (typeof item.source_ref !== 'string' || !item.source_ref.trim()) {
+      throw new Error(`item ${index + 1} automated intake requires explicit source_ref`);
+    }
 
-    const contentHex = sha256Hex(item.body);
-    const suppliedId = item.content_id ?? item.id ?? null;
-    const candidateId = suppliedId == null
-      ? `CQ-${contentHex.slice(0, 20).toUpperCase()}`
-      : String(suppliedId);
     const approval = item.owner_approval ?? (source.length === 1 ? ownerApproval : null);
     if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
       throw new Error(`item ${index + 1} requires signed owner_approval evidence`);
     }
+    const candidate =
+      item.approved_candidate ?? (source.length === 1 ? approvedCandidate : null);
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`item ${index + 1} requires approved_candidate evidence`);
+    }
+    if (candidate.artifact_kind !== 'post') {
+      throw new Error(`item ${index + 1} approved_candidate must be a post`);
+    }
+    if (candidate.figure != null) {
+      throw new Error(`item ${index + 1} approved_candidate media is not active`);
+    }
+    if (!Array.isArray(candidate.source_refs) || candidate.source_refs.length !== 1) {
+      throw new Error(
+        `item ${index + 1} approved_candidate must have exactly one source_ref`,
+      );
+    }
+    if (
+      candidate.candidate_id !== item.content_id ||
+      candidate.title !== item.title ||
+      candidate.body !== item.body ||
+      candidate.pillar !== item.pillar ||
+      candidate.source_refs[0] !== item.source_ref
+    ) {
+      throw new Error(
+        `item ${index + 1} intake fields do not match approved_candidate`,
+      );
+    }
 
-    verifyOwnerApproval(
-      { candidateId, candidateDigest: `sha256:${contentHex}` },
-      approval,
-      ownerPublicKeyPem,
-    );
+    verifyOwnerApproval(candidate, approval, ownerPublicKeyPem);
 
     const trustedDigest = approval?.owner_proof?.payload_digest;
     if (typeof trustedDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(trustedDigest)) {
@@ -195,6 +224,7 @@ function authorizeAutomatedInput({
 
     const {
       owner_approval: _ownerApproval,
+      approved_candidate: _approvedCandidate,
       owner_approval_digest: _ownerApprovalDigest,
       ownerApprovalDigest: _ownerApprovalDigestCamel,
       ...rest
@@ -603,7 +633,7 @@ export async function runProductionIntakeRequest(
   {
     verifyRuntime = verifyDynamicRuntime,
     verifyAuth = verifyCloudflareApiToken,
-    verifyOwnerApproval = assertAuthenticatedOwnerApprovalForDigest,
+    verifyOwnerApproval = assertAuthenticatedOwnerApprovalForCandidate,
     normalizeInput = normalizeIntakeInput,
     plan = planIntake,
     assignmentHash = hashAssignmentRows,
@@ -660,6 +690,7 @@ export async function runProductionIntakeRequest(
           raw: input,
           mode,
           ownerApproval: payload?.ownerApproval ?? null,
+          approvedCandidate: payload?.approvedCandidate ?? null,
           ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
           ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
           verifyOwnerApproval,
