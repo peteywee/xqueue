@@ -581,9 +581,8 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
       now: new Date('2026-09-21T12:20:00.001Z'),
       graceMinutes: 20,
       publicationLease: lease,
-      leaseNowMs: () => 5000,
     }),
-    /publication lease is expired/,
+    /ambiguous or conflicted/,
   );
   assert.equal(
     db.prepare("SELECT lifecycle_state FROM queue_assignments WHERE assignment_id='P1'").get().lifecycle_state,
@@ -591,11 +590,16 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM queue_deferrals').get().n, 0);
 
+  const futureExpiry = 4102444800000;
+  db.prepare(
+    "UPDATE publication_leases SET expires_at_ms=?,updated_at_ms=? WHERE lease_name='publisher'",
+  ).run(futureExpiry, futureExpiry);
+  const renewedLease = { ...lease, expiresAtMs: futureExpiry };
+
   const result = await deferMissedAssignments(api, {
     now: new Date('2026-09-21T12:20:00.001Z'),
     graceMinutes: 20,
-    publicationLease: lease,
-    leaseNowMs: () => 4999,
+    publicationLease: renewedLease,
   });
   assert.equal(result.outcomes[0].status, 'deferred');
   assert.equal(result.runtimeRevision.status, 'promoted');

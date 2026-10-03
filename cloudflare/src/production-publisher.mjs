@@ -433,19 +433,22 @@ export async function runScheduledPublication(
         now,
         graceMinutes: eligibilityOptions.graceMinutes,
         publicationLease: deferralLease,
-        leaseNowMs: () => Date.now(),
       });
     } catch {
       deferralFailed = true;
-    } finally {
-      try {
-        const released = await releaseLease(env.DB, deferralLease, {
-          nowMs: Date.now(),
-        });
-        releaseFailed = released?.released !== true;
-      } catch {
-        releaseFailed = true;
-      }
+    }
+
+    if (deferralFailed) {
+      return idle('missed_deferral_failed_lease_retained', { eligibility });
+    }
+
+    try {
+      const released = await releaseLease(env.DB, deferralLease, {
+        nowMs: Date.now(),
+      });
+      releaseFailed = released?.released !== true;
+    } catch {
+      releaseFailed = true;
     }
 
     if (releaseFailed) {
@@ -453,9 +456,6 @@ export async function runScheduledPublication(
         eligibility,
         deferral: deferral ?? null,
       });
-    }
-    if (deferralFailed) {
-      return idle('missed_deferral_failed', { eligibility });
     }
 
     const deferredIds = Array.isArray(deferral?.outcomes)

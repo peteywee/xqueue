@@ -388,8 +388,7 @@ export function prepareIntakeAtomicApply({
       "AND EXISTS (SELECT 1 FROM publication_leases WHERE lease_name='publisher' AND generation=?) " +
       "AND (SELECT COALESCE(MAX(id),0) FROM publication_events)=? " +
       "AND NOT EXISTS (SELECT 1 FROM publication_state WHERE status IN ('prepared','publishing','needs_reconciliation')) " +
-      "AND NOT EXISTS (SELECT 1 FROM publication_leases WHERE owner_token IS NOT NULL " +
-      "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000) " +
+      "AND NOT EXISTS (SELECT 1 FROM publication_leases WHERE owner_token IS NOT NULL) " +
       "AND EXISTS (SELECT 1 FROM runtime_metadata WHERE key='state.snapshot_json' " +
       "AND json_extract(value, '$.inflight') IS NULL)";
     laneClaimArgs.push(

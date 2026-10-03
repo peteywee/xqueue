@@ -757,7 +757,7 @@ test('publisher durably defers overdue assignments under the publication lease a
           assert.equal(options.publicationLease.leaseName, 'publisher');
           assert.equal(options.publicationLease.acquisitionId, 'deferral-acquisition');
           assert.equal(options.publicationLease.generation, 3);
-          assert.equal(typeof options.leaseNowMs, 'function');
+          assert.equal('leaseNowMs' in options, false);
           return {
             outcomes: [{
               status: 'deferred',
@@ -925,7 +925,7 @@ test('halt race before missed-slot deferral stops the lifecycle mutation', async
   assert.equal(deferralCalls, 0);
 });
 
-test('missed-slot deferral ambiguity releases its mutex and fails closed before X access', async () => {
+test('missed-slot deferral ambiguity retains its mutex and fails closed before X access', async () => {
   let leaseCalls = 0;
   let releaseCalls = 0;
   let deferralCalls = 0;
@@ -995,10 +995,10 @@ test('missed-slot deferral ambiguity releases its mutex and fails closed before 
   );
 
   assert.equal(result.status, 'idle');
-  assert.equal(result.reason, 'missed_deferral_failed');
+  assert.equal(result.reason, 'missed_deferral_failed_lease_retained');
   assert.equal(result.dispatched, false);
   assert.equal(leaseCalls, 1);
   assert.equal(deferralCalls, 1);
-  assert.equal(releaseCalls, 1);
-  assert.deepEqual(order, ['acquire', 'defer', 'release']);
+  assert.equal(releaseCalls, 0);
+  assert.deepEqual(order, ['acquire', 'defer']);
 });

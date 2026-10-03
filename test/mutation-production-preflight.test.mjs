@@ -402,6 +402,76 @@ test('production wrapper blocks dirty publication state before checkpoint or mut
 });
 
 
+test('expired but still-held publisher lease blocks production mutation before checkpoint', async () => {
+  const fx = mutationFixture();
+  fx.raw.prepare(
+    "UPDATE publication_leases SET owner_token=?,acquisition_id=?,expires_at_ms=?,updated_at_ms=? WHERE lease_name='publisher'",
+  ).run('retained-owner-token', 'retained-acquisition', 1, 1);
+
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+
+  const result = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport: fx.base,
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.phase, 'production_preflight');
+  assert.ok(
+    result.preflight.blockers.some(
+      (item) => item.id === 'active_publication_lease',
+    ),
+  );
+  assert.equal(fx.checkpointCalls(), 0);
+  assert.equal(
+    fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
+    0,
+  );
+  fx.raw.close();
+});
+
+test('expired held lease appearing after safety read blocks the atomic mutation-lane claim', async () => {
+  const fx = mutationFixture({
+    beforeBatch(raw) {
+      raw.prepare(
+        "UPDATE publication_leases SET owner_token=?,acquisition_id=?,expires_at_ms=?,updated_at_ms=? WHERE lease_name='publisher'",
+      ).run('retained-owner-token', 'retained-acquisition', 1, 1);
+    },
+  });
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+
+  const result = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport: fx.base,
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(fx.checkpointCalls(), 1);
+  assert.equal(
+    fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
+    0,
+  );
+  assert.equal(
+    fx.raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id,
+    null,
+  );
+  fx.raw.close();
+});
+
 test('production publication safety is reasserted atomically at mutation-lane claim', async () => {
   const fx = mutationFixture({
     beforeBatch(raw) {
