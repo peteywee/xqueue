@@ -703,11 +703,6 @@ export async function deferConfirmedPublicationHandoff(
   const runtimeRevision = await promoteRuntimeRevisionIfNeeded(
     db,
     isoNow(now),
-    {
-      publicationLease,
-      publicationLeaseNowMs:
-        publicationLease === null ? null : leaseNowMs(),
-    },
   );
 
   return Object.freeze({
@@ -761,6 +756,11 @@ export async function deferMissedAssignments(
   const runtimeRevision = await promoteRuntimeRevisionIfNeeded(
     db,
     isoNow(now),
+    {
+      publicationLease,
+      publicationLeaseNowMs:
+        publicationLease === null ? null : leaseNowMs(),
+    },
   );
 
   return Object.freeze({

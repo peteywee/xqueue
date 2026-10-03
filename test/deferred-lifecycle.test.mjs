@@ -555,7 +555,7 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
     INSERT INTO publication_leases
       (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms)
     VALUES
-      ('publisher','owner-a','acq-a',7,1000,5000,1000);
+      ('publisher','owner-token-alpha','acquisition-alpha',7,1000,5000,1000);
   `);
 
   const api = d1Adapter(db);
@@ -569,8 +569,8 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
 
   const lease = {
     leaseName: 'publisher',
-    ownerToken: 'owner-a',
-    acquisitionId: 'acq-a',
+    ownerToken: 'owner-token-alpha',
+    acquisitionId: 'acquisition-alpha',
     generation: 7,
     acquiredAtMs: 1000,
     expiresAtMs: 5000,
