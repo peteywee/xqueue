@@ -368,6 +368,7 @@ test('production wrapper refuses before checkpoint when authority differs from t
 
     assert.equal(result.status, 'blocked', JSON.stringify(changed));
     assert.equal(result.fault_class, 'PRE_DISPATCH_REPLAN_REQUIRED');
+    assert.equal(result.retryable, true);
     assert.match(result.error, /authority changed since the operator verified it/);
     assert.equal(fx.checkpointCalls(), 0);
     assert.equal(fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n, 0);
@@ -393,6 +394,9 @@ test('production wrapper refuses before checkpoint when authority differs from t
   });
   assert.equal(missing.status, 'blocked');
   assert.match(missing.error, /authority evidence is missing or invalid/);
+  // A caller error, not something a retry or replan can fix.
+  assert.equal(missing.fault_class, 'INVALID_PUBLICATION_AUTHORITY_EVIDENCE');
+  assert.equal(missing.retryable, false);
   assert.equal(fx.checkpointCalls(), 0);
   fx.raw.close();
 });

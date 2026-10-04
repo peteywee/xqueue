@@ -210,3 +210,16 @@ test('server-reflected secret text is never surfaced', async () => {
     },
   );
 });
+
+test('token errors name the variable being checked', () => {
+  assert.throws(() => classifyCloudflareApiToken('', 'MUTATION_D1_API_TOKEN'), /^Error: MUTATION_D1_API_TOKEN is required$/);
+  assert.throws(
+    () => classifyCloudflareApiToken('cfat_ x', 'MUTATION_D1_API_TOKEN'),
+    /^Error: MUTATION_D1_API_TOKEN contains whitespace/,
+  );
+  assert.throws(
+    () => classifyCloudflareApiToken('legacy-unprefixed-token', 'MUTATION_D1_API_TOKEN'),
+    /^Error: MUTATION_D1_API_TOKEN has an unsupported Cloudflare API token format/,
+  );
+  assert.throws(() => classifyCloudflareApiToken('legacy-unprefixed-token'), /^Error: CLOUDFLARE_API_TOKEN has an unsupported/);
+});

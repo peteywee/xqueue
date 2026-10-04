@@ -1178,6 +1178,9 @@ function boundTrustRoot(env) {
     productionDatabaseId:
       typeof env?.XQUEUE_PRODUCTION_DATABASE_ID === 'string' ? env.XQUEUE_PRODUCTION_DATABASE_ID : null,
     ownerApprovalKeyFingerprint,
+    // Names only, never values, so the operator can refuse a Worker that bound
+    // anything beyond its descriptor (for example X credentials).
+    bindingNames: Object.freeze(Object.keys(env ?? {}).sort()),
     // Presence only, never values: a wrangler switch in the operator shell can
     // stop secrets from loading while the vars still look correct.
     secretsBound: Object.freeze({
@@ -1266,6 +1269,12 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
               ) ||
               retryableRunnerRead
             );
+          // An authority change since operator verification needs a fresh
+          // preflight and is retryable on every path, fresh or replay.
+          const replanRequired =
+            !postDispatch &&
+            result.mutation?.fault_class === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+            result.mutation?.retryable === true;
           return json({
             service: 'xqueue-mutation-production-intake',
             role: 'production-mutation-intake',
@@ -1282,6 +1291,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
                 ),
             retryable:
               transientPreDispatch ||
+              replanRequired ||
               (!postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY'),
             requiresReadback: postDispatch,
             ...result,

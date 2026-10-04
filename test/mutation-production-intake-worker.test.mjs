@@ -607,6 +607,31 @@ test('a fresh intake binds the operator-verified authority into the guarded runn
   assert.deepEqual(seen, [payload().expectedPublicationAuthority]);
 });
 
+test('a fresh-path authority change is retryable at the top level, like replay', async () => {
+  const d = deps();
+  d.runMutation = async () => ({
+    status: 'blocked',
+    phase: 'production_preflight',
+    fault_class: 'PRE_DISPATCH_REPLAN_REQUIRED',
+    retryable: true,
+    error: 'publication authority changed since the operator verified it',
+  });
+  const worker = createMutationProductionIntakeWorker(d);
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CONTROL_TOKEN },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'PRE_DISPATCH_REPLAN_REQUIRED');
+  assert.equal(body.retryable, true);
+  assert.equal(body.requiresReadback, false);
+});
+
 test('replay refuses when publication authority changed since the operator verified it', async () => {
   for (const changed of [
     { generation: 10 },

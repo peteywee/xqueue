@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,7 @@ import {
   assertHealthIdentity,
   childEnvironment,
   collectD1TokenReadiness,
+  launchConfigurationBlockers,
   collectOperatorPreflight,
   evaluateOperatorReadiness,
   expectedTrustRoot,
@@ -109,16 +110,22 @@ function launch(overrides = {}) {
 
 test('the Worker reports the trust root it actually bound', async () => {
   const worker = createMutationProductionIntakeWorker({});
-  const env = { ...DESCRIPTOR.vars };
+  const env = { ...DESCRIPTOR.vars, DB: {} };
   const body = await (await worker.fetch(new Request('https://example.test/health'), env)).json();
   assert.deepEqual(body.bindings, {
     accountId: ACCOUNT,
     productionDatabaseId: DESCRIPTOR.vars.XQUEUE_PRODUCTION_DATABASE_ID,
     ownerApprovalKeyFingerprint: ownerPublicKeyFingerprint(DESCRIPTOR.vars.OWNER_APPROVAL_PUBLIC_KEY_PEM),
+    bindingNames: [...Object.keys(DESCRIPTOR.vars), 'DB'].sort(),
     secretsBound: { MUTATION_D1_API_TOKEN: false, MUTATION_CONTROL_TOKEN: false },
   });
-  const { secretsBound: _unbound, ...trustRoot } = body.bindings;
+  const full = await (await worker.fetch(
+    new Request('https://example.test/health'),
+    { ...env, MUTATION_D1_API_TOKEN: 'v1-secret-value', MUTATION_CONTROL_TOKEN: 'v2-secret-value' },
+  )).json();
+  const { secretsBound: _bound, ...trustRoot } = full.bindings;
   assert.deepEqual(trustRoot, { ...EXPECTED });
+  assert.doesNotMatch(JSON.stringify(full), /secret-value/);
 
   const withSecrets = await (await worker.fetch(
     new Request('https://example.test/health'),
@@ -188,33 +195,34 @@ test('the launch credential is never passed to the Worker as its D1 credential',
 
   assert.throws(
     () => childEnvironment({ env: launchEnv({ CLOUDFLARE_API_TOKEN: undefined }), descriptor: DESCRIPTOR, controlToken: 'x' }),
-    /requires CLOUDFLARE_API_TOKEN \(the wrangler launch credential\)/,
+    /apply refused: launch_token_missing/,
   );
 
-  assert.throws(
-    () => childEnvironment({ env: launchEnv({ MUTATION_D1_API_TOKEN: '' }), descriptor: DESCRIPTOR, controlToken: 'x' }),
-    /requires MUTATION_D1_API_TOKEN/,
+  // childEnvironment refuses on exactly the blockers observe mode reports.
+  const refused = (env, descriptor = DESCRIPTOR) => {
+    try {
+      childEnvironment({ env, descriptor, controlToken: 'x' });
+      return null;
+    } catch (error) {
+      return error.message;
+    }
+  };
+  assert.match(refused(launchEnv({ MUTATION_D1_API_TOKEN: '' })), /apply refused: mutation_d1_token_missing/);
+  assert.match(
+    refused(launchEnv({ MUTATION_D1_API_TOKEN: 'launch-token-with-script-edit-0001' })),
+    /mutation_d1_token_not_separated/,
   );
-  assert.throws(
-    () => childEnvironment({
-      env: launchEnv({ MUTATION_D1_API_TOKEN: 'launch-token-with-script-edit-0001' }),
-      descriptor: DESCRIPTOR,
-      controlToken: 'x',
-    }),
-    /must differ from CLOUDFLARE_API_TOKEN/,
+  assert.match(refused(launchEnv({ CLOUDFLARE_ACCOUNT_ID: 'other' })), /launch_account_mismatch/);
+  assert.match(
+    refused(launchEnv(), { ...DESCRIPTOR, secrets: { required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'] } }),
+    /mutation_descriptor_secrets_invalid/,
   );
-  assert.throws(
-    () => childEnvironment({ env: launchEnv({ CLOUDFLARE_ACCOUNT_ID: 'other' }), descriptor: DESCRIPTOR, controlToken: 'x' }),
-    /must equal the mutation Worker descriptor account id/,
-  );
-  assert.throws(
-    () => childEnvironment({
-      env: launchEnv(),
-      descriptor: { ...DESCRIPTOR, secrets: { required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'] } },
-      controlToken: 'x',
-    }),
-    /must require exactly its own D1 and control secrets/,
-  );
+  for (const env of [launchEnv({ MUTATION_D1_API_TOKEN: '' }), launchEnv({ CLOUDFLARE_ACCOUNT_ID: 'other' })]) {
+    assert.deepEqual(
+      launchConfigurationBlockers(env, DESCRIPTOR).map((item) => item.id),
+      [...refused(env).matchAll(/(?:refused: |; )([a-z0-9_]+) \(/g)].map((match) => match[1]),
+    );
+  }
 });
 
 test('a successful launch sends the generated bearer only after a verified health check', async () => {
@@ -533,7 +541,8 @@ test('readiness proves the Worker credential, not only the launch credential', a
     run: () => { throw new Error('auth failed for ' + env.MUTATION_D1_API_TOKEN + '\nstack'); },
   });
   assert.deepEqual(authFailed.blockers.map((item) => item.id), ['mutation_d1_token_not_verified']);
-  assert.match(authFailed.blockers[0].detail, /auth failed for \[redacted\]$/);
+  assert.match(authFailed.blockers[0].detail, /auth failed for \[redacted\] \| stack$/);
+  assert.doesNotMatch(authFailed.blockers[0].detail, /d1-scoped-token/);
   assert.deepEqual(
     await id({ env, probeTimeTravel: async () => { throw new Error('HTTP 403'); } }),
     ['mutation_d1_time_travel_unavailable'],
@@ -605,5 +614,127 @@ test('publisher code is unchanged since the mutex pin, or the pin must be re-eva
     publisherGraphDigest(),
     PUBLISHER_GRAPH_DIGEST_AT_PIN,
     'publisher code changed after MUTEX_COMPATIBLE_PUBLISHER_COMMIT: re-evaluate the pin and record the new digest',
+  );
+});
+
+test('a signal tears the ephemeral Worker down before the CLI exits', async () => {
+  const { spawnImpl, calls } = fakeChild();
+  const signals = new EventEmitter();
+  const killed = [];
+  const processImpl = {
+    pid: 4242,
+    once: (name, fn) => signals.once(name, fn),
+    removeListener: (name, fn) => signals.removeListener(name, fn),
+    kill: (pid, signal) => killed.push([pid, signal]),
+  };
+  let envDirSeen = null;
+  const fetchImpl = async () => {
+    envDirSeen = path.dirname(calls.spawn.args[10]);
+    signals.emit('SIGTERM', 'SIGTERM');
+    throw new TypeError('aborted by signal');
+  };
+  await assert.rejects(launch({ spawnImpl, fetchImpl, processImpl, healthDeadlineMs: 300 }));
+  assert.equal(calls.killed, true, 'wrangler child was killed');
+  assert.deepEqual(killed, [[4242, 'SIGTERM']], 'the signal was re-raised after cleanup');
+  assert.equal(existsSync(envDirSeen), false, 'temp env dir removed');
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(signals.listenerCount(name), 0, name);
+});
+
+test('a synchronous spawn failure still removes the temporary env dir and handlers', async () => {
+  const signals = new EventEmitter();
+  const processImpl = {
+    pid: 1,
+    once: (name, fn) => signals.once(name, fn),
+    removeListener: (name, fn) => signals.removeListener(name, fn),
+    kill: () => {},
+  };
+  let envFile = null;
+  const spawnImpl = (command, args) => {
+    envFile = args[10];
+    throw new TypeError('ERR_INVALID_ARG_VALUE');
+  };
+  await assert.rejects(launch({ spawnImpl, processImpl }), /ERR_INVALID_ARG_VALUE/);
+  assert.equal(existsSync(path.dirname(envFile)), false);
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(signals.listenerCount(name), 0, name);
+});
+
+test('stderr is redacted before the tail is cut, so no secret leaks in part', async () => {
+  const exited = fakeChild({
+    exitImmediately: true,
+    // Place the control token so the 4096-char tail cut lands inside it.
+    stderrText: (env) => 'x'.repeat(5000) + env.MUTATION_CONTROL_TOKEN + 'y'.repeat(4096 - 20),
+  });
+  const neverHealthy = async () => { throw new TypeError('ECONNREFUSED'); };
+  await assert.rejects(launch({ spawnImpl: exited.spawnImpl, fetchImpl: neverHealthy }), (error) => {
+    const token = exited.calls.spawn.options.env.MUTATION_CONTROL_TOKEN;
+    for (let length = 12; length <= token.length; length += 4) {
+      assert.equal(error.message.includes(token.slice(-length)), false, 'token suffix of length ' + length);
+    }
+    return true;
+  });
+});
+
+test('a failed safety read is a structured blocker, not a raw exception', () => {
+  const run = (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git fetch origin main') return '';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      return JSON.stringify({ ok: true, environment: 'production', token_type: 'account', token_status: 'active', d1: { readable: true } });
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+    }
+    if (key.includes('SELECT owner,generation,transition_state')) throw new Error('wrangler rate limited');
+    throw new Error('unexpected command: ' + key);
+  };
+  const preflight = collectOperatorPreflight(run, () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: false, blockers: [{ id: 'mutation_d1_token_missing', detail: 'x' }] },
+  });
+  const ids = preflight.readiness.blockers.map((item) => item.id);
+  assert.deepEqual(ids, ['publication_safety_unreadable', 'mutation_d1_token_missing']);
+});
+
+test('payload fields can never replace the verified request fields', async () => {
+  const { spawnImpl } = fakeChild();
+  let sent = null;
+  const fetchImpl = async (url, init) => {
+    if (url.endsWith('/health')) return jsonResponse(healthBody());
+    sent = JSON.parse(init.body);
+    return jsonResponse({ ok: true });
+  };
+  await launch({
+    spawnImpl,
+    fetchImpl,
+    payload: {
+      mode: 'single',
+      environment: 'preview',
+      candidate: { branch: 'evil' },
+      expectedPublicationAuthority: { generation: 1, candidate_sha: 'f'.repeat(40), deployment_id: 'evil' },
+      input: { body: 'b' },
+    },
+  });
+  assert.equal(sent.environment, 'production');
+  assert.equal(sent.candidate.branch, 'main');
+  assert.deepEqual(sent.expectedPublicationAuthority, { ...AUTHORITY });
+  assert.equal(sent.mode, 'single');
+});
+
+test('a Worker with any binding beyond its descriptor is refused', () => {
+  for (const extra of [['X_API_KEY'], ['CLOUDFLARE_API_TOKEN'], []]) {
+    const names = extra.length
+      ? [...EXPECTED.bindingNames, ...extra].sort()
+      : EXPECTED.bindingNames.filter((name) => name !== 'DB');
+    assert.throws(
+      () => assertHealthIdentity(healthBody({ ...EXPECTED, secretsBound: BOUND, bindingNames: names }), EXPECTED),
+      /has bindings .* expected exactly/,
+      JSON.stringify(extra),
+    );
+  }
+  assert.deepEqual(
+    [...EXPECTED.bindingNames],
+    ['CLOUDFLARE_ACCOUNT_ID', 'DB', 'MUTATION_CONTROL_TOKEN', 'MUTATION_D1_API_TOKEN', 'OWNER_APPROVAL_PUBLIC_KEY_PEM', 'XQUEUE_PRODUCTION_DATABASE_ID'],
   );
 });

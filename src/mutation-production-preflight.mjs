@@ -320,11 +320,14 @@ export async function runProductionIntakeMutation({
     expectedPublicationAuthority,
   );
   if (authorityMismatch) {
+    // Missing evidence is a caller error; a changed authority needs a fresh
+    // operator preflight (which re-checks the publisher) and may be retried.
+    const invalid = !validPublicationAuthorityEvidence(expectedPublicationAuthority);
     return Object.freeze({
       status: 'blocked',
       phase: 'production_preflight',
-      fault_class: 'PRE_DISPATCH_REPLAN_REQUIRED',
-      retryable: true,
+      fault_class: invalid ? 'INVALID_PUBLICATION_AUTHORITY_EVIDENCE' : 'PRE_DISPATCH_REPLAN_REQUIRED',
+      retryable: !invalid,
       error: authorityMismatch,
       preflight,
     });

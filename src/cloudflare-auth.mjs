@@ -21,7 +21,7 @@ export function classifyCloudflareApiToken(token, label = 'CLOUDFLARE_API_TOKEN'
   if (token.startsWith(USER_TOKEN_PREFIX)) return 'user';
 
   throw new Error(
-    'unsupported Cloudflare API token format; expected a prefixed cfat_ account token or cfut_ user token',
+    label + ' has an unsupported Cloudflare API token format; expected a prefixed cfat_ account token or cfut_ user token',
   );
 }
 
