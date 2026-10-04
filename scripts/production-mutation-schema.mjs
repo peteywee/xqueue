@@ -11,6 +11,7 @@ import {
   REQUIRED_MUTATION_MIGRATIONS,
   checkPublisherMutexCompatibility,
   collectExactMainCandidate,
+  defaultProbeWorkersAccess,
   parseJsonOutput,
 } from './production-mutation-intake.mjs';
 
@@ -18,6 +19,9 @@ export const PRODUCTION_SCHEMA_CONFIRM = 'xqueue-production-mutation-schema';
 export const PRODUCTION_DATABASE_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
 export const PRODUCTION_MIGRATIONS_DIR = 'cloudflare/migrations-production';
 const PRODUCTION_CONFIG = 'wrangler.status.jsonc';
+// Apply runs only inside the governed workflow: main only, one run at a time
+// (its concurrency group), behind its protected environment.
+export const GOVERNED_WORKFLOW = 'Production Mutation Schema';
 // The publisher wakes every 15 minutes and publishes within a 20-minute grace.
 // Refusing to change schema near a due slot keeps the apply out of that window.
 export const DUE_SLOT_EXCLUSION_MINUTES = 30;
@@ -85,6 +89,69 @@ export function localMigrations(dir = PRODUCTION_MIGRATIONS_DIR) {
     });
 }
 
+// wrangler 4.131 applies every non-hidden top-level *.sql file in
+// migrations_dir, ordered by leading number and then by name. The plan must
+// cover exactly that set, and every such file must be the committed blob.
+export function migrationFileBlockers({ dir = PRODUCTION_MIGRATIONS_DIR, local, committed }) {
+  const visible = readdirSync(resolve(dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.sql') && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .sort();
+  const localNames = new Set(local.map((item) => item.name));
+  const blockers = [];
+  const unrecognized = visible.filter((name) => !localNames.has(name));
+  if (unrecognized.length > 0) {
+    blockers.push({
+      id: 'unrecognized_migration_file',
+      detail: 'wrangler would apply files outside the planned lane: ' + unrecognized.join(', '),
+    });
+  }
+  const uncommitted = local
+    .filter((item) => committed.get(dir + '/' + item.name) !== item.gitBlob)
+    .map((item) => item.name);
+  if (uncommitted.length > 0) {
+    blockers.push({
+      id: 'migration_file_not_committed',
+      detail: 'Migration files differ from, or are absent in, the committed tree at HEAD: ' + uncommitted.join(', '),
+    });
+  }
+  return blockers;
+}
+
+export function readCommittedMigrationBlobs(run, dir = PRODUCTION_MIGRATIONS_DIR) {
+  const committed = new Map();
+  for (const line of run('git', ['ls-tree', 'HEAD', '--', dir + '/']).split('\n')) {
+    const match = /^\d+ blob ([0-9a-f]{40})\t(.+)$/.exec(line.trim());
+    if (match) committed.set(match[2], match[1]);
+  }
+  return committed;
+}
+
+// The bookmark is taken for PRODUCTION_DATABASE_ID while wrangler resolves the
+// database and migrations directory from the config, so they must agree.
+export function productionConfigBlockers(path = PRODUCTION_CONFIG) {
+  let database = null;
+  try {
+    const config = JSON.parse(readFileSync(resolve(path), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+    database = (config.d1_databases ?? []).find((item) => item.database_name === 'xqueue-production') ?? null;
+  } catch {
+    database = null;
+  }
+  if (
+    database?.database_id !== PRODUCTION_DATABASE_ID ||
+    database?.migrations_dir !== PRODUCTION_MIGRATIONS_DIR ||
+    database?.migrations_pattern !== undefined ||
+    database?.migrations_table !== undefined
+  ) {
+    return [{
+      id: 'production_config_mismatch',
+      detail: PRODUCTION_CONFIG + ' must bind xqueue-production to ' + PRODUCTION_DATABASE_ID +
+        ' with migrations_dir ' + PRODUCTION_MIGRATIONS_DIR + ' and the default pattern and table.',
+    }];
+  }
+  return [];
+}
+
 // Production may only be a prefix of the committed lane, and the pending
 // suffix must be exactly the mutation-control migrations. Anything else is
 // drift that this path refuses to resolve.
@@ -133,7 +200,7 @@ export function planSchemaMigration({ applied, local, required = REQUIRED_MUTATI
 function schemaObjects(db) {
   return db.prepare(
     "SELECT type,name,tbl_name,sql FROM sqlite_master " +
-    "WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type,name",
+    "WHERE substr(name,1,7) <> 'sqlite_' AND sql IS NOT NULL ORDER BY type,name",
   ).all().map((row) => ({ ...row }));
 }
 
@@ -208,9 +275,10 @@ export function readAppliedMigrations(run) {
     .map((row) => row.name);
 }
 
+// substr, not LIKE: '_' is a LIKE wildcard and would hide names such as xcf_x.
 export const REMOTE_SCHEMA_SQL =
-  "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' " +
-  "AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations' AND sql IS NOT NULL ORDER BY type,name;";
+  "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE substr(name,1,7) <> 'sqlite_' " +
+  "AND substr(name,1,4) <> '_cf_' AND name <> 'd1_migrations' AND sql IS NOT NULL ORDER BY type,name;";
 
 export function readRemoteSchema(run) {
   return (d1Query(run, REMOTE_SCHEMA_SQL)?.[0]?.results ?? []).map((row) => ({
@@ -231,8 +299,9 @@ export const PUBLICATION_SAFETY_SQL = [
   'SELECT COALESCE(MAX(id),0) AS event_cursor FROM publication_events;',
   "SELECT json_extract(value,'$.inflight') AS inflight FROM runtime_metadata WHERE key='state.snapshot_json';",
   'SELECT generation,revision_digest FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 1;',
-  "SELECT MIN(resolved_at) AS next_due FROM queue_assignments WHERE status='active' AND lifecycle_state='scheduled' " +
-    "AND resolved_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-20 minutes');",
+  // Every scheduled assignment, overdue included: an unhalted publisher acts
+  // on overdue slots (deferral) at its next tick.
+  "SELECT MIN(resolved_at) AS next_due FROM queue_assignments WHERE status='active' AND lifecycle_state='scheduled';",
   "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS db_now;",
 ].join(' ');
 
@@ -292,10 +361,14 @@ export function evaluateSchemaGates({ auth, candidate, plan, safety }) {
   const due = safety?.nextDue == null ? null : Date.parse(safety.nextDue);
   if (!Number.isFinite(now)) {
     blockers.push({ id: 'database_clock_unreadable', detail: 'D1 clock could not be read.' });
+  } else if (due !== null && !Number.isFinite(due)) {
+    blockers.push({ id: 'next_due_unreadable', detail: 'The next scheduled assignment time is not a valid instant: ' + String(safety.nextDue) });
   } else if (due !== null && due - now < DUE_SLOT_EXCLUSION_MINUTES * 60_000) {
     blockers.push({
       id: 'publication_window_too_close',
-      detail: 'A scheduled assignment is due within ' + DUE_SLOT_EXCLUSION_MINUTES + ' minutes or inside its grace window.',
+      detail: 'A scheduled assignment is overdue or due within ' + DUE_SLOT_EXCLUSION_MINUTES +
+        ' minutes (next_due ' + safety.nextDue + ', publication ' +
+        (Number(safety?.halt?.halted) === 1 ? 'halted' : 'not halted') + ').',
     });
   }
   return Object.freeze({ ok: blockers.length === 0, blockers: Object.freeze(blockers) });
@@ -356,6 +429,11 @@ export function bookmarkPrecedes(earlier, later) {
   return isD1Bookmark(earlier) && isD1Bookmark(later) && earlier <= later;
 }
 
+// The apply writes, so a post-apply bookmark must be strictly later.
+export function bookmarkStrictlyPrecedes(earlier, later) {
+  return isD1Bookmark(earlier) && isD1Bookmark(later) && earlier < later;
+}
+
 function epochs(safety) {
   return Object.freeze({
     authorityGeneration: safety?.authority?.generation ?? null,
@@ -365,27 +443,46 @@ function epochs(safety) {
     halted: safety?.halt?.halted ?? null,
     leaseGeneration: safety?.leaseGeneration ?? null,
     eventCursor: safety?.eventCursor ?? null,
+    runtimeGeneration: safety?.runtimeHead?.generation ?? null,
+    runtimeRevisionDigest: safety?.runtimeHead?.revision_digest ?? null,
   });
+}
+
+// One file per run, so a later run never overwrites an earlier apply's
+// checkpoint and readback.
+export function evidenceFileName(evidence) {
+  return 'production-mutation-schema-evidence-' + evidence.mode + '-' +
+    String(evidence.recorded_at).replace(/[:.]/g, '-') + '.json';
 }
 
 function writeEvidence(outputDir, evidence) {
   mkdirSync(resolve(outputDir), { recursive: true });
-  const path = join(resolve(outputDir), 'production-mutation-schema-evidence.json');
+  const path = join(resolve(outputDir), evidenceFileName(evidence));
   writeFileSync(path, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
   return path;
+}
+
+function message(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export async function main(
   argv = process.argv.slice(2),
   {
     run = runSync,
+    env = process.env,
     captureBookmark = () => getD1TimeTravelBookmark({
-      accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
+      accountId: env.CLOUDFLARE_ACCOUNT_ID,
       databaseId: PRODUCTION_DATABASE_ID,
-      apiToken: process.env.CLOUDFLARE_API_TOKEN,
+      apiToken: env.CLOUDFLARE_API_TOKEN,
+    }),
+    probeWorkersAccess = () => defaultProbeWorkersAccess({
+      token: env.CLOUDFLARE_API_TOKEN,
+      accountId: env.CLOUDFLARE_ACCOUNT_ID,
     }),
     checkPublisher = checkPublisherMutexCompatibility,
     migrationsDir = PRODUCTION_MIGRATIONS_DIR,
+    configPath = PRODUCTION_CONFIG,
     now = () => new Date(),
   } = {},
 ) {
@@ -403,16 +500,48 @@ export async function main(
   const compatibility = plan.blockers.length === 0
     ? compareSchema(replaySchema(local, appliedBefore), readRemoteSchema(run))
     : null;
-  const blockers = [...gates.blockers];
+  const blockers = [
+    ...gates.blockers,
+    ...productionConfigBlockers(configPath),
+    ...migrationFileBlockers({ dir: migrationsDir, local, committed: readCommittedMigrationBlobs(run, migrationsDir) }),
+  ];
   if (compatibility && !compatibility.identical) {
     blockers.push({ id: 'production_schema_drift', detail: 'Live schema differs from the replay of applied migrations.' });
+  }
+
+  // The schema path is part of the mutation plane: its credential may reach D1
+  // and Time Travel, never Workers scripts (which is what deploys the publisher).
+  try {
+    const access = await probeWorkersAccess();
+    if (access !== 'denied') {
+      blockers.push({
+        id: 'schema_token_overscoped',
+        detail: 'The schema credential can access Workers scripts; use the D1 + Time Travel only token.',
+      });
+    }
+  } catch (error) {
+    blockers.push({
+      id: 'schema_token_scope_unverified',
+      detail: 'Could not prove the schema credential lacks Workers access: ' + message(error),
+    });
+  }
+
+  if (options.apply && (
+    env.GITHUB_ACTIONS !== 'true' ||
+    env.GITHUB_WORKFLOW !== GOVERNED_WORKFLOW ||
+    env.GITHUB_REF !== 'refs/heads/main'
+  )) {
+    blockers.push({
+      id: 'apply_outside_governed_workflow',
+      detail: 'Apply runs only in the "' + GOVERNED_WORKFLOW + '" workflow on main.',
+    });
   }
 
   const identities = local
     .filter((item) => plan.pending.includes(item.name) || plan.required.includes(item.name))
     .map(({ name, sha256: digest, gitBlob }) => ({ name, sha256: digest, gitBlob }));
   const evidence = {
-    schema_version: 1,
+    schema_version: 2,
     kind: 'xqueue-production-mutation-schema',
     mode: options.apply ? 'apply' : 'observe',
     environment: 'production',
@@ -430,10 +559,14 @@ export async function main(
     status: null,
   };
 
-  const finish = (status, extra = {}) => {
+  let evidencePath = null;
+  const persist = (status, extra = {}) => {
     Object.assign(evidence, extra, { status });
-    const path = writeEvidence(options.output, evidence);
-    console.log(JSON.stringify({ ...evidence, evidencePath: path }, null, 2));
+    evidencePath = writeEvidence(options.output, evidence);
+  };
+  const finish = (status, extra = {}) => {
+    persist(status, extra);
+    console.log(JSON.stringify({ ...evidence, evidencePath }, null, 2));
     if (!['ready', 'already_active', 'applied'].includes(status)) process.exitCode = 1;
     return evidence;
   };
@@ -442,27 +575,46 @@ export async function main(
   if (plan.status === 'already_active') return finish('already_active');
   if (!options.apply) return finish('ready');
 
-  // Checkpoint first, then a fresh safety read: the apply must start from the
-  // state the checkpoint covers, with no publication activity in between.
+  // Checkpoint first, then fresh reads: the apply must start from the state the
+  // checkpoint covers, with no publication or migration activity in between.
   let checkpoint;
   try {
     const bookmark = await captureBookmark();
     if (!isD1Bookmark(bookmark)) throw new Error('bookmark is not a D1 Time Travel bookmark');
     checkpoint = { bookmark, capturedAt: now().toISOString() };
   } catch (error) {
-    blockers.push({ id: 'recovery_checkpoint_unavailable', detail: error instanceof Error ? error.message : String(error) });
+    blockers.push({ id: 'recovery_checkpoint_unavailable', detail: message(error) });
     return finish('blocked');
   }
 
-  const safetyFresh = readPublicationSafety(run);
+  let safetyFresh;
+  let appliedFresh;
+  try {
+    safetyFresh = readPublicationSafety(run);
+    appliedFresh = readAppliedMigrations(run);
+  } catch (error) {
+    blockers.push({ id: 'pre_apply_reread_failed', detail: message(error) + '; nothing was applied.' });
+    return finish('blocked', { checkpoint });
+  }
   const fresh = evaluateSchemaGates({ auth, candidate, plan, safety: safetyFresh });
   if (!fresh.ok || JSON.stringify(epochs(safetyFresh)) !== JSON.stringify(epochs(safetyBefore))) {
     blockers.push(...fresh.blockers, {
       id: 'publication_state_changed_before_apply',
-      detail: 'Publication epochs changed after the checkpoint; nothing was applied. Re-run observe first.',
+      detail: 'Publication or runtime epochs changed after the checkpoint; nothing was applied. Re-run observe first.',
     });
     return finish('blocked', { checkpoint, publicationFresh: epochs(safetyFresh) });
   }
+  if (JSON.stringify(appliedFresh) !== JSON.stringify(appliedBefore)) {
+    blockers.push({
+      id: 'migration_state_changed_before_apply',
+      detail: 'd1_migrations changed after the checkpoint; nothing was applied. Re-run observe first.',
+    });
+    return finish('blocked', { checkpoint, appliedFresh });
+  }
+
+  // The restore point is on disk before production changes, so a killed or
+  // timed-out run still leaves it for the operator.
+  persist('applying', { checkpoint });
 
   let applyError = null;
   try {
@@ -471,61 +623,96 @@ export async function main(
       '--config', PRODUCTION_CONFIG, '--remote',
     ]);
   } catch (error) {
-    applyError = error instanceof Error ? error.message : String(error);
+    applyError = message(error);
   }
 
   // Readback before any conclusion, success or failure. A failed command may
   // still have applied some migrations; this path never retries on its own.
-  const appliedAfter = readAppliedMigrations(run);
+  // Each read is recorded on its own, so one failing read cannot lose the rest.
+  const readbackErrors = {};
+  const attempt = async (label, read) => {
+    try {
+      return await read();
+    } catch (error) {
+      readbackErrors[label] = message(error);
+      return null;
+    }
+  };
   const expectedApplied = [...appliedBefore, ...plan.pending];
-  const schemaAfter = compareSchema(replaySchema(local, expectedApplied), readRemoteSchema(run));
+  const appliedAfter = await attempt('migrations', () => readAppliedMigrations(run));
+  const remoteAfter = await attempt('schema', () => readRemoteSchema(run));
+  const singletons = await attempt('singletons', () => readSingletons(run));
+  const safetyAfter = await attempt('publication', () => readPublicationSafety(run));
+  const postCheckpoint = await attempt('postCheckpoint', async () => {
+    const bookmark = await captureBookmark();
+    if (!isD1Bookmark(bookmark)) throw new Error('bookmark is not a D1 Time Travel bookmark');
+    return bookmark;
+  });
+  const schemaAfter = remoteAfter === null
+    ? null
+    : compareSchema(replaySchema(local, expectedApplied), remoteAfter);
   const expectedChange = expectedSchemaChange(local, plan.pending);
-  const singletons = readSingletons(run);
-  const safetyAfter = readPublicationSafety(run);
-  let postCheckpoint = null;
-  try {
-    postCheckpoint = await captureBookmark();
-  } catch {
-    postCheckpoint = null;
-  }
+  const publicationAfter = safetyAfter === null ? null : epochs(safetyAfter);
 
   const readback = {
     appliedAfter,
-    migrationsExact: JSON.stringify(appliedAfter) === JSON.stringify(expectedApplied),
+    migrationsExact: appliedAfter !== null && JSON.stringify(appliedAfter) === JSON.stringify(expectedApplied),
     schema: schemaAfter,
-    singletonsExact: JSON.stringify(singletons) === JSON.stringify(expectedChange.singletons),
+    singletonsExact: singletons !== null && JSON.stringify(singletons) === JSON.stringify(expectedChange.singletons),
     singletons,
-    publicationAfter: epochs(safetyAfter),
-    authorityUnchanged:
-      JSON.stringify([
-        epochs(safetyAfter).authorityGeneration,
-        epochs(safetyAfter).authorityCandidateSha,
-        epochs(safetyAfter).authorityDeploymentId,
-        epochs(safetyAfter).haltGeneration,
-      ]) === JSON.stringify([
-        epochs(safetyBefore).authorityGeneration,
-        epochs(safetyBefore).authorityCandidateSha,
-        epochs(safetyBefore).authorityDeploymentId,
-        epochs(safetyBefore).haltGeneration,
-      ]),
+    publicationAfter,
+    authorityUnchanged: publicationAfter !== null && JSON.stringify([
+      publicationAfter.authorityGeneration,
+      publicationAfter.authorityCandidateSha,
+      publicationAfter.authorityDeploymentId,
+      publicationAfter.haltGeneration,
+    ]) === JSON.stringify([
+      epochs(safetyBefore).authorityGeneration,
+      epochs(safetyBefore).authorityCandidateSha,
+      epochs(safetyBefore).authorityDeploymentId,
+      epochs(safetyBefore).haltGeneration,
+    ]),
+    // Any publication or runtime write during the apply means the checkpoint
+    // no longer restores only the schema change.
+    publicationQuiet: publicationAfter !== null &&
+      JSON.stringify(publicationAfter) === JSON.stringify(epochs(safetyBefore)),
     postCheckpoint,
-    checkpointPrecedesApply: bookmarkPrecedes(checkpoint.bookmark, postCheckpoint),
+    checkpointPrecedesApply: bookmarkStrictlyPrecedes(checkpoint.bookmark, postCheckpoint),
+    errors: readbackErrors,
   };
-  const proven =
-    applyError === null &&
-    readback.migrationsExact &&
-    readback.schema.identical &&
-    readback.singletonsExact &&
-    readback.authorityUnchanged &&
-    readback.checkpointPrecedesApply;
 
-  if (!proven) {
-    blockers.push({
-      id: applyError === null ? 'post_apply_readback_contradicts_plan' : 'apply_command_failed',
-      detail: applyError ?? 'Readback did not prove the exact planned schema; reconcile from evidence before any retry.',
+  const failures = [];
+  if (applyError !== null) failures.push({ id: 'apply_command_failed', detail: applyError });
+  for (const [label, detail] of Object.entries(readbackErrors)) {
+    failures.push({ id: 'readback_unavailable', detail: label + ': ' + detail });
+  }
+  if (appliedAfter !== null && !readback.migrationsExact) {
+    failures.push({ id: 'migrations_readback_mismatch', detail: 'd1_migrations is not exactly the planned history.' });
+  }
+  if (schemaAfter !== null && !schemaAfter.identical) {
+    failures.push({ id: 'schema_readback_mismatch', detail: 'Live schema is not exactly the planned schema.' });
+  }
+  if (singletons !== null && !readback.singletonsExact) {
+    failures.push({ id: 'singletons_readback_mismatch', detail: 'Lane singletons are not the migration initial state.' });
+  }
+  if (publicationAfter !== null && !readback.authorityUnchanged) {
+    failures.push({ id: 'authority_changed_during_apply', detail: 'Publication authority or halt moved during the apply.' });
+  } else if (publicationAfter !== null && !readback.publicationQuiet) {
+    failures.push({
+      id: 'publication_activity_during_apply',
+      detail: 'Publication or runtime state changed during the apply. Do not restore the checkpoint without ' +
+        'reconciling that activity; the schema readback is reported separately.',
     });
   }
-  return finish(proven ? 'applied' : 'requires_reconciliation', { checkpoint, readback, applyError });
+  if (postCheckpoint !== null && !readback.checkpointPrecedesApply) {
+    failures.push({ id: 'checkpoint_not_before_apply', detail: 'The post-apply bookmark is not later than the checkpoint.' });
+  }
+
+  if (failures.length > 0) {
+    blockers.push(...failures);
+    return finish('requires_reconciliation', { checkpoint, readback, applyError });
+  }
+  return finish('applied', { checkpoint, readback, applyError });
 }
 
 if (import.meta.url === new URL(process.argv[1], 'file:').href) {

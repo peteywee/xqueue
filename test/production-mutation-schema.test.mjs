@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -87,6 +87,7 @@ function simulatedProduction({
   skipSqlFor = null,
   skipTrackingFor = null,
   afterApplySql = null,
+  onApply = null,
 } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TEXT)');
@@ -106,7 +107,12 @@ function simulatedProduction({
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return SHA + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
+    if (key.startsWith('git ls-tree HEAD -- ')) {
+      const dir = argv[3].replace(/\/$/, '');
+      return LOCAL.map((item) => '100644 blob ' + item.gitBlob + '\t' + dir + '/' + item.name).join('\n') + '\n';
+    }
     if (key.startsWith('pnpm wrangler d1 migrations apply xqueue-production')) {
+      onApply?.();
       assert.deepEqual(argv, [
         'wrangler', 'd1', 'migrations', 'apply', 'xqueue-production',
         '--config', 'wrangler.status.jsonc', '--remote',
@@ -144,18 +150,30 @@ function simulatedProduction({
   return { db, run, calls };
 }
 
-async function runMain(argv, deps) {
+const GOVERNED_ENV = Object.freeze({
+  GITHUB_ACTIONS: 'true',
+  GITHUB_WORKFLOW: 'Production Mutation Schema',
+  GITHUB_REF: 'refs/heads/main',
+  CLOUDFLARE_ACCOUNT_ID: 'acct',
+  CLOUDFLARE_API_TOKEN: 'd1-scoped-token',
+});
+
+async function runMain(argv, { output: outputDir = null, ...deps } = {}) {
   const previous = process.exitCode;
-  const output = mkdtempSync(join(tmpdir(), 'xqueue-schema-'));
+  const output = outputDir ?? mkdtempSync(join(tmpdir(), 'xqueue-schema-'));
   const log = console.log;
   console.log = () => {};
   try {
     const evidence = await main([...argv, '--output', output], {
       checkPublisher: () => ({ ok: false, reason: 'publisher_predates_mutation_mutex' }),
+      probeWorkersAccess: async () => 'denied',
+      env: GOVERNED_ENV,
       ...deps,
     });
-    const written = JSON.parse(readFileSync(join(output, 'production-mutation-schema-evidence.json'), 'utf8'));
-    return { evidence, written, exitCode: process.exitCode };
+    const files = readdirSync(output).sort();
+    if (!outputDir) assert.equal(files.length, 1, 'one evidence file per run');
+    const written = JSON.parse(readFileSync(join(output, files.at(-1)), 'utf8'));
+    return { evidence, written, files, exitCode: process.exitCode };
   } finally {
     console.log = log;
     process.exitCode = previous;
@@ -221,6 +239,9 @@ test('gates refuse unverified auth, inexact candidates, and unsafe publication s
     [{ safety: safety({ nextDue: '2026-10-04T14:45:00.000Z' }) }, 'publication_window_too_close'],
     [{ safety: safety({ nextDue: '2026-10-04T14:20:00.000Z' }) }, 'publication_window_too_close'],
     [{ safety: safety({ dbNow: null }) }, 'database_clock_unreadable'],
+    // Overdue slots count: an unhalted publisher defers them at its next tick.
+    [{ safety: safety({ nextDue: '2026-10-04T09:00:00.000Z' }) }, 'publication_window_too_close'],
+    [{ safety: safety({ nextDue: 'garbage' }) }, 'next_due_unreadable'],
   ];
   for (const [override, id] of cases) {
     const result = evaluateSchemaGates({ auth: auth(), candidate: candidate(), plan, safety: safety(), ...override });
@@ -396,7 +417,8 @@ test('a successful-looking apply that readback contradicts is never reported as 
   assert.equal(exitCode, 1);
   assert.equal(evidence.readback.migrationsExact, false);
   assert.ok(evidence.readback.schema.missing.includes('trigger:publication_lease_mutation_lane_insert_guard'));
-  assert.ok(evidence.blockers.some((item) => item.id === 'post_apply_readback_contradicts_plan'));
+  assert.ok(evidence.blockers.some((item) => item.id === 'migrations_readback_mismatch'));
+  assert.ok(evidence.blockers.some((item) => item.id === 'schema_readback_mismatch'));
 });
 
 test('tracking that claims a migration whose schema never landed is contradictory', async () => {
@@ -507,4 +529,197 @@ test('missing checkpoint and an already-active schema never reach the apply comm
   assert.equal(already.evidence.status, 'already_active');
   assert.equal(already.exitCode, undefined);
   assert.equal(active.calls.some((key) => key.includes('migrations apply')), false);
+});
+
+const APPLY = ['--environment', 'production', '--apply', '--confirm', PRODUCTION_SCHEMA_CONFIRM];
+
+test('an apply that fails before 0015 lands still reads back and records everything', async () => {
+  const sim = simulatedProduction({ applyFailsAfter: 0 });
+  const bookmarks = [BOOKMARK_1, BOOKMARK_2];
+  const { evidence, written, exitCode } = await runMain(APPLY, { run: sim.run, captureBookmark: async () => bookmarks.shift() });
+  assert.equal(evidence.status, 'requires_reconciliation');
+  assert.equal(written.status, 'requires_reconciliation');
+  assert.equal(exitCode, 1);
+  assert.equal(written.checkpoint.bookmark, BOOKMARK_1);
+  assert.match(evidence.readback.errors.singletons, /no such table: mutation_lane_state/);
+  assert.deepEqual(evidence.readback.appliedAfter, APPLIED_0014);
+  const ids = evidence.blockers.map((item) => item.id);
+  for (const id of ['apply_command_failed', 'readback_unavailable', 'migrations_readback_mismatch', 'schema_readback_mismatch']) {
+    assert.ok(ids.includes(id), id);
+  }
+});
+
+test('the recovery checkpoint is on disk before production changes', async () => {
+  const output = mkdtempSync(join(tmpdir(), 'xqueue-schema-'));
+  let seen = null;
+  const sim = simulatedProduction({
+    onApply: () => {
+      const files = readdirSync(output);
+      seen = JSON.parse(readFileSync(join(output, files[0]), 'utf8'));
+    },
+  });
+  const bookmarks = [BOOKMARK_1, BOOKMARK_2];
+  const { evidence } = await runMain(APPLY, { output, run: sim.run, captureBookmark: async () => bookmarks.shift() });
+  assert.equal(seen.status, 'applying');
+  assert.equal(seen.checkpoint.bookmark, BOOKMARK_1);
+  assert.equal(evidence.status, 'applied');
+  assert.equal(readdirSync(output).length, 1, 'the final evidence replaces the in-progress file of the same run');
+});
+
+test('runs never overwrite each other\'s evidence', async () => {
+  const output = mkdtempSync(join(tmpdir(), 'xqueue-schema-'));
+  const times = ['2026-10-04T15:00:00.000Z', '2026-10-04T15:05:00.000Z'];
+  for (const time of times) {
+    await runMain(['--environment', 'production'], { output, run: simulatedProduction().run, now: () => new Date(time) });
+  }
+  assert.deepEqual(readdirSync(output).sort(), [
+    'production-mutation-schema-evidence-observe-2026-10-04T15-00-00-000Z.json',
+    'production-mutation-schema-evidence-observe-2026-10-04T15-05-00-000Z.json',
+  ]);
+});
+
+test('wrangler-visible migration files outside the committed lane block the plan', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xqueue-migrations-'));
+  for (const item of LOCAL) writeFileSync(join(dir, item.name), item.sql);
+  writeFileSync(join(dir, '.hidden.sql'), 'SELECT 1;'); // wrangler ignores dot files
+  const clean = await runMain(['--environment', 'production'], { run: simulatedProduction().run, migrationsDir: dir });
+  assert.equal(clean.evidence.status, 'ready');
+
+  writeFileSync(join(dir, '0017_publication_mutation_mutex.pre-guards.sql'), 'SELECT 1;');
+  const stray = await runMain(['--environment', 'production'], { run: simulatedProduction().run, migrationsDir: dir });
+  assert.equal(stray.evidence.status, 'blocked');
+  assert.match(
+    stray.evidence.blockers.find((item) => item.id === 'unrecognized_migration_file').detail,
+    /0017_publication_mutation_mutex\.pre-guards\.sql/,
+  );
+
+  const edited = mkdtempSync(join(tmpdir(), 'xqueue-migrations-'));
+  for (const item of LOCAL) writeFileSync(join(edited, item.name), item.name === '0016_mutation_completion_item_guard.sql' ? item.sql + '\n-- edited\n' : item.sql);
+  const changed = await runMain(['--environment', 'production'], { run: simulatedProduction().run, migrationsDir: edited });
+  assert.match(
+    changed.evidence.blockers.find((item) => item.id === 'migration_file_not_committed').detail,
+    /0016_mutation_completion_item_guard\.sql/,
+  );
+});
+
+test('the configured database and migrations directory must be the ones the checkpoint covers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xqueue-config-'));
+  const base = JSON.parse(readFileSync('wrangler.status.jsonc', 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+  const write = (mutate) => {
+    const config = structuredClone(base);
+    mutate(config.d1_databases.find((item) => item.database_name === 'xqueue-production'));
+    const path = join(dir, 'config-' + Math.random().toString(16).slice(2) + '.jsonc');
+    writeFileSync(path, JSON.stringify(config));
+    return path;
+  };
+  for (const mutate of [
+    (db) => { db.database_id = '00000000-0000-0000-0000-000000000000'; },
+    (db) => { db.migrations_dir = 'cloudflare/migrations'; },
+    (db) => { db.migrations_pattern = 'cloudflare/migrations-production/**/*.sql'; },
+  ]) {
+    const { evidence } = await runMain(['--environment', 'production'], { run: simulatedProduction().run, configPath: write(mutate) });
+    assert.ok(evidence.blockers.some((item) => item.id === 'production_config_mismatch'));
+  }
+});
+
+test('a schema credential with Workers access, or unproven scope, is refused', async () => {
+  for (const [probe, id] of [
+    [async () => 'granted', 'schema_token_overscoped'],
+    [async () => { throw new Error('HTTP 500'); }, 'schema_token_scope_unverified'],
+  ]) {
+    const { evidence } = await runMain(['--environment', 'production'], { run: simulatedProduction().run, probeWorkersAccess: probe });
+    assert.equal(evidence.status, 'blocked');
+    assert.ok(evidence.blockers.some((item) => item.id === id), id);
+  }
+});
+
+test('apply runs only inside the governed workflow on main', async () => {
+  for (const env of [
+    {},
+    { ...GOVERNED_ENV, GITHUB_ACTIONS: undefined },
+    { ...GOVERNED_ENV, GITHUB_WORKFLOW: 'Other' },
+    { ...GOVERNED_ENV, GITHUB_REF: 'refs/heads/feature' },
+  ]) {
+    const sim = simulatedProduction();
+    const { evidence } = await runMain(APPLY, { run: sim.run, env, captureBookmark: async () => BOOKMARK_1 });
+    assert.equal(evidence.status, 'blocked');
+    assert.ok(evidence.blockers.some((item) => item.id === 'apply_outside_governed_workflow'));
+    assert.equal(sim.calls.some((key) => key.includes('migrations apply')), false);
+  }
+  // Observe is read-only and runs anywhere.
+  const { evidence } = await runMain(['--environment', 'production'], { run: simulatedProduction().run, env: {} });
+  assert.equal(evidence.status, 'ready');
+});
+
+test('runtime or migration changes after the checkpoint stop the apply', async () => {
+  const moved = simulatedProduction({
+    safetyReads: [safety(), safety({ runtimeHead: { generation: 4, revision_digest: 'd'.repeat(64) } })],
+  });
+  const runtime = await runMain(APPLY, { run: moved.run, captureBookmark: async () => BOOKMARK_1 });
+  assert.ok(runtime.evidence.blockers.some((item) => item.id === 'publication_state_changed_before_apply'));
+  assert.equal(moved.calls.some((key) => key.includes('migrations apply')), false);
+
+  const raced = simulatedProduction();
+  const concurrent = await runMain(APPLY, {
+    run: raced.run,
+    captureBookmark: async () => {
+      // Another apply records 0015 between our checkpoint and fresh read.
+      raced.db.prepare("INSERT INTO d1_migrations (name, applied_at) VALUES ('0015_mutation_control_plane.sql', 'x')").run();
+      return BOOKMARK_1;
+    },
+  });
+  assert.ok(concurrent.evidence.blockers.some((item) => item.id === 'migration_state_changed_before_apply'));
+  assert.equal(raced.calls.some((key) => key.includes('migrations apply')), false);
+});
+
+test('publication activity during the apply is reported, not hidden behind "applied"', async () => {
+  const sim = simulatedProduction({ safetyReads: [safety(), safety(), safety({ eventCursor: 65, leaseGeneration: 33 })] });
+  const bookmarks = [BOOKMARK_1, BOOKMARK_2];
+  const { evidence } = await runMain(APPLY, { run: sim.run, captureBookmark: async () => bookmarks.shift() });
+  assert.equal(evidence.status, 'requires_reconciliation');
+  assert.equal(evidence.readback.schema.identical, true, 'the schema itself is reported as exact');
+  assert.equal(evidence.readback.publicationQuiet, false);
+  assert.ok(evidence.blockers.some((item) => item.id === 'publication_activity_during_apply'));
+});
+
+test('each failed proof is named on its own, with its cause', async () => {
+  const noPost = simulatedProduction();
+  const bookmarks = [BOOKMARK_1];
+  const { evidence } = await runMain(APPLY, {
+    run: noPost.run,
+    captureBookmark: async () => {
+      if (bookmarks.length === 0) throw new Error('Time Travel HTTP 503');
+      return bookmarks.shift();
+    },
+  });
+  assert.equal(evidence.status, 'requires_reconciliation');
+  assert.equal(evidence.readback.schema.identical, true);
+  assert.equal(evidence.readback.migrationsExact, true);
+  assert.deepEqual(evidence.blockers.map((item) => item.id), ['readback_unavailable']);
+  assert.match(evidence.blockers[0].detail, /^postCheckpoint: Time Travel HTTP 503$/);
+
+  // An unchanged bookmark cannot follow an apply that wrote.
+  const same = await runMain(APPLY, { run: simulatedProduction().run, captureBookmark: async () => BOOKMARK_1 });
+  assert.deepEqual(same.evidence.blockers.map((item) => item.id), ['checkpoint_not_before_apply']);
+});
+
+test('drift with names that LIKE wildcards would hide is still detected', async () => {
+  const sim = simulatedProduction({ drift: 'CREATE TABLE xcf_scratch (x INTEGER)' });
+  const { evidence } = await runMain(['--environment', 'production'], { run: sim.run });
+  assert.equal(evidence.status, 'blocked');
+  assert.ok(evidence.compatibility.unexpected.includes('table:xcf_scratch'));
+});
+
+test('the next-due read includes overdue scheduled assignments', () => {
+  const statement = PUBLICATION_SAFETY_SQL.split(';').map((part) => part.trim()).find((part) => part.includes('next_due'));
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE queue_assignments (status TEXT, lifecycle_state TEXT, resolved_at TEXT)');
+    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'scheduled', '2000-01-01T00:00:00.000Z');
+    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'scheduled', '2999-01-01T00:00:00.000Z');
+    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'deferred', '1999-01-01T00:00:00.000Z');
+    assert.equal(db.prepare(statement).get().next_due, '2000-01-01T00:00:00.000Z');
+  } finally {
+    db.close();
+  }
 });

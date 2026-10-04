@@ -2,8 +2,13 @@ name: Production Mutation Schema
 
 # Governed path for #145 stage B. Observe is read-only. Apply changes the
 # production D1 schema (0015-0017 only), so it runs only on main, only when
-# dispatched with the exact confirmation, and only after the script's gates,
+# dispatched with the exact confirmation, only in the protected
+# production-mutation-schema environment, and only after the script's gates,
 # recovery checkpoint, and fresh re-read pass.
+#
+# The credential is MUTATION_D1_API_TOKEN (D1 + Time Travel, no Workers
+# scripts access; the script refuses a token that can reach Workers scripts).
+# It is given only to the step that runs the script.
 on:
   workflow_dispatch:
     inputs:
@@ -16,7 +21,7 @@ on:
           - observe
           - apply
       confirm:
-        description: 'Required for apply: xqueue-production-mutation-schema'
+        description: 'Required for apply: the schema confirmation phrase'
         required: false
         type: string
 
@@ -27,16 +32,14 @@ concurrency:
   group: xqueue-production-mutation
   cancel-in-progress: false
 
+env:
+  EVIDENCE_DIR: /tmp/xqueue-production-mutation-schema
+
 jobs:
-  schema:
-    if: github.ref == 'refs/heads/main'
+  observe:
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'observe'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-
-    env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      EVIDENCE_DIR: /tmp/xqueue-production-mutation-schema
 
     steps:
       - name: Checkout exact main
@@ -70,12 +73,61 @@ jobs:
             test/publication-mutation-mutex.test.mjs
 
       - name: Observe production mutation schema (read-only)
-        if: inputs.mode == 'observe'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MUTATION_D1_API_TOKEN }}
         run: pnpm production:mutation-schema --environment production --output "$EVIDENCE_DIR"
 
-      - name: Apply production mutation schema
-        if: inputs.mode == 'apply'
+      - name: Upload schema evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: xqueue-production-mutation-schema-observe-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-production-mutation-schema/*.json
+          if-no-files-found: warn
+
+  apply:
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'apply'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Required reviewers on this environment are the owner approval gate.
+    environment: production-mutation-schema
+
+    steps:
+      - name: Checkout exact main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require the dispatched commit to still be main
         env:
+          DISPATCHED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove the schema path and migration lanes locally
+        run: |
+          node --test \
+            test/production-mutation-schema.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/publication-mutation-mutex.test.mjs
+
+      - name: Apply production mutation schema
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MUTATION_D1_API_TOKEN }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
           pnpm production:mutation-schema --environment production \
@@ -85,6 +137,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: xqueue-production-mutation-schema-${{ inputs.mode }}-${{ github.sha }}-${{ github.run_id }}
-          path: /tmp/xqueue-production-mutation-schema/production-mutation-schema-evidence.json
+          name: xqueue-production-mutation-schema-apply-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/xqueue-production-mutation-schema/*.json
           if-no-files-found: warn

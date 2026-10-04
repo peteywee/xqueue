@@ -476,7 +476,7 @@ async function defaultProbeTimeTravel({ token, accountId, databaseId }) {
 // Least-privilege probe (read-only): a D1 + Time Travel token cannot list the
 // account's Workers scripts. If it can, it has Workers access the mutation
 // plane must not hold, since that is what redeploys the publisher.
-async function defaultProbeWorkersAccess({ token, accountId, fetchImpl = boundedFetch() }) {
+export async function defaultProbeWorkersAccess({ token, accountId, fetchImpl = boundedFetch() }) {
   const response = await fetchImpl(
     'https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/scripts',
     { method: 'GET', headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } },
