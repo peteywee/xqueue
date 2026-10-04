@@ -181,7 +181,8 @@ export function evaluateProductionMutationPreflight({
     if (activeLeaseCount !== 0) {
       blockers.push(blocker(
         'active_publication_lease',
-        'An unexpired publication lease is active.',
+        'A publication lease is held (an expired lease retained after partial ' +
+          'missed-slot deferral still excludes mutation).',
       ));
     }
   }
