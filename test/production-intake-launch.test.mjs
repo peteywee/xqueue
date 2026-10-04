@@ -167,6 +167,7 @@ function launch(overrides = {}) {
     healthDeadlineMs: 2_000,
     intakeTimeoutMs: 2_000,
     processImpl: fakeProcess(),
+    identityRetryDelayMs: 10,
     ...overrides,
   });
 }
@@ -1220,6 +1221,55 @@ test('only committed triggers may act on mutation-owned tables', () => {
   // Shared publication tables carry triggers from their own migrations.
   const shared = { name: 'publication_leases_owner_guard', tbl_name: 'publication_leases', sql: 'CREATE TRIGGER publication_leases_owner_guard BEFORE UPDATE ON publication_leases BEGIN SELECT 1; END' };
   assert.deepEqual(mutationTriggerDrift([...stored, shared]), []);
+  // sqlite_master keeps identifiers as written; SQLite resolves them case-insensitively.
+  const shouting = { name: 'lane_auto_release', tbl_name: 'MUTATION_LANE_STATE', sql: 'CREATE TRIGGER lane_auto_release AFTER UPDATE ON MUTATION_LANE_STATE BEGIN SELECT 1; END' };
+  assert.deepEqual(mutationTriggerDrift([...stored, shouting]), ['lane_auto_release']);
+  // The table alone is enough, even if the body text were unavailable.
+  assert.deepEqual(
+    mutationTriggerDrift([...stored, { name: 'lane_auto_release', tbl_name: 'MUTATION_LANE_STATE', sql: null }]),
+    ['lane_auto_release'],
+  );
+  // A trigger on a shared table that writes a mutation table is also drift.
+  const writer = { name: 'lease_releases_lane', tbl_name: 'publication_leases', sql: 'CREATE TRIGGER lease_releases_lane AFTER UPDATE ON publication_leases BEGIN UPDATE "Mutation_Lane_State" SET active_operation_id = NULL; END' };
+  assert.deepEqual(mutationTriggerDrift([...stored, writer]), ['lease_releases_lane']);
+  // The committed 0017 guards on shared tables name the lane and are not drift.
+  assert.ok(stored.some((row) => row.name === 'publication_lease_mutation_lane_insert_guard'));
+});
+
+test('a non-JSON identity answer is final, and identity retries stop once wrangler exits', async () => {
+  const html = fakeChild();
+  let identityCalls = 0;
+  await assert.rejects(launch({
+    spawnImpl: html.spawnImpl,
+    fetchImpl: serveWorker(html.calls, {
+      identity: async () => {
+        identityCalls += 1;
+        return { ok: true, status: 200, async json() { throw new SyntaxError('Unexpected token <'); } };
+      },
+    }),
+  }), /answered the identity challenge without JSON \(HTTP 200: Unexpected token <\)/);
+  assert.equal(identityCalls, 1);
+
+  const dying = fakeChild();
+  let attempts = 0;
+  await assert.rejects(launch({
+    spawnImpl: dying.spawnImpl,
+    fetchImpl: serveWorker(dying.calls, {
+      identity: async () => {
+        attempts += 1;
+        dying.calls.spawn.child.emit('exit', 1, null);
+        throw new TypeError('fetch failed');
+      },
+    }),
+  }), /exited before answering the identity challenge/);
+  assert.equal(attempts, 1);
+
+  // A proxy error status is retried, and the final message keeps the cause.
+  const proxied = fakeChild();
+  await assert.rejects(launch({
+    spawnImpl: proxied.spawnImpl,
+    fetchImpl: serveWorker(proxied.calls, { identity: async () => jsonResponse({ error: 'bad gateway' }, 502) }),
+  }), /did not answer the identity challenge \(HTTP 502\)/);
 });
 
 test('no other production migration redefines a required trigger or adds one to a mutation table', () => {
@@ -1230,14 +1280,14 @@ test('no other production migration redefines a required trigger or adds one to 
     const text = readFileSync(path.join(dir, name), 'utf8');
     for (const match of text.matchAll(/\b(?:CREATE|DROP)\s+TRIGGER\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z_]\w*)/gi)) {
       assert.equal(
-        REQUIRED_MUTATION_TRIGGERS.includes(match[1]), false,
+        REQUIRED_MUTATION_TRIGGERS.map((item) => item.toLowerCase()).includes(match[1].toLowerCase()), false,
         name + ' redefines ' + match[1] + '; add it to REQUIRED_MUTATION_MIGRATIONS so readiness compares the final body',
       );
     }
-    for (const match of text.matchAll(/\bON\s+([A-Za-z_]\w*)/gi)) {
+    for (const table of MUTATION_OWNED_TABLES) {
       assert.equal(
-        MUTATION_OWNED_TABLES.includes(match[1]), false,
-        name + ' touches mutation table ' + match[1] + '; add it to REQUIRED_MUTATION_MIGRATIONS',
+        new RegExp('\\b' + table + '\\b', 'i').test(text), false,
+        name + ' touches mutation table ' + table + '; add it to REQUIRED_MUTATION_MIGRATIONS',
       );
     }
   }

@@ -536,24 +536,28 @@ test('request replay still requires exact-main production preflight', async () =
       originMainSha: '1'.repeat(40),
     },
   });
-  // Blocked before any effect: a clean pre-dispatch conflict.
-  for (const effectState of ['none']) {
-    await assert.rejects(
-      () => runProductionIntakeRequest(
-        env(fakeDb({ replay: true })),
-        dirty,
-        deps({ replayOperation: { ...existingOperation(), effect_state: effectState } }),
-      ),
-      (error) =>
-        error?.faultClass === 'PRE_DISPATCH_STATE_CONFLICT' &&
-        error?.httpStatus === 409 &&
-        error?.requiresReadback !== true &&
-        /candidate_dirty/.test(error.message),
-      effectState,
-    );
-  }
+  // A never-dispatched operation is not resumable, which is reported first.
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      dirty,
+      deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } }),
+    ),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.httpStatus === 409 &&
+      error?.retryable !== true,
+  );
   // Blocked after the operation may have reached production: read back first.
-  for (const effectState of ['applied', 'dispatched', 'not_applied', 'ambiguous', 'unrecognized']) {
+  // An applied operation reaches the preflight; every other past-dispatch
+  // state already stops at the resumability check.
+  for (const [effectState, reason] of [
+    ['applied', /candidate_dirty/],
+    ['dispatched', /not in an exact recoverable applied state/],
+    ['not_applied', /not in an exact recoverable applied state/],
+    ['ambiguous', /not in an exact recoverable applied state/],
+    ['unrecognized', /not in an exact recoverable applied state/],
+  ]) {
     await assert.rejects(
       () => runProductionIntakeRequest(
         env(fakeDb({ replay: true })),
@@ -565,7 +569,7 @@ test('request replay still requires exact-main production preflight', async () =
         error?.httpStatus === 409 &&
         error?.requiresReadback === true &&
         error?.retryable === false &&
-        /candidate_dirty/.test(error.message),
+        reason.test(error.message),
       effectState,
     );
   }
@@ -802,44 +806,58 @@ test('a past-dispatch replay that does not complete exactly always requires read
 });
 
 test('every way a past-dispatch replay can stop requires readback, applied once', async () => {
-  const stops = {
-    'safety read outage': (d) => {
-      const create = d.createTransport;
-      d.createTransport = (args) => ({
-        ...create(args),
-        async readPublicationSafety() { throw new Error('D1 temporarily unavailable'); },
-      });
-    },
-    'post-commit verification failure': (d) => {
-      const verify = d.verifyRuntime;
-      d.verifyRuntime = async (envValue, options) => {
-        if (options.includeSnapshot === false) throw new Error('network timeout after commit');
-        return verify(envValue, options);
-      };
+  const outage = (d) => {
+    const create = d.createTransport;
+    d.createTransport = (args) => ({
+      ...create(args),
+      async readPublicationSafety() { throw new Error('D1 temporarily unavailable'); },
+    });
+  };
+  // Each of these stops is raised as a pre-dispatch fault or a raw error inside
+  // the replay; the single wrapper turns it into readback.
+  const appliedStops = {
+    'safety read outage': (d) => outage(d),
+    'resume throws': (d) => { d.resumeMutation = async () => { throw new Error('socket hang up'); }; },
+    'resume reports a pre-dispatch-looking block': (d) => {
+      d.resumeMutation = async () => ({ status: 'blocked', phase: 'preflight_read', decision: { outcome: 'AUTO_RETRY' } });
     },
   };
-  for (const [name, breakIt] of Object.entries(stops)) {
-    for (const effectState of ['applied', 'dispatched']) {
-      const d = deps({ replayOperation: { ...existingOperation(), effect_state: effectState } });
-      breakIt(d);
-      await assert.rejects(
-        () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
-        (error) => {
-          if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
-          assert.equal(error.requiresReadback, true);
-          assert.equal(error.retryable, false);
-          return true;
-        },
-        name + ' / ' + effectState,
-      );
-    }
+  for (const [name, breakIt] of Object.entries(appliedStops)) {
+    const d = deps({ replayOperation: existingOperation() });
+    breakIt(d);
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
+      (error) => {
+        if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+        assert.equal(error.requiresReadback, true);
+        assert.equal(error.retryable, false);
+        return true;
+      },
+      name,
+    );
   }
-  // Before dispatch the same outage stays a retryable pre-dispatch stop.
-  const d = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
-  stops['safety read outage'](d);
+
+  // A dispatched operation stops at the resumability check, also as readback,
+  // even when the safety read would also have failed.
+  const dispatched = deps({ replayOperation: { ...existingOperation(), effect_state: 'dispatched' } });
+  outage(dispatched);
   await assert.rejects(
-    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
-    (error) => error?.faultClass === 'PRE_DISPATCH_STATE_UNAVAILABLE' && error?.retryable === true,
+    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), dispatched),
+    (error) =>
+      error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+      error?.requiresReadback === true &&
+      /not in an exact recoverable applied state/.test(error.message),
+  );
+
+  // A never-dispatched operation is never advertised as a retryable outage:
+  // it is not resumable, and that is reported first.
+  const none = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
+  outage(none);
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), none),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.retryable !== true,
   );
 });
 

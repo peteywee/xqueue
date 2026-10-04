@@ -745,6 +745,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   };
 
   let call;
+  const stderrWrites = [];
   const result = await main(
     [
       '--environment', 'production',
@@ -757,6 +758,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
       d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
+      writeStderr: (text) => stderrWrites.push(text),
       invokeWorker: async (args) => {
         call = args;
         const planned = planIntakeIdentity(args.payload);
@@ -781,15 +783,9 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
 
   // An interruption after dispatch tells the operator to read back, with the
   // planned identity that readback needs.
-  const lines = [];
-  const original = console.error;
-  console.error = (line) => lines.push(String(line));
-  try {
-    call.onInterruptedAfterDispatch('SIGTERM');
-  } finally {
-    console.error = original;
-  }
-  const printed = lines.join('\n');
+  call.onInterruptedAfterDispatch('SIGTERM');
+  assert.equal(stderrWrites.length, 1, 'the report is one synchronous write');
+  const printed = stderrWrites[0];
   assert.match(printed, /INTERRUPTED AFTER DISPATCH \(SIGTERM\)/);
   assert.match(printed, /^readback_required=1$/m);
   assert.ok(printed.includes(result.planned.operationId), 'planned operation id is printed');
@@ -797,15 +793,10 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   // With a definitive answer in hand, the answer is reported and readback is
   // asked for only when the answer needs it.
   const report = (answer) => {
-    const out = [];
-    const saved = console.error;
-    console.error = (line) => out.push(String(line));
-    try {
-      call.onInterruptedAfterDispatch('SIGINT', answer);
-    } finally {
-      console.error = saved;
-    }
-    return out.join('\n');
+    stderrWrites.length = 0;
+    call.onInterruptedAfterDispatch('SIGINT', answer);
+    assert.equal(stderrWrites.length, 1);
+    return stderrWrites[0];
   };
   const matching = { operationId: result.planned.operationId, contentIds: result.planned.contentIds, contentDigests: result.planned.contentDigests };
   const clean = report({ httpStatus: 200, ok: true, body: { status: 'ok', requiresReadback: false, planned: matching } });

@@ -699,9 +699,36 @@ function json(value, init = {}) {
   return new Response(JSON.stringify(value, null, 2), { ...init, headers });
 }
 
-// Replays an operation that already exists. Faults here are raised as for a
-// pre-dispatch stop; the caller turns every one of them into readback when the
-// operation is past dispatch.
+// The operation identity the CLI checks against its offline plan, built once
+// for both the fresh and the replay paths.
+function plannedIdentity(operationId, intakePlan) {
+  return Object.freeze({
+    operationId,
+    intakeOperationId: intakePlan.operation_id,
+    itemCount: intakePlan.items.length,
+    contentIds: Object.freeze(intakePlan.items.map((item) => item.content_id)),
+    contentDigests: Object.freeze(intakePlan.items.map((item) => item.content_digest)),
+  });
+}
+
+function committedEvidence(verified) {
+  return {
+    committedRuntimeRevision: Object.freeze({
+      generation: Number(verified.committedRuntime.generation),
+      revisionDigest: verified.committedRuntime.revision_digest,
+      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
+      sourceOperationId: verified.committedRuntime.source_operation_id,
+    }),
+    after: Object.freeze({
+      generation: verified.after.generation,
+      revisionDigest: verified.after.revisionDigest,
+    }),
+  };
+}
+
+// Replays an operation that already exists. Only an applied operation is
+// resumable, and that is checked first. Every stop is raised as a fault; the
+// caller turns each into readback when the operation is past dispatch.
 async function replayExistingOperation({
   env,
   db,
@@ -712,11 +739,14 @@ async function replayExistingOperation({
   normalized,
   operationId,
   existingOperation,
-  pastDispatch,
   recordedAt,
   verifyRuntime,
   resumeMutation,
 }) {
+  // Read-only. A non-resumable operation stops here, before any safety read or
+  // preflight could advertise it as retryable or fixable.
+  const replay = await loadReplayState(db, normalized, existingOperation);
+
   let replaySafety;
   try {
     replaySafety = await transport.readPublicationSafety();
@@ -743,10 +773,6 @@ async function replayExistingOperation({
     );
   }
 
-  // Read-only, and it decides whether the operation is resumable at all, so a
-  // non-resumable operation is never advertised as a retryable replan.
-  const replay = await loadReplayState(db, normalized, existingOperation);
-
   const replayAuthorityMismatch = publicationAuthorityMismatch(
     replayPreflight.observed.publicationAuthority,
     expectedPublicationAuthority,
@@ -767,34 +793,15 @@ async function replayExistingOperation({
     recordedAt,
   });
 
-  const planned = Object.freeze({
-    operationId,
-    intakeOperationId: replay.intakePlan.operation_id,
-    itemCount: replay.intakePlan.items.length,
-    contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
-    contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
-  });
-
   if (!['applied', 'already_applied'].includes(mutation?.status)) {
-    if (pastDispatch) {
-      throw productionFault(
-        'POST_DISPATCH_READBACK_AMBIGUOUS',
-        'production ' + existingOperation.effect_state +
-          '-operation resume did not produce exact completion (status ' +
-          String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
-          String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
-        { httpStatus: 409, requiresReadback: true },
-      );
-    }
-    return Object.freeze({
-      ok: false,
-      publicationCapable: false,
-      schedulerAuthority: false,
-      replay: true,
-      productionPreflight: replayPreflight,
-      planned,
-      mutation,
-    });
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production ' + existingOperation.effect_state +
+        '-operation resume did not produce exact completion (status ' +
+        String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
+        String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
+      { httpStatus: 409, requiresReadback: true },
+    );
   }
 
   const verified = await verifyCommittedResult({
@@ -814,18 +821,9 @@ async function replayExistingOperation({
     recoveryCheckpointCaptured:
       typeof existingOperation.checkpoint_bookmark === 'string' &&
       existingOperation.checkpoint_bookmark.length >= 8,
-    planned,
+    planned: plannedIdentity(operationId, replay.intakePlan),
     mutation,
-    committedRuntimeRevision: Object.freeze({
-      generation: Number(verified.committedRuntime.generation),
-      revisionDigest: verified.committedRuntime.revision_digest,
-      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
-      sourceOperationId: verified.committedRuntime.source_operation_id,
-    }),
-    after: Object.freeze({
-      generation: verified.after.generation,
-      revisionDigest: verified.after.revisionDigest,
-    }),
+    ...committedEvidence(verified),
   });
 }
 
@@ -998,7 +996,6 @@ export async function runProductionIntakeRequest(
         normalized,
         operationId,
         existingOperation,
-        pastDispatch,
         recordedAt,
         verifyRuntime,
         resumeMutation,
@@ -1165,13 +1162,7 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const planned = Object.freeze({
-    operationId: controlPlan.operation_id,
-    intakeOperationId: intakePlan.operation_id,
-    itemCount: intakePlan.items.length,
-    contentIds: Object.freeze(intakePlan.items.map((item) => item.content_id)),
-    contentDigests: Object.freeze(intakePlan.items.map((item) => item.content_digest)),
-  });
+  const planned = plannedIdentity(controlPlan.operation_id, intakePlan);
 
   if (!['applied', 'already_applied'].includes(mutation?.status)) {
     return Object.freeze({
@@ -1201,19 +1192,10 @@ export async function runProductionIntakeRequest(
     planned,
     mutation,
     productionPreflight: mutation.production_preflight ?? null,
-    committedRuntimeRevision: Object.freeze({
-      generation: Number(verified.committedRuntime.generation),
-      revisionDigest: verified.committedRuntime.revision_digest,
-      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
-      sourceOperationId: verified.committedRuntime.source_operation_id,
-    }),
+    ...committedEvidence(verified),
     before: Object.freeze({
       generation: before.generation,
       revisionDigest: before.revisionDigest,
-    }),
-    after: Object.freeze({
-      generation: verified.after.generation,
-      revisionDigest: verified.after.revisionDigest,
     }),
   });
 }

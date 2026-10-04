@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -47,16 +47,22 @@ export const REQUIRED_MUTATION_TRIGGERS = Object.freeze(
   Object.keys(REQUIRED_MUTATION_TRIGGER_SQL).sort(),
 );
 
-// Tables these migrations create. Only the committed triggers may act on them;
-// shared publication tables also carry triggers from their own migrations.
+// Tables these migrations create. Only the committed triggers may act on them
+// or write them; shared publication tables also carry triggers from their own
+// migrations. SQLite identifiers are case-insensitive and sqlite_master keeps
+// them as written, so names are compared in lower case.
 export const MUTATION_OWNED_TABLES = Object.freeze(
   REQUIRED_MUTATION_MIGRATION_TEXT.flatMap((text) =>
     [...text.matchAll(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gm)].map((match) => match[1]),
   ).sort(),
 );
+const OWNED_TABLES_LOWER = new Set(MUTATION_OWNED_TABLES.map((name) => name.toLowerCase()));
+const OWNED_TABLE_MENTION_RE = new RegExp('\\b(?:' + MUTATION_OWNED_TABLES.join('|') + ')\\b', 'i');
+const REQUIRED_TRIGGERS_LOWER = new Set(Object.keys(REQUIRED_MUTATION_TRIGGER_SQL).map((name) => name.toLowerCase()));
 
 // Trigger names whose applied body is missing or differs from the committed
-// one, plus any uncommitted trigger on a mutation-owned table.
+// one, plus any uncommitted trigger that is on, or whose body names, a
+// mutation-owned table.
 export function mutationTriggerDrift(applied) {
   const rows = Array.isArray(applied) ? applied : [];
   const bodies = new Map(rows.map((row) => [row?.name, row?.sql]));
@@ -64,8 +70,11 @@ export function mutationTriggerDrift(applied) {
     !bodies.has(name) ||
     normalizeTriggerSql(bodies.get(name)) !== REQUIRED_MUTATION_TRIGGER_SQL[name]);
   const extra = rows
-    .filter((row) => MUTATION_OWNED_TABLES.includes(row?.tbl_name) &&
-      !Object.hasOwn(REQUIRED_MUTATION_TRIGGER_SQL, row?.name))
+    .filter((row) =>
+      !REQUIRED_TRIGGERS_LOWER.has(String(row?.name ?? '').toLowerCase()) && (
+        OWNED_TABLES_LOWER.has(String(row?.tbl_name ?? '').toLowerCase()) ||
+        OWNED_TABLE_MENTION_RE.test(String(row?.sql ?? ''))
+      ))
     .map((row) => String(row.name))
     .sort();
   return [...drifted, ...extra];
@@ -850,48 +859,65 @@ async function waitForHealth(url, fetchImpl, state, deadlineMs = HEALTH_DEADLINE
 // Proves, before the control token or payload is sent, that the listener holds
 // this launch's control token and bound exactly the committed descriptor. Each
 // attempt uses a fresh challenge, so a stale or squatting listener cannot
-// answer. Only transport failures are retried; a Worker refusal or a wrong
-// proof is final.
+// answer. Only a failed request or a non-Worker error status is retried; a
+// Worker refusal, a non-JSON answer or a wrong proof is final.
 export async function verifyWorkerIdentity(
   url,
   fetchImpl,
   controlToken,
   expected,
-  { attempts = 3, retryDelayMs = 500 } = {},
+  { attempts = 3, retryDelayMs = 500, isExited = () => false } = {},
 ) {
   let lastProblem = 'no answer';
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (isExited()) {
+      throw new Error('ephemeral production mutation Worker exited before answering the identity challenge');
+    }
     const challenge = randomBytes(32).toString('hex');
     let response = null;
-    let body = null;
     try {
       response = await fetchImpl(url + '/identity?challenge=' + challenge, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
       });
-      body = await response.json();
     } catch (error) {
       lastProblem = error instanceof Error ? error.message : String(error);
     }
-    if (response && !response.ok && body?.service === MUTATION_WORKER_SERVICE) {
-      fail(
-        'the ephemeral Worker refused the identity challenge: ' + String(body.faultClass ?? 'HTTP ' + response.status) +
-        (body.faultClass === 'CONTROL_TOKEN_UNAVAILABLE' ? ' (wrangler did not bind MUTATION_CONTROL_TOKEN)' : ''),
-      );
-    }
-    if (response?.ok && body) {
-      if (body.challenge !== challenge || typeof body.challengeResponse !== 'string') {
-        fail('the listener on the intake port did not answer the identity challenge');
+    if (response) {
+      let body = null;
+      let parseProblem = null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        parseProblem = error instanceof Error ? error.message : String(error);
       }
-      const proof = Buffer.from(await identityProof(controlToken, challenge, body.bindings ?? null), 'utf8');
-      const answer = Buffer.from(body.challengeResponse, 'utf8');
-      if (proof.length !== answer.length || !timingSafeEqual(proof, answer)) {
-        fail('the listener on the intake port does not hold this launch\'s control token');
+      if (!response.ok && body?.service === MUTATION_WORKER_SERVICE) {
+        fail(
+          'the ephemeral Worker refused the identity challenge: ' +
+          String(body.faultClass ?? 'HTTP ' + response.status) +
+          (body.faultClass === 'CONTROL_TOKEN_UNAVAILABLE' ? ' (wrangler did not bind MUTATION_CONTROL_TOKEN)' : ''),
+        );
       }
-      assertHealthIdentity(body, expected);
-      return body;
+      if (response.ok) {
+        if (!body || typeof body !== 'object') {
+          fail(
+            'the listener on the intake port answered the identity challenge without JSON (HTTP ' +
+            response.status + (parseProblem ? ': ' + parseProblem : '') + ')',
+          );
+        }
+        if (body.challenge !== challenge || typeof body.challengeResponse !== 'string') {
+          fail('the listener on the intake port did not answer the identity challenge');
+        }
+        const proof = Buffer.from(await identityProof(controlToken, challenge, body.bindings ?? null), 'utf8');
+        const answer = Buffer.from(body.challengeResponse, 'utf8');
+        if (proof.length !== answer.length || !timingSafeEqual(proof, answer)) {
+          fail('the listener on the intake port does not hold this launch\'s control token');
+        }
+        assertHealthIdentity(body, expected);
+        return body;
+      }
+      lastProblem = 'HTTP ' + response.status + (parseProblem ? ' (' + parseProblem + ')' : '');
     }
-    if (response) lastProblem = 'HTTP ' + response.status;
     if (attempt < attempts) await sleep(retryDelayMs);
   }
   fail('the listener on the intake port did not answer the identity challenge (' + lastProblem + ')');
@@ -931,6 +957,7 @@ export async function invokeEphemeralWorker({
   intakeTimeoutMs = INTAKE_REQUEST_TIMEOUT_MS,
   processImpl = process,
   onInterruptedAfterDispatch = () => {},
+  identityRetryDelayMs = 500,
 }) {
   if (typeof fetchImpl !== 'function') fail('fetch support is required');
   const descriptor = readDescriptor(descriptorPath);
@@ -1044,7 +1071,10 @@ export async function invokeEphemeralWorker({
       throw withOutput(state.spawnError ?? error);
     }
     try {
-      await verifyWorkerIdentity(baseUrl, fetchImpl, controlToken, expected);
+      await verifyWorkerIdentity(baseUrl, fetchImpl, controlToken, expected, {
+        retryDelayMs: identityRetryDelayMs,
+        isExited: () => state.exited,
+      });
     } catch (error) {
       throw withOutput(error);
     }
@@ -1169,6 +1199,9 @@ export async function main(
     readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8')),
     env = process.env,
     d1TokenReadiness = collectD1TokenReadiness,
+    // The interrupt report runs just before the process re-raises the signal,
+    // so it is written synchronously; console output to a pipe can be async.
+    writeStderr = (text) => writeSync(2, text),
   } = {},
 ) {
   const options = parseArgs(argv);
@@ -1251,28 +1284,30 @@ export async function main(
       port: options.port,
       env,
       onInterruptedAfterDispatch: (signal, answer) => {
+        const lines = [];
         if (!answer) {
-          console.error('XQUEUE PRODUCTION INTAKE: INTERRUPTED AFTER DISPATCH (' + signal + ')');
-          console.error('readback_required=1');
-          console.error(JSON.stringify({ planned }, null, 2));
-          return;
-        }
-        console.error(
-          'XQUEUE PRODUCTION INTAKE: INTERRUPTED DURING TEARDOWN (' + signal +
-          '); the Worker answered HTTP ' + answer.httpStatus,
-        );
-        let identityMatches = true;
-        if (answer.ok) {
-          try {
-            assertObservedIdentity(planned, answer.body?.planned);
-          } catch {
-            identityMatches = false;
+          lines.push('XQUEUE PRODUCTION INTAKE: INTERRUPTED AFTER DISPATCH (' + signal + ')');
+          lines.push('readback_required=1');
+          lines.push(JSON.stringify({ planned }, null, 2));
+        } else {
+          lines.push(
+            'XQUEUE PRODUCTION INTAKE: INTERRUPTED DURING TEARDOWN (' + signal +
+            '); the Worker answered HTTP ' + answer.httpStatus,
+          );
+          let identityMatches = true;
+          if (answer.ok) {
+            try {
+              assertObservedIdentity(planned, answer.body?.planned);
+            } catch {
+              identityMatches = false;
+            }
           }
+          if (answer.body?.requiresReadback === true || !identityMatches) {
+            lines.push('readback_required=1');
+          }
+          lines.push(JSON.stringify({ planned, response: answer.body }, null, 2));
         }
-        if (answer.body?.requiresReadback === true || !identityMatches) {
-          console.error('readback_required=1');
-        }
-        console.error(JSON.stringify({ planned, response: answer.body }, null, 2));
+        writeStderr(lines.join('\n') + '\n');
       },
     });
     assertObservedIdentity(planned, result?.planned);
