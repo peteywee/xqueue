@@ -721,7 +721,7 @@ test('drift with names that LIKE wildcards would hide is still detected', async 
   assert.ok(evidence.compatibility.unexpected.includes('table:xcf_scratch'));
 });
 
-test('the next-due read is exactly what an unhalted publisher would act on', () => {
+test('the next-due read covers every slot an unhalted publisher may take its lease for', () => {
   const statement = PUBLICATION_SAFETY_SQL.split(';').map((part) => part.trim()).find((part) => part.includes('next_due'));
   const db = new DatabaseSync(':memory:');
   try {
@@ -733,14 +733,16 @@ test('the next-due read is exactly what an unhalted publisher would act on', () 
     };
     add('posted', 'active', 'scheduled', '1990-01-01T00:00:00.000Z', 'posted');
     add('skipped', 'active', 'scheduled', '1991-01-01T00:00:00.000Z', 'skipped');
-    add('orphan', 'active', 'scheduled', '1992-01-01T00:00:00.000Z', null);
     add('deferred', 'active', 'deferred', '1993-01-01T00:00:00.000Z', 'scheduled');
     add('superseded', 'superseded', 'scheduled', '1994-01-01T00:00:00.000Z', 'scheduled');
     add('overdue', 'active', 'scheduled', '2000-01-01T00:00:00.000Z', 'scheduled');
     add('future', 'active', 'scheduled', '2999-01-01T00:00:00.000Z', 'scheduled');
     assert.equal(db.prepare(statement).get().next_due, '2000-01-01T00:00:00.000Z');
-    db.exec("DELETE FROM queue_assignments WHERE content_id IN ('overdue','future')");
-    assert.equal(db.prepare(statement).get().next_due, null, 'resolved and protected slots never block');
+    // No publication_state row: the publisher still takes its lease for it.
+    add('orphan', 'active', 'scheduled', '1992-01-01T00:00:00.000Z', null);
+    assert.equal(db.prepare(statement).get().next_due, '1992-01-01T00:00:00.000Z');
+    db.exec("DELETE FROM queue_assignments WHERE content_id IN ('overdue','future','orphan')");
+    assert.equal(db.prepare(statement).get().next_due, null, 'resolved slots never block');
   } finally {
     db.close();
   }

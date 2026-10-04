@@ -310,13 +310,14 @@ export const PUBLICATION_SAFETY_SQL = [
   'SELECT COALESCE(MAX(id),0) AS event_cursor FROM publication_events;',
   "SELECT json_extract(value,'$.inflight') AS inflight FROM runtime_metadata WHERE key='state.snapshot_json';",
   'SELECT generation,revision_digest FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 1;',
-  // Exactly the assignments an unhalted publisher acts on, overdue included
-  // (it defers them at its next tick): active, scheduled, and still
-  // publication_state 'scheduled'. Posted and skipped slots stay scheduled in
-  // queue_assignments but are resolved; a missing publication_state is
-  // protected (src/d1-deferred-lifecycle.mjs classifyMissedAssignment).
-  "SELECT MIN(a.resolved_at) AS next_due FROM queue_assignments a JOIN publication_state p ON p.post_id=a.content_id " +
-    "WHERE a.status='active' AND a.lifecycle_state='scheduled' AND p.status='scheduled';",
+  // Every assignment an unhalted publisher may take its lease for, overdue
+  // included (it defers them at its next tick): active and scheduled, unless
+  // publication_state already resolved it (posted and skipped slots stay
+  // scheduled in queue_assignments). An assignment with no publication_state
+  // row still takes the lease before it is classified as protected, so it
+  // counts.
+  "SELECT MIN(a.resolved_at) AS next_due FROM queue_assignments a LEFT JOIN publication_state p ON p.post_id=a.content_id " +
+    "WHERE a.status='active' AND a.lifecycle_state='scheduled' AND (p.status IS NULL OR p.status='scheduled');",
   "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS db_now;",
 ].join(' ');
 
