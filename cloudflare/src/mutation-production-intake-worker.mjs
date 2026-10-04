@@ -291,6 +291,25 @@ async function sha256(value) {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
 }
 
+// The operator CLI sends a fresh random challenge to /identity before any
+// credential-bearing request. Only the Worker it launched holds the per-launch
+// MUTATION_CONTROL_TOKEN, so a valid proof shows the listener is that Worker
+// without disclosing the token, and binds the reported bindings to it.
+const IDENTITY_CHALLENGE_RE = /^[0-9a-f]{64}$/;
+
+export async function identityProof(token, challenge, bindings) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const message = 'xqueue-mutation-production-intake/identity\n' + challenge + '\n' +
+    JSON.stringify(bindings);
+  return hex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
+}
+
 async function authenticated(request, env) {
   const expected = requiredSecret(env?.MUTATION_CONTROL_TOKEN, 'MUTATION_CONTROL_TOKEN');
   const header = request.headers.get('authorization') ?? '';
@@ -850,11 +869,21 @@ export async function runProductionIntakeRequest(
       candidate,
       safety: replaySafety,
     });
+    // The runner's own rule (and the re-plan trigger's): any effect state but
+    // 'none' is past dispatch, so an unknown state fails closed.
+    const pastDispatch = existingOperation.effect_state !== 'none';
     if (!replayPreflight.ok) {
+      const blocked = replayPreflight.blockers.map((item) => item.id).join(',');
+      if (pastDispatch) {
+        throw productionFault(
+          'POST_DISPATCH_READBACK_AMBIGUOUS',
+          'replay of ' + existingOperation.effect_state + ' operation blocked by preflight: ' + blocked,
+          { httpStatus: 409, requiresReadback: true },
+        );
+      }
       throw productionFault(
         'PRE_DISPATCH_STATE_CONFLICT',
-        'production replay preflight blocked: ' +
-          replayPreflight.blockers.map((item) => item.id).join(','),
+        'production replay preflight blocked: ' + blocked,
         { httpStatus: 409 },
       );
     }
@@ -863,9 +892,9 @@ export async function runProductionIntakeRequest(
       expectedPublicationAuthority,
     );
     if (replayAuthorityMismatch) {
-      // An operation whose effect is already applied is past dispatch: the
-      // operator must read back, not treat this as a clean pre-dispatch stop.
-      if (existingOperation.effect_state !== 'none') {
+      // An operation past dispatch must be read back, not treated as a clean
+      // pre-dispatch stop.
+      if (pastDispatch) {
         throw productionFault(
           'POST_DISPATCH_READBACK_AMBIGUOUS',
           'replay of ' + existingOperation.effect_state + ' operation refused: ' + replayAuthorityMismatch,
@@ -879,12 +908,11 @@ export async function runProductionIntakeRequest(
       );
     }
 
-    const appliedReplay = existingOperation.effect_state === 'applied';
     let replay;
     try {
       replay = await loadReplayState(db, normalized, existingOperation);
     } catch (error) {
-      if (appliedReplay) {
+      if (pastDispatch) {
         throw productionFault(
           'POST_DISPATCH_READBACK_AMBIGUOUS',
           'production replay state readback failed: ' +
@@ -905,10 +933,10 @@ export async function runProductionIntakeRequest(
         recordedAt,
       });
     } catch (error) {
-      if (appliedReplay) {
+      if (pastDispatch) {
         throw productionFault(
           'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production applied-operation resume readback failed: ' +
+          'production ' + existingOperation.effect_state + '-operation resume readback failed: ' +
             (error instanceof Error ? error.message : String(error)),
           { httpStatus: 409, requiresReadback: true },
         );
@@ -917,10 +945,13 @@ export async function runProductionIntakeRequest(
     }
 
     if (!['applied', 'already_applied'].includes(mutation?.status)) {
-      if (appliedReplay) {
+      if (pastDispatch) {
         throw productionFault(
           'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production applied-operation resume did not produce exact completion',
+          'production ' + existingOperation.effect_state +
+            '-operation resume did not produce exact completion (status ' +
+            String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
+            String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
           { httpStatus: 409, requiresReadback: true },
         );
       }
@@ -1214,29 +1245,60 @@ function boundTrustRoot(env) {
   });
 }
 
+const WORKER_IDENTITY = Object.freeze({
+  service: 'xqueue-mutation-production-intake',
+  role: 'production-mutation-intake',
+  environment: 'production',
+  publicationCapable: false,
+  schedulerAuthority: false,
+});
+
+// Refusals carry the Worker identity so the operator can tell a definitive
+// Worker answer, which never reached D1, from a failure outside the Worker.
+function refusal(httpStatus, faultClass) {
+  return json({
+    ...WORKER_IDENTITY,
+    status: 'error',
+    faultClass,
+    retryable: false,
+    requiresReadback: false,
+    error: faultClass.toLowerCase(),
+  }, { status: httpStatus });
+}
+
 export function createMutationProductionIntakeWorker(dependencies = {}) {
   return {
     async fetch(request, env) {
       const url = new URL(request.url);
 
       if (url.pathname === '/health') {
+        // Readiness only. Bindings are reported by /identity, bound to a proof
+        // that the responder holds this launch's control token.
+        return json({ ...WORKER_IDENTITY, status: 'ok' });
+      }
+
+      if (url.pathname === '/identity') {
+        if (request.method !== 'GET') return refusal(405, 'METHOD_NOT_ALLOWED');
+        const challenge = url.searchParams.get('challenge') ?? '';
+        if (!IDENTITY_CHALLENGE_RE.test(challenge)) return refusal(400, 'INVALID_CHALLENGE');
+        let token;
+        try {
+          token = requiredSecret(env?.MUTATION_CONTROL_TOKEN, 'MUTATION_CONTROL_TOKEN');
+        } catch {
+          return refusal(503, 'CONTROL_TOKEN_UNAVAILABLE');
+        }
+        const bindings = boundTrustRoot(env);
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'ok',
-          bindings: boundTrustRoot(env),
+          challenge,
+          bindings,
+          challengeResponse: await identityProof(token, challenge, bindings),
         });
       }
 
-      if (url.pathname !== '/production-intake') {
-        return json({ error: 'not_found' }, { status: 404 });
-      }
-      if (request.method !== 'POST') {
-        return json({ error: 'method_not_allowed' }, { status: 405 });
-      }
+      if (url.pathname !== '/production-intake') return refusal(404, 'NOT_FOUND');
+      if (request.method !== 'POST') return refusal(405, 'METHOD_NOT_ALLOWED');
 
       let isAuthenticated = false;
       try {
@@ -1244,9 +1306,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       } catch {
         isAuthenticated = false;
       }
-      if (!isAuthenticated) {
-        return json({ error: 'unauthorized' }, { status: 401 });
-      }
+      if (!isAuthenticated) return refusal(401, 'UNAUTHORIZED');
 
       let payload;
       try {

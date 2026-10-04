@@ -8,6 +8,7 @@ import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
   REQUIRED_MUTATION_TRIGGERS,
+  REQUIRED_MUTATION_TRIGGER_SQL,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   SAFETY_SQL,
   assertMutationSchema,
@@ -280,7 +281,7 @@ test('apply refuses before launching the Worker when the publisher predates the 
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
@@ -355,7 +356,7 @@ function readyRun() {
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
@@ -532,7 +533,7 @@ test('observe mode never invokes the mutation Worker', async () => {
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
@@ -594,7 +595,7 @@ test('automated single-item apply passes signed approval evidence, never a diges
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
@@ -724,7 +725,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
@@ -777,4 +778,19 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   assert.equal(call.candidate.headSha, 'a'.repeat(40));
   assert.equal(call.payload.mode, 'single');
   assert.equal(call.payload.sourceMode, 'owner-manual');
+
+  // An interruption after dispatch tells the operator to read back, with the
+  // planned identity that readback needs.
+  const lines = [];
+  const original = console.error;
+  console.error = (line) => lines.push(String(line));
+  try {
+    call.onInterruptedAfterDispatch('SIGTERM');
+  } finally {
+    console.error = original;
+  }
+  const printed = lines.join('\n');
+  assert.match(printed, /INTERRUPTED AFTER DISPATCH \(SIGTERM\)/);
+  assert.match(printed, /^readback_required=1$/m);
+  assert.ok(printed.includes(result.planned.operationId), 'planned operation id is printed');
 });

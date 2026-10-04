@@ -10,17 +10,22 @@ import { ownerPublicKeyFingerprint } from '../src/authoring/owner-approval.mjs';
 import {
   authorizeProductionIntakeInput,
   createMutationProductionIntakeWorker,
+  identityProof,
 } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 import {
   MUTATION_WORKER_SERVICE,
   REQUIRED_MUTATION_MIGRATIONS,
   REQUIRED_MUTATION_TRIGGERS,
+  REQUIRED_MUTATION_TRIGGER_SQL,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   assertHealthIdentity,
   childEnvironment,
   collectD1TokenReadiness,
   launchConfigurationBlockers,
+  collectExactMainCandidate,
   collectOperatorPreflight,
+  committedTriggerDefinitions,
+  mutationTriggerDrift,
   evaluateOperatorReadiness,
   expectedTrustRoot,
   invokeEphemeralWorker,
@@ -60,6 +65,35 @@ function healthBody(bindings = { ...EXPECTED, secretsBound: BOUND }, overrides =
     status: 'ok',
     bindings,
     ...overrides,
+  };
+}
+
+function roleBody() {
+  const { bindings: _bindings, ...role } = healthBody();
+  return role;
+}
+
+// A fake ephemeral Worker: minimal /health, and an /identity answer proven
+// with the control token the CLI handed the spawned child.
+function serveWorker(calls, {
+  intake = async () => jsonResponse({ ok: true, planned: { operationId: 'mutation-intake-x' } }),
+  bindings = { ...EXPECTED, secretsBound: BOUND },
+  identity = null,
+  requests = null,
+} = {}) {
+  return async (url, init = {}) => {
+    requests?.push({ url, init });
+    if (url.endsWith('/health')) return jsonResponse(roleBody());
+    if (url.includes('/identity?')) {
+      if (identity) return identity(url, init);
+      const challenge = new URL(url).searchParams.get('challenge');
+      const token = calls.spawn.options.env.MUTATION_CONTROL_TOKEN;
+      return jsonResponse(healthBody(bindings, {
+        challenge,
+        challengeResponse: await identityProof(token, challenge, bindings),
+      }));
+    }
+    return intake(url, init);
   };
 }
 
@@ -135,37 +169,76 @@ function launch(overrides = {}) {
   });
 }
 
-test('the Worker reports the trust root it actually bound', async () => {
+test('the Worker reports its bound trust root only with a proof of the control token', async () => {
   const worker = createMutationProductionIntakeWorker({});
-  const env = { ...DESCRIPTOR.vars, DB: {} };
-  const body = await (await worker.fetch(new Request('https://example.test/health'), env)).json();
+  const token = 'control-token-'.padEnd(64, '0');
+  const env = { ...DESCRIPTOR.vars, DB: {}, MUTATION_CONTROL_TOKEN: token };
+  const challenge = 'ab'.repeat(32);
+  const identify = async (bound, query = '?challenge=' + challenge, init = {}) =>
+    worker.fetch(new Request('https://example.test/identity' + query, init), bound);
+
+  // /health is readiness only and never reports bindings.
+  const health = await (await worker.fetch(new Request('https://example.test/health'), env)).json();
+  assert.deepEqual(health, { ...roleBody() });
+
+  const body = await (await identify(env)).json();
+  assert.equal(body.challenge, challenge);
   assert.deepEqual(body.bindings, {
     accountId: ACCOUNT,
     productionDatabaseId: DESCRIPTOR.vars.XQUEUE_PRODUCTION_DATABASE_ID,
     ownerApprovalKeyFingerprint: ownerPublicKeyFingerprint(DESCRIPTOR.vars.OWNER_APPROVAL_PUBLIC_KEY_PEM),
-    bindingNames: [...Object.keys(DESCRIPTOR.vars), 'DB'].sort(),
-    secretsBound: { MUTATION_D1_API_TOKEN: false, MUTATION_CONTROL_TOKEN: false },
+    bindingNames: [...Object.keys(DESCRIPTOR.vars), 'DB', 'MUTATION_CONTROL_TOKEN'].sort(),
+    secretsBound: { MUTATION_D1_API_TOKEN: false, MUTATION_CONTROL_TOKEN: true },
   });
-  const full = await (await worker.fetch(
-    new Request('https://example.test/health'),
-    { ...env, MUTATION_D1_API_TOKEN: 'v1-secret-value', MUTATION_CONTROL_TOKEN: 'v2-secret-value' },
-  )).json();
-  const { secretsBound: _bound, ...trustRoot } = full.bindings;
+  assert.equal(body.challengeResponse, await identityProof(token, challenge, body.bindings));
+  assert.notEqual(body.challengeResponse, await identityProof('other-token'.padEnd(64, '0'), challenge, body.bindings));
+  assert.doesNotMatch(JSON.stringify(body), /control-token-/);
+
+  const full = await (await identify({ ...env, MUTATION_D1_API_TOKEN: 'secret-value-1' })).json();
+  const { secretsBound, ...trustRoot } = full.bindings;
+  assert.deepEqual(secretsBound, BOUND);
   assert.deepEqual(trustRoot, { ...EXPECTED });
   assert.doesNotMatch(JSON.stringify(full), /secret-value/);
 
-  const withSecrets = await (await worker.fetch(
-    new Request('https://example.test/health'),
-    { ...env, MUTATION_D1_API_TOKEN: 'secret-value-1', MUTATION_CONTROL_TOKEN: 'secret-value-2' },
-  )).json();
-  assert.deepEqual(withSecrets.bindings.secretsBound, BOUND);
-  assert.doesNotMatch(JSON.stringify(withSecrets), /secret-value/);
-
-  const overridden = await (await worker.fetch(
-    new Request('https://example.test/health'),
-    { ...env, XQUEUE_PRODUCTION_DATABASE_ID: 'other-db' },
-  )).json();
+  const overridden = await (await identify({ ...env, XQUEUE_PRODUCTION_DATABASE_ID: 'other-db' })).json();
   assert.equal(overridden.bindings.productionDatabaseId, 'other-db');
+
+  // A malformed challenge, a missing control token, or a non-GET is a refusal
+  // that names the Worker.
+  for (const [response, status, faultClass] of [
+    [await identify(env, '?challenge=xyz'), 400, 'INVALID_CHALLENGE'],
+    [await identify(env, ''), 400, 'INVALID_CHALLENGE'],
+    [await identify({ ...env, MUTATION_CONTROL_TOKEN: undefined }), 503, 'CONTROL_TOKEN_UNAVAILABLE'],
+    [await identify(env, '?challenge=' + challenge, { method: 'POST' }), 405, 'METHOD_NOT_ALLOWED'],
+  ]) {
+    assert.equal(response.status, status, faultClass);
+    const refused = await response.json();
+    assert.equal(refused.faultClass, faultClass);
+    assert.equal(refused.service, MUTATION_WORKER_SERVICE);
+    assert.equal(refused.requiresReadback, false);
+    assert.equal(refused.challengeResponse, undefined);
+  }
+});
+
+test('Worker refusals name the Worker so the CLI can treat them as definitive', async () => {
+  const worker = createMutationProductionIntakeWorker({});
+  const env = { ...DESCRIPTOR.vars, DB: {}, MUTATION_CONTROL_TOKEN: 'control-token-'.padEnd(64, '0') };
+  for (const [request, status, faultClass] of [
+    [new Request('https://example.test/production-intake', { method: 'POST', body: '{}' }), 401, 'UNAUTHORIZED'],
+    [new Request('https://example.test/production-intake', {
+      method: 'POST', body: '{}', headers: { authorization: 'Bearer wrong-token' },
+    }), 401, 'UNAUTHORIZED'],
+    [new Request('https://example.test/production-intake'), 405, 'METHOD_NOT_ALLOWED'],
+    [new Request('https://example.test/elsewhere'), 404, 'NOT_FOUND'],
+  ]) {
+    const response = await worker.fetch(request, env);
+    assert.equal(response.status, status, faultClass);
+    const body = await response.json();
+    assert.equal(body.service, MUTATION_WORKER_SERVICE, faultClass);
+    assert.equal(body.faultClass, faultClass);
+    assert.equal(body.requiresReadback, false);
+    assert.equal(body.retryable, false);
+  }
 });
 
 test('health identity must name the Worker and match every committed binding', () => {
@@ -252,14 +325,10 @@ test('the launch credential is never passed to the Worker as its D1 credential',
   }
 });
 
-test('a successful launch sends the generated bearer only after a verified health check', async () => {
+test('a successful launch sends the generated bearer only after a proven identity', async () => {
   const { spawnImpl, calls } = fakeChild();
   const requests = [];
-  const fetchImpl = async (url, init = {}) => {
-    requests.push({ url, init });
-    if (url.endsWith('/health')) return jsonResponse(healthBody());
-    return jsonResponse({ ok: true, planned: { operationId: 'mutation-intake-x' } });
-  };
+  const fetchImpl = serveWorker(calls, { requests });
   const result = await launch({ spawnImpl, fetchImpl });
 
   assert.equal(result.ok, true);
@@ -282,10 +351,14 @@ test('a successful launch sends the generated bearer only after a verified healt
   );
   assert.equal(requests[0].url, 'http://127.0.0.1:18789/health');
   assert.equal(requests[0].init.headers.authorization, undefined);
-  assert.equal(requests[1].url, 'http://127.0.0.1:18789/production-intake');
-  assert.equal(requests[1].init.headers.authorization, 'Bearer ' + token);
-  assert.ok(requests[1].init.signal, 'intake request has a timeout signal');
-  assert.deepEqual(JSON.parse(requests[1].init.body).expectedPublicationAuthority, { ...AUTHORITY });
+  // The identity challenge is fresh and carries no credential.
+  assert.match(requests[1].url, /^http:\/\/127\.0\.0\.1:18789\/identity\?challenge=[0-9a-f]{64}$/);
+  assert.equal(requests[1].init.headers.authorization, undefined);
+  assert.equal(requests[1].url.includes(token), false);
+  assert.equal(requests[2].url, 'http://127.0.0.1:18789/production-intake');
+  assert.equal(requests[2].init.headers.authorization, 'Bearer ' + token);
+  assert.ok(requests[2].init.signal, 'intake request has a timeout signal');
+  assert.deepEqual(JSON.parse(requests[2].init.body).expectedPublicationAuthority, { ...AUTHORITY });
   assert.equal(calls.killed, true);
 });
 
@@ -300,18 +373,63 @@ test('a busy port refuses before anything is spawned', async () => {
 
 test('a listener with overridden bindings never receives the bearer or payload', async () => {
   const { spawnImpl, calls } = fakeChild();
-  const urls = [];
-  const fetchImpl = async (url) => {
-    urls.push(url);
-    return jsonResponse(healthBody({ ...EXPECTED, secretsBound: BOUND, ownerApprovalKeyFingerprint: 'sha256:' + 'f'.repeat(64) }));
-  };
+  const requests = [];
+  const fetchImpl = serveWorker(calls, {
+    requests,
+    bindings: { ...EXPECTED, secretsBound: BOUND, ownerApprovalKeyFingerprint: 'sha256:' + 'f'.repeat(64) },
+  });
   await assert.rejects(launch({ spawnImpl, fetchImpl }), /bound ownerApprovalKeyFingerprint that does not match/);
-  assert.deepEqual(urls, ['http://127.0.0.1:18789/health']);
+  assert.deepEqual(requests.map((item) => new URL(item.url).pathname), ['/health', '/identity']);
   assert.equal(calls.killed, true);
 });
 
+test('a listener that cannot prove this launch\'s control token never receives the bearer', async () => {
+  const goodBindings = { ...EXPECTED, secretsBound: BOUND };
+  const cases = [
+    ['wrong token', async (url) => {
+      const challenge = new URL(url).searchParams.get('challenge');
+      return jsonResponse(healthBody(goodBindings, {
+        challenge,
+        challengeResponse: await identityProof('stale-launch-token'.padEnd(64, '0'), challenge, goodBindings),
+      }));
+    }, /does not hold this launch's control token/],
+    ['replayed challenge', async () => jsonResponse(healthBody(goodBindings, {
+      challenge: 'cd'.repeat(32),
+      challengeResponse: 'ef'.repeat(32),
+    })), /did not answer the identity challenge/],
+    ['no proof', async (url) => jsonResponse(healthBody(goodBindings, {
+      challenge: new URL(url).searchParams.get('challenge'),
+    })), /did not answer the identity challenge/],
+    ['identity refused', async () => jsonResponse({ service: MUTATION_WORKER_SERVICE, faultClass: 'CONTROL_TOKEN_UNAVAILABLE' }, 503),
+      /did not answer the identity challenge/],
+    ['identity unreachable', async () => { throw new TypeError('fetch failed'); }, /did not answer the identity challenge/],
+  ];
+  for (const [name, identity, pattern] of cases) {
+    const { spawnImpl, calls } = fakeChild();
+    const requests = [];
+    await assert.rejects(launch({ spawnImpl, fetchImpl: serveWorker(calls, { requests, identity }) }), pattern, name);
+    assert.equal(requests.some((item) => item.url.endsWith('/production-intake')), false, name);
+    assert.equal(calls.killed, true, name);
+  }
+
+  // The proof covers the reported bindings: a valid proof over the committed
+  // bindings does not vouch for different ones.
+  const { spawnImpl, calls } = fakeChild();
+  const swapped = async (url) => {
+    const challenge = new URL(url).searchParams.get('challenge');
+    const token = calls.spawn.options.env.MUTATION_CONTROL_TOKEN;
+    return jsonResponse(healthBody({ ...goodBindings, productionDatabaseId: 'other-db' }, {
+      challenge,
+      challengeResponse: await identityProof(token, challenge, goodBindings),
+    }));
+  };
+  await assert.rejects(
+    launch({ spawnImpl, fetchImpl: serveWorker(calls, { identity: swapped }) }),
+    /does not hold this launch's control token/,
+  );
+});
+
 test('any failure after dispatch requires readback instead of looking like an ordinary failure', async () => {
-  const health = async () => jsonResponse(healthBody());
   const cases = [
     ['connection lost', async () => { throw new TypeError('fetch failed'); }],
     ['timeout', async () => { throw new DOMException('timed out', 'TimeoutError'); }],
@@ -319,7 +437,7 @@ test('any failure after dispatch requires readback instead of looking like an or
   ];
   for (const [name, intake] of cases) {
     const { spawnImpl, calls } = fakeChild();
-    const fetchImpl = async (url, init) => (url.endsWith('/health') ? health() : intake(url, init));
+    const fetchImpl = serveWorker(calls, { intake });
     await assert.rejects(
       launch({ spawnImpl, fetchImpl }),
       (error) => {
@@ -334,10 +452,11 @@ test('any failure after dispatch requires readback instead of looking like an or
 
 test('a definitive Worker error keeps the Worker\'s own readback decision', async () => {
   for (const requiresReadback of [true, false]) {
-    const { spawnImpl } = fakeChild();
-    const fetchImpl = async (url) => (url.endsWith('/health')
-      ? jsonResponse(healthBody())
-      : jsonResponse({ service: MUTATION_WORKER_SERVICE, status: 'blocked', requiresReadback, faultClass: 'X' }, 409));
+    const { spawnImpl, calls } = fakeChild();
+    const fetchImpl = serveWorker(calls, {
+      intake: async () =>
+        jsonResponse({ service: MUTATION_WORKER_SERVICE, status: 'blocked', requiresReadback, faultClass: 'X' }, 409),
+    });
     await assert.rejects(launch({ spawnImpl, fetchImpl }), (error) => {
       assert.equal(error.httpStatus, 409);
       assert.equal(error.response.requiresReadback, requiresReadback);
@@ -347,10 +466,10 @@ test('a definitive Worker error keeps the Worker\'s own readback decision', asyn
 });
 
 test('a JSON error that did not come from the Worker requires readback', async () => {
-  const { spawnImpl } = fakeChild();
-  const fetchImpl = async (url) => (url.endsWith('/health')
-    ? jsonResponse(healthBody())
-    : jsonResponse({ error: 'upstream connect error' }, 502));
+  const { spawnImpl, calls } = fakeChild();
+  const fetchImpl = serveWorker(calls, {
+    intake: async () => jsonResponse({ error: 'upstream connect error' }, 502),
+  });
   await assert.rejects(launch({ spawnImpl, fetchImpl }), (error) => {
     assert.equal(error.response?.requiresReadback, true);
     assert.equal(error.response?.faultClass, 'POST_DISPATCH_TRANSPORT_AMBIGUOUS');
@@ -478,16 +597,13 @@ test('approval evidence must come from the item or the top level, never both', (
 
 test('a checkout that changes after preflight never receives the intake request', async () => {
   const { spawnImpl, calls } = fakeChild();
-  const urls = [];
-  const fetchImpl = async (url) => {
-    urls.push(url);
-    return jsonResponse(healthBody());
-  };
+  const requests = [];
+  const fetchImpl = serveWorker(calls, { requests });
   await assert.rejects(
     launch({ spawnImpl, fetchImpl, verifyTree: () => { throw new Error('the checkout changed after preflight; refusing'); } }),
     /checkout changed after preflight/,
   );
-  assert.deepEqual(urls, ['http://127.0.0.1:18789/health']);
+  assert.deepEqual(requests.map((item) => new URL(item.url).pathname), ['/health', '/identity']);
   assert.equal(calls.killed, true);
 
   const candidate = { branch: 'main', headSha: 'a'.repeat(40) };
@@ -719,7 +835,7 @@ test('a failed safety read is a structured blocker, not a raw exception', () => 
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) throw new Error('wrangler rate limited');
@@ -730,16 +846,18 @@ test('a failed safety read is a structured blocker, not a raw exception', () => 
   });
   const ids = preflight.readiness.blockers.map((item) => item.id);
   assert.deepEqual(ids, ['publication_safety_unreadable', 'mutation_d1_token_missing']);
+  assert.match(preflight.readiness.blockers[0].detail, /could not be read: wrangler rate limited$/);
 });
 
 test('payload fields can never replace the verified request fields', async () => {
-  const { spawnImpl } = fakeChild();
+  const { spawnImpl, calls } = fakeChild();
   let sent = null;
-  const fetchImpl = async (url, init) => {
-    if (url.endsWith('/health')) return jsonResponse(healthBody());
-    sent = JSON.parse(init.body);
-    return jsonResponse({ ok: true });
-  };
+  const fetchImpl = serveWorker(calls, {
+    intake: async (url, init) => {
+      sent = JSON.parse(init.body);
+      return jsonResponse({ ok: true });
+    },
+  });
   await launch({
     spawnImpl,
     fetchImpl,
@@ -792,7 +910,7 @@ test('a mutation schema missing any required trigger is incomplete, not active',
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([
         { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
-        { results: triggers.map((name) => ({ name })) },
+        { results: triggers.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
       ]);
     }
     throw new Error('unexpected command: ' + key);
@@ -803,6 +921,7 @@ test('a mutation schema missing any required trigger is incomplete, not active',
   });
   const byId = Object.fromEntries(preflight.readiness.blockers.map((item) => [item.id, item.detail]));
   assert.match(byId.production_mutation_schema_incomplete, /authority_state_mutation_lane_guard/);
+  assert.equal(preflight.safety, null);
   // The launch credential failure keeps its cause.
   assert.match(byId.cloudflare_auth_not_verified, /Cause: .*verification failed \(1000\)/);
 });
@@ -814,4 +933,194 @@ test('the process group is torn down even when pnpm has already exited', async (
     fetchImpl: async () => { throw new TypeError('ECONNREFUSED'); },
   }));
   assert.deepEqual(exited.calls.groupSignals, ['SIGTERM', 'SIGKILL']);
+});
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// D1 stores each trigger's text from CREATE TRIGGER through END, without the
+// final semicolon (observed on preview D1 for all 29 mutation triggers).
+function storedTriggers() {
+  return REQUIRED_MUTATION_MIGRATIONS.flatMap((name) =>
+    [...readFileSync(path.join(ROOT, 'cloudflare/migrations-production', name), 'utf8')
+      .matchAll(/^CREATE TRIGGER\s+(\w+)[\s\S]*?^END;/gm)]
+      .map((match) => ({ name: match[1], sql: match[0].slice(0, -1) })));
+}
+
+test('applied triggers must match the committed bodies, not only the names', () => {
+  const stored = storedTriggers();
+  const created = REQUIRED_MUTATION_MIGRATIONS.reduce((count, name) =>
+    count + readFileSync(path.join(ROOT, 'cloudflare/migrations-production', name), 'utf8')
+      .split('CREATE TRIGGER').length - 1, 0);
+  assert.equal(REQUIRED_MUTATION_TRIGGERS.length, created, 'every CREATE TRIGGER is captured once');
+  assert.equal(stored.length, created);
+  for (const name of REQUIRED_MUTATION_TRIGGERS) {
+    assert.match(REQUIRED_MUTATION_TRIGGER_SQL[name], new RegExp('^CREATE TRIGGER ' + name + ' .* END$'));
+  }
+  assert.deepEqual(committedTriggerDefinitions('CREATE TRIGGER a\nBEGIN\n  SELECT 1;\nEND;\n'), [
+    ['a', 'CREATE TRIGGER a BEGIN SELECT 1; END'],
+  ]);
+
+  assert.deepEqual(mutationTriggerDrift(stored), []);
+  // Whitespace-only differences are not drift.
+  assert.deepEqual(mutationTriggerDrift(stored.map((row) => ({ ...row, sql: row.sql.replace(/\n/g, '\n  ') }))), []);
+  // A weakened guard with the right name is drift.
+  const weakened = stored.map((row) => (row.name === 'mutation_lane_claim_guard'
+    ? { ...row, sql: row.sql.replace('OLD.generation + 1', 'OLD.generation + 0') }
+    : row));
+  assert.deepEqual(mutationTriggerDrift(weakened), ['mutation_lane_claim_guard']);
+  const relabeled = stored.map((row) => (row.name === 'authority_state_mutation_lane_guard'
+    ? { ...row, sql: row.sql.replace("'authority transition blocked by active mutation lane'", "'ok'") }
+    : row));
+  assert.deepEqual(mutationTriggerDrift(relabeled), ['authority_state_mutation_lane_guard']);
+  assert.deepEqual(
+    mutationTriggerDrift(stored.filter((row) => row.name !== 'mutation_lane_halt_audit')),
+    ['mutation_lane_halt_audit'],
+  );
+  assert.deepEqual(
+    mutationTriggerDrift(stored.map((row) => (row.name === 'mutation_lane_halt_audit' ? { name: row.name, sql: null } : row))),
+    ['mutation_lane_halt_audit'],
+  );
+  assert.deepEqual(mutationTriggerDrift(null), [...REQUIRED_MUTATION_TRIGGERS]);
+
+  // The preflight refuses a weakened trigger before reading safety facts.
+  const run = (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git fetch origin main') return '';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      return JSON.stringify({ ok: true, environment: 'production', token_type: 'account', token_status: 'active', d1: { readable: true } });
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: weakened },
+      ]);
+    }
+    throw new Error('unexpected command: ' + key);
+  };
+  const preflight = collectOperatorPreflight(run, () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: true, blockers: [] },
+  });
+  assert.deepEqual(preflight.readiness.blockers.map((item) => item.id), ['production_mutation_schema_incomplete']);
+  assert.match(preflight.readiness.blockers[0].detail, /differ from the committed migrations: mutation_lane_claim_guard$/);
+});
+
+test('an empty descriptor account never matches an empty launch account', () => {
+  const noAccount = { ...DESCRIPTOR, vars: { ...DESCRIPTOR.vars, CLOUDFLARE_ACCOUNT_ID: '' } };
+  for (const account of ['', undefined]) {
+    const ids = launchConfigurationBlockers(launchEnv({ CLOUDFLARE_ACCOUNT_ID: account }), noAccount).map((item) => item.id);
+    assert.ok(ids.includes('launch_account_mismatch'), String(account));
+  }
+  const { CLOUDFLARE_ACCOUNT_ID: _account, ...varsWithout } = DESCRIPTOR.vars;
+  assert.ok(launchConfigurationBlockers(
+    launchEnv({ CLOUDFLARE_ACCOUNT_ID: undefined }),
+    { ...DESCRIPTOR, vars: varsWithout },
+  ).map((item) => item.id).includes('launch_account_mismatch'));
+  // A missing descriptor is a blocker list, not a crash.
+  const ids = launchConfigurationBlockers(launchEnv(), null).map((item) => item.id);
+  assert.ok(ids.includes('mutation_descriptor_secrets_invalid'));
+  assert.ok(ids.includes('launch_account_mismatch'));
+  assert.deepEqual(launchConfigurationBlockers(launchEnv(), DESCRIPTOR), []);
+});
+
+test('a failed origin fetch is a structured exact-main blocker with a redacted cause', () => {
+  const seenEnv = [];
+  const run = (command, argv, options) => {
+    const key = [command, ...argv].join(' ');
+    if (command === 'pnpm') seenEnv.push(options?.env);
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
+    if (key === 'git fetch origin main') {
+      throw new Error("fatal: unable to access 'https://x-access-token:ghs_SECRET123@github.com/o/r/': Could not resolve host");
+    }
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      return JSON.stringify({ ok: true, environment: 'production', token_type: 'account', token_status: 'active', d1: { readable: true } });
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([{ results: [{ name: '0014_authority_event_projection.sql' }] }]);
+    }
+    throw new Error('unexpected command: ' + key);
+  };
+  const candidate = collectExactMainCandidate(run);
+  assert.equal(candidate.originMainSha, null);
+  assert.match(candidate.originMainError, /Could not resolve host/);
+  assert.doesNotMatch(candidate.originMainError, /ghs_SECRET123/);
+
+  const env = launchEnv();
+  const preflight = collectOperatorPreflight(run, () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: true, blockers: [] },
+    env,
+  });
+  const byId = Object.fromEntries(preflight.readiness.blockers.map((item) => [item.id, item.detail]));
+  assert.match(byId.candidate_not_exact_main, /Cause: git fetch origin main failed: .*Could not resolve host/);
+  assert.doesNotMatch(JSON.stringify(preflight), /ghs_SECRET123/);
+  // The operator environment main received is the one every Cloudflare read uses.
+  assert.ok(seenEnv.length >= 2);
+  for (const used of seenEnv) assert.equal(used, env);
+});
+
+test('a signal during the graceful teardown wait still kills the group', async () => {
+  const { spawnImpl, calls } = fakeChild();
+  const processImpl = fakeProcess();
+  const kill = processImpl.kill;
+  processImpl.kill = (pid, signal) => {
+    if (pid < 0 && signal === 'SIGTERM') {
+      // wrangler ignores SIGTERM, and the operator interrupts during the wait.
+      processImpl.record.push([pid, signal]);
+      setTimeout(() => processImpl.signals.emit('SIGINT', 'SIGINT'), 20);
+      return;
+    }
+    kill(pid, signal);
+  };
+  const started = Date.now();
+  await assert.rejects(launch({
+    spawnImpl,
+    processImpl,
+    fetchImpl: async () => { throw new TypeError('ECONNREFUSED'); },
+    healthDeadlineMs: 100,
+  }));
+  const pid = calls.spawn.child.pid;
+  assert.deepEqual(processImpl.record.slice(0, 3), [[-pid, 'SIGTERM'], [-pid, 'SIGKILL'], [4242, 'SIGINT']]);
+  assert.ok(Date.now() - started < 4_000, 'did not sit out the graceful wait');
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(processImpl.signals.listenerCount(name), 0, name);
+});
+
+test('an interruption after dispatch reports readback; before dispatch it does not', async () => {
+  for (const [stage, expected] of [['identity', []], ['intake', ['SIGINT']]]) {
+    const { spawnImpl, calls } = fakeChild();
+    const processImpl = fakeProcess();
+    const interrupted = [];
+    const interrupt = async () => {
+      processImpl.signals.emit('SIGINT', 'SIGINT');
+      throw new TypeError('aborted by signal');
+    };
+    const fetchImpl = serveWorker(calls, stage === 'intake' ? { intake: interrupt } : { identity: interrupt });
+    await assert.rejects(launch({
+      spawnImpl,
+      processImpl,
+      fetchImpl,
+      onInterruptedAfterDispatch: (signal) => interrupted.push(signal),
+    }));
+    assert.deepEqual(interrupted, expected, stage);
+    assert.ok(processImpl.record.some(([pid, signal]) => pid === 4242 && signal === 'SIGINT'), stage);
+  }
+
+  // A failing reporter never stops the signal from being re-raised.
+  const { spawnImpl, calls } = fakeChild();
+  const processImpl = fakeProcess();
+  await assert.rejects(launch({
+    spawnImpl,
+    processImpl,
+    fetchImpl: serveWorker(calls, {
+      intake: async () => {
+        processImpl.signals.emit('SIGTERM', 'SIGTERM');
+        throw new TypeError('aborted by signal');
+      },
+    }),
+    onInterruptedAfterDispatch: () => { throw new Error('stderr closed'); },
+  }));
+  assert.ok(processImpl.record.some(([pid, signal]) => pid === 4242 && signal === 'SIGTERM'));
 });
