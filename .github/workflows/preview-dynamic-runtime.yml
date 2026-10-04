@@ -87,7 +87,8 @@ jobs:
             test/d1-preview-shadow-proof.test.mjs \
             test/global-publication-halt.test.mjs \
             test/d1-publication-reconciliation.test.mjs \
-            test/d1-logical-backup.test.mjs
+            test/d1-logical-backup.test.mjs \
+            test/preview-runtime-proof-checks.test.mjs
 
       - name: Assert publication authority boundary remains intact
         run: pnpm audit:authority

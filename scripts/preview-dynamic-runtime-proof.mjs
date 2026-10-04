@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -15,6 +16,7 @@ import { MEDIA_MANIFEST } from '../cloudflare/generated/media-manifest.mjs';
 import {
   ACTIVE_ASSIGNMENTS_SQL,
   APPROVED_UNSCHEDULED_SQL,
+  DEFERRED_ASSIGNMENTS_SQL,
   buildDynamicRuntimeSnapshot,
   CURRENT_MEDIA_SQL,
   RUNTIME_STATE_SQL,
@@ -24,22 +26,20 @@ import {
   renderMediaInsertSql,
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
+import { assertPreviewConfig } from '../src/d1-preview-shadow-proof.mjs';
 import {
+  assertPreviewHaltState,
   assertPreviewMigrationLane,
   assertPreviewRevisionChain,
   PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS,
   PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
+  PREVIEW_HALT_EVENTS_SQL,
+  PREVIEW_MUTATION_OPERATIONS_SQL,
   PREVIEW_REVISION_HISTORY_SQL,
-  PREVIEW_REVISION_SOURCE_OPERATIONS_SQL,
 } from '../src/preview-runtime-proof-checks.mjs';
 
 const PREVIEW_DB = 'xqueue-preview';
-const PREVIEW_MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'cloudflare',
-  'migrations',
-);
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const PROOF_URL =
   process.env.XQUEUE_PREVIEW_PROOF_URL ??
@@ -206,6 +206,7 @@ function assertMediaReadback(expected, actual) {
 async function snapshot() {
   return buildDynamicRuntimeSnapshot({
     assignments: query(ACTIVE_ASSIGNMENTS_SQL),
+    deferred: query(DEFERRED_ASSIGNMENTS_SQL),
     approvedUnscheduled: query(APPROVED_UNSCHEDULED_SQL),
     media: query(CURRENT_MEDIA_SQL),
   });
@@ -313,9 +314,14 @@ async function verifyR2Bytes(mediaRows) {
 
 async function main() {
   const migrations = query('SELECT id,name,applied_at FROM d1_migrations ORDER BY id;');
+  // The lane is wrangler.preview.jsonc's migrations_dir, the same directory the
+  // workflow's apply step uses; assertPreviewConfig pins it.
+  const previewConfig = JSON.parse(readFileSync(join(REPO_ROOT, PREVIEW_CONFIG), 'utf8'));
+  assertPreviewConfig(previewConfig);
+  const migrationsDir = join(REPO_ROOT, previewConfig.d1_databases[0].migrations_dir);
   const names = assertPreviewMigrationLane(
     migrations.map((row) => row.name),
-    readdirSync(PREVIEW_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql')).sort(),
+    readdirSync(migrationsDir).filter((name) => name.endsWith('.sql')),
   );
 
   const reconciliationSchema = query(
@@ -330,15 +336,10 @@ async function main() {
     'SELECT halted,generation,reason,actor_class,updated_at ' +
     'FROM publication_halt_state WHERE singleton_id=1;',
   )[0] ?? null;
-  if (
-    !halt ||
-    Number(halt.halted) !== 0 ||
-    Number(halt.generation) !== 1 ||
-    halt.reason !== 'initial_unhalted' ||
-    halt.actor_class !== 'migration'
-  ) {
-    throw new Error('preview global publication halt did not initialize fail-safe state exactly');
-  }
+  const haltSummary = assertPreviewHaltState({
+    state: halt,
+    events: query(PREVIEW_HALT_EVENTS_SQL),
+  });
 
   const mediaExpected = runtimeMediaRows();
   let mediaActual = readMediaRows();
@@ -405,10 +406,9 @@ async function main() {
     throw new Error('preview runtime revision state does not match recomputed durable truth');
   }
 
-  const revisions = query(PREVIEW_REVISION_HISTORY_SQL);
   const revisionChain = assertPreviewRevisionChain({
-    revisions,
-    operations: revisions.length > 1 ? query(PREVIEW_REVISION_SOURCE_OPERATIONS_SQL) : [],
+    revisions: query(PREVIEW_REVISION_HISTORY_SQL),
+    operations: query(PREVIEW_MUTATION_OPERATIONS_SQL),
     state,
   });
 
@@ -421,7 +421,7 @@ async function main() {
     config: PREVIEW_CONFIG,
     mainCandidate: process.env.GITHUB_SHA ?? null,
     migrations: names,
-    migrationTail: PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
+    dynamicRuntimeMigrations: PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
     revisionChain,
     publicationHalt: {
       halted: Number(halt.halted) === 1,
@@ -429,6 +429,7 @@ async function main() {
       reason: halt.reason,
       actorClass: halt.actor_class,
       updatedAt: halt.updated_at,
+      events: haltSummary.events,
     },
     mediaAction,
     revisionAction,
