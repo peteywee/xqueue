@@ -189,7 +189,18 @@ export async function projectIntakeRuntimeRevision({
 
 export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan }) {
   const d1 = ensureDb(db);
-  validatePair(controlPlan, intakePlan);
+  // Replay rebuilds both plans from persisted rows, so a pair mismatch is a
+  // canonical contradiction, not an unavailable read.
+  try {
+    validatePair(controlPlan, intakePlan);
+  } catch (cause) {
+    throw completionReadbackError(
+      'contradictory',
+      'mutation completion plans contradict each other: ' +
+        (cause instanceof Error ? cause.message : String(cause)),
+      cause,
+    );
+  }
 
   const operation = await completionReadFirst(
     d1,
