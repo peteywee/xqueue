@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { getD1TimeTravelBookmark } from '../src/mutation-control-transport.mjs';
 import {
   REQUIRED_MUTATION_MIGRATIONS,
+  boundedFetch,
   checkPublisherMutexCompatibility,
   collectExactMainCandidate,
   defaultProbeWorkersAccess,
@@ -20,8 +21,13 @@ export const PRODUCTION_DATABASE_ID = 'fc85026e-bfc8-435f-8bb0-c60e139178a3';
 export const PRODUCTION_MIGRATIONS_DIR = 'cloudflare/migrations-production';
 const PRODUCTION_CONFIG = 'wrangler.status.jsonc';
 // Apply runs only inside the governed workflow: main only, one run at a time
-// (its concurrency group), behind its protected environment.
+// (its concurrency group), behind its protected environment. This check guards
+// against accidental use; the boundary itself is the environment-scoped token.
 export const GOVERNED_WORKFLOW = 'Production Mutation Schema';
+export const GOVERNED_WORKFLOW_FILE = '.github/workflows/production-mutation-schema.yml';
+// Every read is bounded so a hung read cannot strand collected evidence. The
+// apply itself is never cut short: stopping wrangler mid-lane is worse.
+const READ_TIMEOUT_MS = 120_000;
 // The publisher wakes every 15 minutes and publishes within a 20-minute grace.
 // Refusing to change schema near a due slot keeps the apply out of that window.
 export const DUE_SLOT_EXCLUSION_MINUTES = 30;
@@ -133,11 +139,14 @@ export function productionConfigBlockers(path = PRODUCTION_CONFIG) {
   let database = null;
   try {
     const config = JSON.parse(readFileSync(resolve(path), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
-    database = (config.d1_databases ?? []).find((item) => item.database_name === 'xqueue-production') ?? null;
+    // wrangler resolves the first entry whose database_name or binding matches.
+    database = (config.d1_databases ?? []).find((item) =>
+      item.database_name === 'xqueue-production' || item.binding === 'xqueue-production') ?? null;
   } catch {
     database = null;
   }
   if (
+    database?.database_name !== 'xqueue-production' ||
     database?.database_id !== PRODUCTION_DATABASE_ID ||
     database?.migrations_dir !== PRODUCTION_MIGRATIONS_DIR ||
     database?.migrations_pattern !== undefined ||
@@ -237,12 +246,14 @@ export function expectedSchemaChange(local, pending) {
   }
 }
 
-function runSync(command, argv, { env = process.env } = {}) {
+function runSync(command, argv, { env = process.env, timeoutMs = undefined } = {}) {
   const result = spawnSync(command, argv, {
     cwd: process.cwd(),
     env,
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -263,7 +274,7 @@ function d1Query(run, sql) {
     '--config', PRODUCTION_CONFIG,
     '--remote', '--yes', '--json',
     '--command', sql,
-  ]));
+  ], { timeoutMs: READ_TIMEOUT_MS }));
 }
 
 function firstRow(payload, index) {
@@ -299,9 +310,13 @@ export const PUBLICATION_SAFETY_SQL = [
   'SELECT COALESCE(MAX(id),0) AS event_cursor FROM publication_events;',
   "SELECT json_extract(value,'$.inflight') AS inflight FROM runtime_metadata WHERE key='state.snapshot_json';",
   'SELECT generation,revision_digest FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 1;',
-  // Every scheduled assignment, overdue included: an unhalted publisher acts
-  // on overdue slots (deferral) at its next tick.
-  "SELECT MIN(resolved_at) AS next_due FROM queue_assignments WHERE status='active' AND lifecycle_state='scheduled';",
+  // Exactly the assignments an unhalted publisher acts on, overdue included
+  // (it defers them at its next tick): active, scheduled, and still
+  // publication_state 'scheduled'. Posted and skipped slots stay scheduled in
+  // queue_assignments but are resolved; a missing publication_state is
+  // protected (src/d1-deferred-lifecycle.mjs classifyMissedAssignment).
+  "SELECT MIN(a.resolved_at) AS next_due FROM queue_assignments a JOIN publication_state p ON p.post_id=a.content_id " +
+    "WHERE a.status='active' AND a.lifecycle_state='scheduled' AND p.status='scheduled';",
   "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS db_now;",
 ].join(' ');
 
@@ -324,6 +339,28 @@ export function parsePublicationSafety(payload) {
 
 export function readPublicationSafety(run) {
   return parsePublicationSafety(d1Query(run, PUBLICATION_SAFETY_SQL));
+}
+
+const PUBLICATION_SAFETY_STATEMENTS = PUBLICATION_SAFETY_SQL.split(';').filter((part) => part.trim()).length;
+
+// The post-checkpoint re-read is one batch, so publication, migration and
+// schema facts come from one snapshot and the checkpoint-to-apply gap stays
+// one process long.
+export const FRESH_STATE_SQL =
+  PUBLICATION_SAFETY_SQL + ' SELECT name FROM d1_migrations ORDER BY id; ' + REMOTE_SCHEMA_SQL;
+
+export function readFreshState(run) {
+  const payload = d1Query(run, FRESH_STATE_SQL);
+  return Object.freeze({
+    safety: parsePublicationSafety(payload.slice(0, PUBLICATION_SAFETY_STATEMENTS)),
+    applied: (payload?.[PUBLICATION_SAFETY_STATEMENTS]?.results ?? []).map((row) => row.name),
+    schema: (payload?.[PUBLICATION_SAFETY_STATEMENTS + 1]?.results ?? []).map((row) => ({
+      type: row.type,
+      name: row.name,
+      tbl_name: row.tbl_name,
+      sql: row.sql,
+    })),
+  });
 }
 
 export function evaluateSchemaGates({ auth, candidate, plan, safety }) {
@@ -359,16 +396,21 @@ export function evaluateSchemaGates({ auth, candidate, plan, safety }) {
   }
   const now = Date.parse(safety?.dbNow ?? '');
   const due = safety?.nextDue == null ? null : Date.parse(safety.nextDue);
+  // A halted publisher returns idle before any lease, deferral or post
+  // (cloudflare/src/production-publisher.mjs), so due slots cannot act while
+  // halted; a halt change during the apply is caught by the epochs.
+  const halted = Number(safety?.halt?.halted) === 1;
   if (!Number.isFinite(now)) {
     blockers.push({ id: 'database_clock_unreadable', detail: 'D1 clock could not be read.' });
+  } else if (halted) {
+    // Due slots are inert while halted.
   } else if (due !== null && !Number.isFinite(due)) {
     blockers.push({ id: 'next_due_unreadable', detail: 'The next scheduled assignment time is not a valid instant: ' + String(safety.nextDue) });
   } else if (due !== null && due - now < DUE_SLOT_EXCLUSION_MINUTES * 60_000) {
     blockers.push({
       id: 'publication_window_too_close',
       detail: 'A scheduled assignment is overdue or due within ' + DUE_SLOT_EXCLUSION_MINUTES +
-        ' minutes (next_due ' + safety.nextDue + ', publication ' +
-        (Number(safety?.halt?.halted) === 1 ? 'halted' : 'not halted') + ').',
+        ' minutes (next_due ' + safety.nextDue + ') and publication is not halted.',
     });
   }
   return Object.freeze({ ok: blockers.length === 0, blockers: Object.freeze(blockers) });
@@ -425,10 +467,6 @@ export function isD1Bookmark(bookmark) {
   return typeof bookmark === 'string' && D1_BOOKMARK_RE.test(bookmark);
 }
 
-export function bookmarkPrecedes(earlier, later) {
-  return isD1Bookmark(earlier) && isD1Bookmark(later) && earlier <= later;
-}
-
 // The apply writes, so a post-apply bookmark must be strictly later.
 export function bookmarkStrictlyPrecedes(earlier, later) {
   return isD1Bookmark(earlier) && isD1Bookmark(later) && earlier < later;
@@ -475,6 +513,7 @@ export async function main(
       accountId: env.CLOUDFLARE_ACCOUNT_ID,
       databaseId: PRODUCTION_DATABASE_ID,
       apiToken: env.CLOUDFLARE_API_TOKEN,
+      fetchImpl: boundedFetch(),
     }),
     probeWorkersAccess = () => defaultProbeWorkersAccess({
       token: env.CLOUDFLARE_API_TOKEN,
@@ -509,6 +548,20 @@ export async function main(
     blockers.push({ id: 'production_schema_drift', detail: 'Live schema differs from the replay of applied migrations.' });
   }
 
+  // The pending migrations must replay locally before production is touched,
+  // so the post-apply expectation can never fail after the apply.
+  let expectedAfter = null;
+  if (plan.status === 'pending_exact') {
+    try {
+      expectedAfter = Object.freeze({
+        schema: replaySchema(local, [...appliedBefore, ...plan.pending]),
+        change: expectedSchemaChange(local, plan.pending),
+      });
+    } catch (error) {
+      blockers.push({ id: 'pending_migrations_do_not_replay', detail: message(error) });
+    }
+  }
+
   // The schema path is part of the mutation plane: its credential may reach D1
   // and Time Travel, never Workers scripts (which is what deploys the publisher).
   try {
@@ -529,6 +582,7 @@ export async function main(
   if (options.apply && (
     env.GITHUB_ACTIONS !== 'true' ||
     env.GITHUB_WORKFLOW !== GOVERNED_WORKFLOW ||
+    !String(env.GITHUB_WORKFLOW_REF ?? '').endsWith('/' + GOVERNED_WORKFLOW_FILE + '@refs/heads/main') ||
     env.GITHUB_REF !== 'refs/heads/main'
   )) {
     blockers.push({
@@ -549,7 +603,12 @@ export async function main(
     recorded_at: now().toISOString(),
     candidate,
     auth: { ok: auth?.ok === true, environment: auth?.environment ?? null, d1Readable: auth?.d1?.readable === true },
-    migrations: { appliedBefore, plan, identities },
+    migrations: {
+      appliedBefore,
+      plan,
+      identities,
+      pendingReplayObjects: expectedAfter ? expectedAfter.change.objects.length : null,
+    },
     publicationBefore: epochs(safetyBefore),
     nextDue: safetyBefore.nextDue,
     compatibility,
@@ -587,34 +646,53 @@ export async function main(
     return finish('blocked');
   }
 
-  let safetyFresh;
-  let appliedFresh;
+  let fresh;
   try {
-    safetyFresh = readPublicationSafety(run);
-    appliedFresh = readAppliedMigrations(run);
+    fresh = readFreshState(run);
   } catch (error) {
     blockers.push({ id: 'pre_apply_reread_failed', detail: message(error) + '; nothing was applied.' });
     return finish('blocked', { checkpoint });
   }
-  const fresh = evaluateSchemaGates({ auth, candidate, plan, safety: safetyFresh });
-  if (!fresh.ok || JSON.stringify(epochs(safetyFresh)) !== JSON.stringify(epochs(safetyBefore))) {
-    blockers.push(...fresh.blockers, {
+  const freshGates = evaluateSchemaGates({ auth, candidate, plan, safety: fresh.safety });
+  const freshBlockers = [];
+  if (!freshGates.ok) {
+    freshBlockers.push(...freshGates.blockers, {
+      id: 'gates_failed_after_checkpoint',
+      detail: 'A safety gate failed on the post-checkpoint re-read; nothing was applied.',
+    });
+  }
+  if (JSON.stringify(epochs(fresh.safety)) !== JSON.stringify(epochs(safetyBefore))) {
+    freshBlockers.push({
       id: 'publication_state_changed_before_apply',
       detail: 'Publication or runtime epochs changed after the checkpoint; nothing was applied. Re-run observe first.',
     });
-    return finish('blocked', { checkpoint, publicationFresh: epochs(safetyFresh) });
   }
-  if (JSON.stringify(appliedFresh) !== JSON.stringify(appliedBefore)) {
-    blockers.push({
+  if (JSON.stringify(fresh.applied) !== JSON.stringify(appliedBefore)) {
+    freshBlockers.push({
       id: 'migration_state_changed_before_apply',
       detail: 'd1_migrations changed after the checkpoint; nothing was applied. Re-run observe first.',
     });
-    return finish('blocked', { checkpoint, appliedFresh });
+  }
+  if (!compareSchema(replaySchema(local, appliedBefore), fresh.schema).identical) {
+    freshBlockers.push({
+      id: 'production_schema_drift',
+      detail: 'Live schema changed after the checkpoint; nothing was applied.',
+    });
+  }
+  if (freshBlockers.length > 0) {
+    blockers.push(...freshBlockers);
+    return finish('blocked', {
+      checkpoint,
+      publicationFresh: epochs(fresh.safety),
+      appliedFresh: fresh.applied,
+    });
   }
 
-  // The restore point is on disk before production changes, so a killed or
-  // timed-out run still leaves it for the operator.
+  // The restore point is on disk and in the job log before production
+  // changes, so a killed or timed-out run still leaves it for the operator.
   persist('applying', { checkpoint });
+  console.log('XQUEUE PRODUCTION MUTATION SCHEMA: recovery checkpoint ' + checkpoint.bookmark +
+    ' captured at ' + checkpoint.capturedAt);
 
   let applyError = null;
   try {
@@ -629,14 +707,19 @@ export async function main(
   // Readback before any conclusion, success or failure. A failed command may
   // still have applied some migrations; this path never retries on its own.
   // Each read is recorded on its own, so one failing read cannot lose the rest.
+  // Each step is persisted as it completes, so a later stall cannot lose it.
   const readbackErrors = {};
+  const collected = {};
   const attempt = async (label, read) => {
+    let value = null;
     try {
-      return await read();
+      value = await read();
     } catch (error) {
       readbackErrors[label] = message(error);
-      return null;
     }
+    collected[label] = value;
+    persist('reading_back', { checkpoint, applyError, readbackCollected: collected, readbackErrors });
+    return value;
   };
   const expectedApplied = [...appliedBefore, ...plan.pending];
   const appliedAfter = await attempt('migrations', () => readAppliedMigrations(run));
@@ -648,10 +731,10 @@ export async function main(
     if (!isD1Bookmark(bookmark)) throw new Error('bookmark is not a D1 Time Travel bookmark');
     return bookmark;
   });
-  const schemaAfter = remoteAfter === null
-    ? null
-    : compareSchema(replaySchema(local, expectedApplied), remoteAfter);
-  const expectedChange = expectedSchemaChange(local, plan.pending);
+  const schemaAfter = remoteAfter === null ? null : compareSchema(expectedAfter.schema, remoteAfter);
+  const expectedChange = expectedAfter.change;
+  delete evidence.readbackCollected;
+  delete evidence.readbackErrors;
   const publicationAfter = safetyAfter === null ? null : epochs(safetyAfter);
 
   const readback = {

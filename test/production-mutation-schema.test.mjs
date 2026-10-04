@@ -9,7 +9,7 @@ import {
   DUE_SLOT_EXCLUSION_MINUTES,
   PRODUCTION_SCHEMA_CONFIRM,
   PUBLICATION_SAFETY_SQL,
-  bookmarkPrecedes,
+  bookmarkStrictlyPrecedes,
   compareSchema,
   evaluateSchemaGates,
   expectedSchemaChange,
@@ -20,7 +20,7 @@ import {
   planSchemaMigration,
   replaySchema,
 } from '../scripts/production-mutation-schema.mjs';
-import { REQUIRED_MUTATION_MIGRATIONS } from '../scripts/production-mutation-intake.mjs';
+import { REQUIRED_MUTATION_MIGRATIONS, defaultProbeWorkersAccess } from '../scripts/production-mutation-intake.mjs';
 
 const LOCAL = localMigrations();
 const NAMES = LOCAL.map((item) => item.name);
@@ -135,15 +135,17 @@ function simulatedProduction({
     }
     if (key.startsWith('pnpm wrangler d1 execute xqueue-production')) {
       const sql = argv[argv.indexOf('--command') + 1];
-      if (sql === PUBLICATION_SAFETY_SQL) {
+      const execute = (text) => text.split(';').map((part) => part.trim()).filter(Boolean).map((statement) => ({
+        results: db.prepare(statement).all().map((row) => ({ ...row })),
+      }));
+      if (sql.startsWith(PUBLICATION_SAFETY_SQL)) {
+        // Publication facts are scripted; anything batched after them (the
+        // post-checkpoint re-read) runs against the simulated database.
         const value = safetyReads[Math.min(safetyIndex, safetyReads.length - 1)];
         safetyIndex += 1;
-        return JSON.stringify(safetyPayload(value));
+        return JSON.stringify([...safetyPayload(value), ...execute(sql.slice(PUBLICATION_SAFETY_SQL.length))]);
       }
-      const statements = sql.split(';').map((part) => part.trim()).filter(Boolean);
-      return JSON.stringify(statements.map((statement) => ({
-        results: db.prepare(statement).all().map((row) => ({ ...row })),
-      })));
+      return JSON.stringify(execute(sql));
     }
     throw new Error('unexpected command: ' + key);
   };
@@ -154,6 +156,7 @@ const GOVERNED_ENV = Object.freeze({
   GITHUB_ACTIONS: 'true',
   GITHUB_WORKFLOW: 'Production Mutation Schema',
   GITHUB_REF: 'refs/heads/main',
+  GITHUB_WORKFLOW_REF: 'peteywee/xqueue/.github/workflows/production-mutation-schema.yml@refs/heads/main',
   CLOUDFLARE_ACCOUNT_ID: 'acct',
   CLOUDFLARE_API_TOKEN: 'd1-scoped-token',
 });
@@ -243,6 +246,14 @@ test('gates refuse unverified auth, inexact candidates, and unsafe publication s
     [{ safety: safety({ nextDue: '2026-10-04T09:00:00.000Z' }) }, 'publication_window_too_close'],
     [{ safety: safety({ nextDue: 'garbage' }) }, 'next_due_unreadable'],
   ];
+  // A halted publisher idles before any lease, deferral or post, so due slots
+  // cannot act while halted.
+  for (const nextDue of ['2026-10-04T09:00:00.000Z', '2026-10-04T14:35:00.000Z', 'garbage']) {
+    const haltedGates = evaluateSchemaGates({
+      auth: auth(), candidate: candidate(), plan, safety: safety({ nextDue, halt: { halted: 1, generation: 10 } }),
+    });
+    assert.equal(haltedGates.ok, true, nextDue);
+  }
   for (const [override, id] of cases) {
     const result = evaluateSchemaGates({ auth: auth(), candidate: candidate(), plan, safety: safety(), ...override });
     assert.equal(result.ok, false, id);
@@ -303,10 +314,10 @@ test('expected change is exactly the mutation-control objects and initial lane s
 test('D1 bookmarks are validated and ordered lexically, as documented', () => {
   assert.equal(isD1Bookmark(BOOKMARK_1), true);
   assert.equal(isD1Bookmark('bookmark_12345'), false);
-  assert.equal(bookmarkPrecedes(BOOKMARK_1, BOOKMARK_2), true);
-  assert.equal(bookmarkPrecedes(BOOKMARK_1, BOOKMARK_1), true);
-  assert.equal(bookmarkPrecedes(BOOKMARK_2, BOOKMARK_1), false);
-  assert.equal(bookmarkPrecedes(BOOKMARK_1, null), false);
+  assert.equal(bookmarkStrictlyPrecedes(BOOKMARK_1, BOOKMARK_2), true);
+  assert.equal(bookmarkStrictlyPrecedes(BOOKMARK_1, BOOKMARK_1), false, 'an apply writes, so equal is not later');
+  assert.equal(bookmarkStrictlyPrecedes(BOOKMARK_2, BOOKMARK_1), false);
+  assert.equal(bookmarkStrictlyPrecedes(BOOKMARK_1, null), false);
 });
 
 test('observe mode proves compatibility and identities without changing production', async () => {
@@ -710,16 +721,124 @@ test('drift with names that LIKE wildcards would hide is still detected', async 
   assert.ok(evidence.compatibility.unexpected.includes('table:xcf_scratch'));
 });
 
-test('the next-due read includes overdue scheduled assignments', () => {
+test('the next-due read is exactly what an unhalted publisher would act on', () => {
   const statement = PUBLICATION_SAFETY_SQL.split(';').map((part) => part.trim()).find((part) => part.includes('next_due'));
   const db = new DatabaseSync(':memory:');
   try {
-    db.exec('CREATE TABLE queue_assignments (status TEXT, lifecycle_state TEXT, resolved_at TEXT)');
-    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'scheduled', '2000-01-01T00:00:00.000Z');
-    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'scheduled', '2999-01-01T00:00:00.000Z');
-    db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('active', 'deferred', '1999-01-01T00:00:00.000Z');
+    db.exec('CREATE TABLE queue_assignments (content_id TEXT, status TEXT, lifecycle_state TEXT, resolved_at TEXT)');
+    db.exec('CREATE TABLE publication_state (post_id TEXT, status TEXT)');
+    const add = (id, status, lifecycle, at, publication) => {
+      db.prepare('INSERT INTO queue_assignments VALUES (?,?,?,?)').run(id, status, lifecycle, at);
+      if (publication) db.prepare('INSERT INTO publication_state VALUES (?,?)').run(id, publication);
+    };
+    add('posted', 'active', 'scheduled', '1990-01-01T00:00:00.000Z', 'posted');
+    add('skipped', 'active', 'scheduled', '1991-01-01T00:00:00.000Z', 'skipped');
+    add('orphan', 'active', 'scheduled', '1992-01-01T00:00:00.000Z', null);
+    add('deferred', 'active', 'deferred', '1993-01-01T00:00:00.000Z', 'scheduled');
+    add('superseded', 'superseded', 'scheduled', '1994-01-01T00:00:00.000Z', 'scheduled');
+    add('overdue', 'active', 'scheduled', '2000-01-01T00:00:00.000Z', 'scheduled');
+    add('future', 'active', 'scheduled', '2999-01-01T00:00:00.000Z', 'scheduled');
     assert.equal(db.prepare(statement).get().next_due, '2000-01-01T00:00:00.000Z');
+    db.exec("DELETE FROM queue_assignments WHERE content_id IN ('overdue','future')");
+    assert.equal(db.prepare(statement).get().next_due, null, 'resolved and protected slots never block');
   } finally {
     db.close();
   }
+});
+
+test('pending migrations must replay locally before production is touched', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xqueue-migrations-'));
+  for (const item of LOCAL) {
+    writeFileSync(join(dir, item.name), item.name === '0017_publication_mutation_mutex.sql' ? 'CREATE TRIGGER broken;' : item.sql);
+  }
+  const sim = simulatedProduction();
+  const { evidence } = await runMain(APPLY, { run: sim.run, migrationsDir: dir, captureBookmark: async () => BOOKMARK_1 });
+  assert.equal(evidence.status, 'blocked');
+  assert.ok(evidence.blockers.some((item) => item.id === 'pending_migrations_do_not_replay'));
+  assert.equal(sim.calls.some((key) => key.includes('migrations apply')), false);
+});
+
+test('schema drift or a closing window after the checkpoint stops the apply, with accurate blockers', async () => {
+  const drifted = simulatedProduction();
+  const late = await runMain(APPLY, {
+    run: drifted.run,
+    captureBookmark: async () => {
+      drifted.db.exec('CREATE TABLE late_drift (x INTEGER)');
+      return BOOKMARK_1;
+    },
+  });
+  assert.deepEqual(late.evidence.blockers.map((item) => item.id), ['production_schema_drift']);
+  assert.equal(late.evidence.checkpoint.bookmark, BOOKMARK_1);
+  assert.equal(drifted.calls.some((key) => key.includes('migrations apply')), false);
+
+  // Only time passed: the window closed, but no epoch moved.
+  const closing = simulatedProduction({
+    safetyReads: [
+      safety({ nextDue: '2026-10-04T15:01:00.000Z' }),
+      safety({ nextDue: '2026-10-04T15:01:00.000Z', dbNow: '2026-10-04T14:32:00.000Z' }),
+    ],
+  });
+  const { evidence } = await runMain(APPLY, { run: closing.run, captureBookmark: async () => BOOKMARK_1 });
+  const ids = evidence.blockers.map((item) => item.id);
+  assert.ok(ids.includes('publication_window_too_close'));
+  assert.ok(ids.includes('gates_failed_after_checkpoint'));
+  assert.equal(ids.includes('publication_state_changed_before_apply'), false);
+});
+
+test('readback is persisted as each step completes', async () => {
+  const output = mkdtempSync(join(tmpdir(), 'xqueue-schema-'));
+  let midway = null;
+  let calls = 0;
+  const sim = simulatedProduction();
+  await runMain(APPLY, {
+    output,
+    run: sim.run,
+    captureBookmark: async () => {
+      calls += 1;
+      if (calls === 1) return BOOKMARK_1;
+      midway = JSON.parse(readFileSync(join(output, readdirSync(output)[0]), 'utf8'));
+      return BOOKMARK_2;
+    },
+  });
+  assert.equal(midway.status, 'reading_back');
+  assert.equal(midway.checkpoint.bookmark, BOOKMARK_1);
+  assert.ok(Array.isArray(midway.readbackCollected.migrations));
+  assert.ok(Array.isArray(midway.readbackCollected.schema));
+  assert.ok(midway.readbackCollected.publication);
+  const final = JSON.parse(readFileSync(join(output, readdirSync(output)[0]), 'utf8'));
+  assert.equal(final.status, 'applied');
+  assert.equal(final.readbackCollected, undefined);
+});
+
+test('config selection follows wrangler, and apply requires this workflow file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'xqueue-config-'));
+  const base = JSON.parse(readFileSync('wrangler.status.jsonc', 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+  const shadowed = structuredClone(base);
+  shadowed.d1_databases.unshift({ binding: 'xqueue-production', database_name: 'other', database_id: 'x', migrations_dir: 'other' });
+  const path = join(dir, 'shadowed.jsonc');
+  writeFileSync(path, JSON.stringify(shadowed));
+  const { evidence } = await runMain(['--environment', 'production'], { run: simulatedProduction().run, configPath: path });
+  assert.ok(evidence.blockers.some((item) => item.id === 'production_config_mismatch'));
+
+  const sim = simulatedProduction();
+  const other = await runMain(APPLY, {
+    run: sim.run,
+    env: { ...GOVERNED_ENV, GITHUB_WORKFLOW_REF: 'peteywee/xqueue/.github/workflows/other.yml@refs/heads/main' },
+    captureBookmark: async () => BOOKMARK_1,
+  });
+  assert.ok(other.evidence.blockers.some((item) => item.id === 'apply_outside_governed_workflow'));
+  assert.equal(sim.calls.some((key) => key.includes('migrations apply')), false);
+});
+
+test('the Workers scope probe never treats a missing account as proof', async () => {
+  for (const accountId of [undefined, '', '  ']) {
+    await assert.rejects(
+      defaultProbeWorkersAccess({ token: 't', accountId, fetchImpl: async () => ({ ok: false, status: 403 }) }),
+      /requires the Cloudflare account id/,
+    );
+  }
+  assert.equal(
+    await defaultProbeWorkersAccess({ token: 't', accountId: 'acct', fetchImpl: async () => ({ ok: false, status: 403 }) }),
+    'denied',
+  );
 });

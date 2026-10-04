@@ -8,7 +8,11 @@ name: Production Mutation Schema
 #
 # The credential is MUTATION_D1_API_TOKEN (D1 + Time Travel, no Workers
 # scripts access; the script refuses a token that can reach Workers scripts).
-# It is given only to the step that runs the script.
+# It must be an environment secret of production-mutation-schema, never a
+# repository secret, so only jobs admitted to that environment can read it.
+# The environment must exist with required reviewers and a main-only
+# deployment branch policy before first use; GitHub creates a missing
+# environment with no protection. Only the script step receives the token.
 on:
   workflow_dispatch:
     inputs:
@@ -40,6 +44,8 @@ jobs:
     if: github.ref == 'refs/heads/main' && inputs.mode == 'observe'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Read-only, but the D1 credential lives only in this environment.
+    environment: production-mutation-schema
 
     steps:
       - name: Checkout exact main
@@ -82,8 +88,8 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: xqueue-production-mutation-schema-observe-${{ github.sha }}-${{ github.run_id }}
-          path: /tmp/xqueue-production-mutation-schema/*.json
+          name: xqueue-production-mutation-schema-observe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}/*.json
           if-no-files-found: warn
 
   apply:
@@ -137,6 +143,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: xqueue-production-mutation-schema-apply-${{ github.sha }}-${{ github.run_id }}
-          path: /tmp/xqueue-production-mutation-schema/*.json
+          name: xqueue-production-mutation-schema-apply-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}/*.json
           if-no-files-found: warn

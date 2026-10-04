@@ -464,7 +464,7 @@ function blockedWithoutSafety({ auth, candidate, migrations, plannedOperationId,
   });
 }
 
-function boundedFetch(timeoutMs = CLOUDFLARE_PROBE_TIMEOUT_MS) {
+export function boundedFetch(timeoutMs = CLOUDFLARE_PROBE_TIMEOUT_MS) {
   return (url, init = {}) => globalThis.fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
 }
 
@@ -477,6 +477,10 @@ async function defaultProbeTimeTravel({ token, accountId, databaseId }) {
 // account's Workers scripts. If it can, it has Workers access the mutation
 // plane must not hold, since that is what redeploys the publisher.
 export async function defaultProbeWorkersAccess({ token, accountId, fetchImpl = boundedFetch() }) {
+  // A 401/403 for a missing account proves nothing about the token's scope.
+  if (typeof accountId !== 'string' || accountId.trim() === '') {
+    throw new Error('the Workers scope probe requires the Cloudflare account id');
+  }
   const response = await fetchImpl(
     'https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/scripts',
     { method: 'GET', headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } },
