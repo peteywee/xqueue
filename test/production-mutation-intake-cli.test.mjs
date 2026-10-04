@@ -793,4 +793,35 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   assert.match(printed, /INTERRUPTED AFTER DISPATCH \(SIGTERM\)/);
   assert.match(printed, /^readback_required=1$/m);
   assert.ok(printed.includes(result.planned.operationId), 'planned operation id is printed');
+
+  // With a definitive answer in hand, the answer is reported and readback is
+  // asked for only when the answer needs it.
+  const report = (answer) => {
+    const out = [];
+    const saved = console.error;
+    console.error = (line) => out.push(String(line));
+    try {
+      call.onInterruptedAfterDispatch('SIGINT', answer);
+    } finally {
+      console.error = saved;
+    }
+    return out.join('\n');
+  };
+  const matching = { operationId: result.planned.operationId, contentIds: result.planned.contentIds, contentDigests: result.planned.contentDigests };
+  const clean = report({ httpStatus: 200, ok: true, body: { status: 'ok', requiresReadback: false, planned: matching } });
+  assert.match(clean, /INTERRUPTED DURING TEARDOWN \(SIGINT\); the Worker answered HTTP 200/);
+  assert.doesNotMatch(clean, /readback_required/);
+  assert.match(clean, /"response"/);
+  assert.match(
+    report({ httpStatus: 409, ok: false, body: { status: 'blocked', requiresReadback: true } }),
+    /^readback_required=1$/m,
+  );
+  assert.match(
+    report({ httpStatus: 200, ok: true, body: { status: 'ok', planned: { ...matching, operationId: 'mutation-intake-' + 'f'.repeat(24) } } }),
+    /^readback_required=1$/m,
+  );
+  assert.doesNotMatch(
+    report({ httpStatus: 409, ok: false, body: { status: 'error', requiresReadback: false, faultClass: 'PRE_DISPATCH_STATE_CONFLICT' } }),
+    /readback_required/,
+  );
 });

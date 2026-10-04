@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,7 @@ import {
   REQUIRED_MUTATION_TRIGGERS,
   REQUIRED_MUTATION_TRIGGER_SQL,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
+  MUTATION_OWNED_TABLES,
   assertHealthIdentity,
   childEnvironment,
   collectD1TokenReadiness,
@@ -140,6 +141,7 @@ function fakeProcess() {
     pid: 4242,
     signals,
     record,
+    on: (name, fn) => signals.on(name, fn),
     once: (name, fn) => signals.once(name, fn),
     removeListener: (name, fn) => signals.removeListener(name, fn),
     kill: (pid, signal) => {
@@ -401,7 +403,7 @@ test('a listener that cannot prove this launch\'s control token never receives t
       challenge: new URL(url).searchParams.get('challenge'),
     })), /did not answer the identity challenge/],
     ['identity refused', async () => jsonResponse({ service: MUTATION_WORKER_SERVICE, faultClass: 'CONTROL_TOKEN_UNAVAILABLE' }, 503),
-      /did not answer the identity challenge/],
+      /refused the identity challenge: CONTROL_TOKEN_UNAVAILABLE \(wrangler did not bind MUTATION_CONTROL_TOKEN\)/],
     ['identity unreachable', async () => { throw new TypeError('fetch failed'); }, /did not answer the identity challenge/],
   ];
   for (const [name, identity, pattern] of cases) {
@@ -1004,7 +1006,7 @@ test('applied triggers must match the committed bodies, not only the names', () 
     d1Token: { ok: true, blockers: [] },
   });
   assert.deepEqual(preflight.readiness.blockers.map((item) => item.id), ['production_mutation_schema_incomplete']);
-  assert.match(preflight.readiness.blockers[0].detail, /differ from the committed migrations: mutation_lane_claim_guard$/);
+  assert.match(preflight.readiness.blockers[0].detail, /missing, differ from, or are not in the committed migrations: mutation_lane_claim_guard$/);
 });
 
 test('an empty descriptor account never matches an empty launch account', () => {
@@ -1123,4 +1125,120 @@ test('an interruption after dispatch reports readback; before dispatch it does n
     onInterruptedAfterDispatch: () => { throw new Error('stderr closed'); },
   }));
   assert.ok(processImpl.record.some(([pid, signal]) => pid === 4242 && signal === 'SIGTERM'));
+});
+
+test('identity transport hiccups are retried with a fresh challenge; a wrong proof is final', async () => {
+  const { spawnImpl, calls } = fakeChild();
+  const requests = [];
+  let failures = 1;
+  const flaky = serveWorker(calls, { requests });
+  const fetchImpl = async (url, init) => {
+    if (url.includes('/identity?') && failures > 0) {
+      failures -= 1;
+      requests.push({ url, init });
+      throw new DOMException('timed out', 'TimeoutError');
+    }
+    return flaky(url, init);
+  };
+  const result = await launch({ spawnImpl, fetchImpl });
+  assert.equal(result.ok, true);
+  const challenges = requests.filter((item) => item.url.includes('/identity?')).map((item) => new URL(item.url).searchParams.get('challenge'));
+  assert.equal(challenges.length, 2);
+  assert.notEqual(challenges[0], challenges[1], 'each attempt uses a fresh challenge');
+
+  const wrong = fakeChild();
+  let identityCalls = 0;
+  const goodBindings = { ...EXPECTED, secretsBound: BOUND };
+  await assert.rejects(launch({
+    spawnImpl: wrong.spawnImpl,
+    fetchImpl: serveWorker(wrong.calls, {
+      identity: async (url) => {
+        identityCalls += 1;
+        const challenge = new URL(url).searchParams.get('challenge');
+        return jsonResponse(healthBody(goodBindings, {
+          challenge,
+          challengeResponse: await identityProof('stale'.padEnd(64, '0'), challenge, goodBindings),
+        }));
+      },
+    }),
+  }), /does not hold this launch's control token/);
+  assert.equal(identityCalls, 1);
+});
+
+test('identity failures keep the wrangler stderr tail', async () => {
+  const child = fakeChild({ stderrText: () => 'wrangler: secret binding skipped\n' });
+  await assert.rejects(launch({
+    spawnImpl: child.spawnImpl,
+    fetchImpl: serveWorker(child.calls, {
+      identity: async () => jsonResponse({ service: MUTATION_WORKER_SERVICE, faultClass: 'CONTROL_TOKEN_UNAVAILABLE' }, 503),
+    }),
+  }), /CONTROL_TOKEN_UNAVAILABLE[\s\S]*wrangler stderr \(tail\):\nwrangler: secret binding skipped/);
+});
+
+test('an interruption during teardown reports the Worker answer instead of a blind readback', async () => {
+  const { spawnImpl, calls } = fakeChild();
+  const processImpl = fakeProcess();
+  const kill = processImpl.kill;
+  processImpl.kill = (pid, signal) => {
+    if (pid < 0 && signal === 'SIGTERM') {
+      processImpl.record.push([pid, signal]);
+      setTimeout(() => processImpl.signals.emit('SIGINT', 'SIGINT'), 20);
+      return;
+    }
+    kill(pid, signal);
+  };
+  const reports = [];
+  const answer = { service: MUTATION_WORKER_SERVICE, status: 'ok', requiresReadback: false, planned: { operationId: 'mutation-intake-x' } };
+  const result = await launch({
+    spawnImpl,
+    processImpl,
+    fetchImpl: serveWorker(calls, { intake: async () => jsonResponse(answer) }),
+    onInterruptedAfterDispatch: (signal, received) => {
+      // Reported before the env dir is removed: nothing can cut it short.
+      reports.push({ signal, received, envDirPresent: existsSync(path.dirname(calls.spawn.args[10])) });
+      // A second signal during the report is ignored.
+      processImpl.signals.emit('SIGTERM', 'SIGTERM');
+    },
+  });
+  assert.deepEqual(result, answer);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].signal, 'SIGINT');
+  assert.deepEqual(reports[0].received, { httpStatus: 200, ok: true, body: answer });
+  assert.equal(reports[0].envDirPresent, true);
+  assert.deepEqual(processImpl.record.filter(([pid]) => pid === 4242), [[4242, 'SIGINT']]);
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(processImpl.signals.listenerCount(name), 0, name);
+});
+
+test('only committed triggers may act on mutation-owned tables', () => {
+  assert.deepEqual([...MUTATION_OWNED_TABLES], [
+    'mutation_lane_events', 'mutation_lane_halt_events', 'mutation_lane_halt_state', 'mutation_lane_state',
+    'mutation_operation_events', 'mutation_operation_items', 'mutation_operations',
+  ]);
+  const stored = storedTriggers();
+  const extra = { name: 'mutation_lane_auto_release', tbl_name: 'mutation_lane_state', sql: 'CREATE TRIGGER mutation_lane_auto_release AFTER UPDATE ON mutation_lane_state BEGIN SELECT 1; END' };
+  assert.deepEqual(mutationTriggerDrift([...stored, extra]), ['mutation_lane_auto_release']);
+  // Shared publication tables carry triggers from their own migrations.
+  const shared = { name: 'publication_leases_owner_guard', tbl_name: 'publication_leases', sql: 'CREATE TRIGGER publication_leases_owner_guard BEFORE UPDATE ON publication_leases BEGIN SELECT 1; END' };
+  assert.deepEqual(mutationTriggerDrift([...stored, shared]), []);
+});
+
+test('no other production migration redefines a required trigger or adds one to a mutation table', () => {
+  const dir = path.join(ROOT, 'cloudflare/migrations-production');
+  const others = readdirSync(dir).filter((name) => name.endsWith('.sql') && !REQUIRED_MUTATION_MIGRATIONS.includes(name));
+  assert.ok(others.length > 0);
+  for (const name of others) {
+    const text = readFileSync(path.join(dir, name), 'utf8');
+    for (const match of text.matchAll(/\b(?:CREATE|DROP)\s+TRIGGER\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z_]\w*)/gi)) {
+      assert.equal(
+        REQUIRED_MUTATION_TRIGGERS.includes(match[1]), false,
+        name + ' redefines ' + match[1] + '; add it to REQUIRED_MUTATION_MIGRATIONS so readiness compares the final body',
+      );
+    }
+    for (const match of text.matchAll(/\bON\s+([A-Za-z_]\w*)/gi)) {
+      assert.equal(
+        MUTATION_OWNED_TABLES.includes(match[1]), false,
+        name + ' touches mutation table ' + match[1] + '; add it to REQUIRED_MUTATION_MIGRATIONS',
+      );
+    }
+  }
 });

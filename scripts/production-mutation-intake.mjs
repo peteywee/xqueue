@@ -36,22 +36,39 @@ export function committedTriggerDefinitions(sqlText) {
     .map((match) => [match[1], normalizeTriggerSql(match[0])]);
 }
 
+const REQUIRED_MUTATION_MIGRATION_TEXT = Object.freeze(REQUIRED_MUTATION_MIGRATIONS.map((name) =>
+  readFileSync(new URL('../cloudflare/migrations-production/' + name, import.meta.url), 'utf8')));
+
 export const REQUIRED_MUTATION_TRIGGER_SQL = Object.freeze(Object.fromEntries(
-  REQUIRED_MUTATION_MIGRATIONS.flatMap((name) => committedTriggerDefinitions(
-    readFileSync(new URL('../cloudflare/migrations-production/' + name, import.meta.url), 'utf8'),
-  )),
+  REQUIRED_MUTATION_MIGRATION_TEXT.flatMap((text) => committedTriggerDefinitions(text)),
 ));
 
 export const REQUIRED_MUTATION_TRIGGERS = Object.freeze(
   Object.keys(REQUIRED_MUTATION_TRIGGER_SQL).sort(),
 );
 
-// Trigger names whose applied body is missing or differs from the committed one.
+// Tables these migrations create. Only the committed triggers may act on them;
+// shared publication tables also carry triggers from their own migrations.
+export const MUTATION_OWNED_TABLES = Object.freeze(
+  REQUIRED_MUTATION_MIGRATION_TEXT.flatMap((text) =>
+    [...text.matchAll(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gm)].map((match) => match[1]),
+  ).sort(),
+);
+
+// Trigger names whose applied body is missing or differs from the committed
+// one, plus any uncommitted trigger on a mutation-owned table.
 export function mutationTriggerDrift(applied) {
-  const bodies = new Map((Array.isArray(applied) ? applied : []).map((row) => [row?.name, row?.sql]));
-  return REQUIRED_MUTATION_TRIGGERS.filter((name) =>
+  const rows = Array.isArray(applied) ? applied : [];
+  const bodies = new Map(rows.map((row) => [row?.name, row?.sql]));
+  const drifted = REQUIRED_MUTATION_TRIGGERS.filter((name) =>
     !bodies.has(name) ||
     normalizeTriggerSql(bodies.get(name)) !== REQUIRED_MUTATION_TRIGGER_SQL[name]);
+  const extra = rows
+    .filter((row) => MUTATION_OWNED_TABLES.includes(row?.tbl_name) &&
+      !Object.hasOwn(REQUIRED_MUTATION_TRIGGER_SQL, row?.name))
+    .map((row) => String(row.name))
+    .sort();
+  return [...drifted, ...extra];
 }
 
 // The last #168 commit that touched the publisher's module graph (5185545).
@@ -363,12 +380,12 @@ function readSchema(run, env) {
     '--config', 'wrangler.status.jsonc',
     '--remote', '--yes', '--json',
     '--command',
-    "SELECT name FROM d1_migrations ORDER BY id; SELECT name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name;",
+    "SELECT name FROM d1_migrations ORDER BY id; SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name;",
   ], { env });
   const payload = parseJsonOutput(raw);
   return {
     migrations: (payload?.[0]?.results ?? []).map((row) => row.name),
-    triggers: (payload?.[1]?.results ?? []).map((row) => ({ name: row.name, sql: row.sql })),
+    triggers: (payload?.[1]?.results ?? []).map((row) => ({ name: row.name, tbl_name: row.tbl_name, sql: row.sql })),
   };
 }
 
@@ -632,7 +649,7 @@ export function collectOperatorPreflight(
       auth, candidate, migrations, plannedOperationId, d1Token, authError,
       extra: [{
         id: 'production_mutation_schema_incomplete',
-        detail: 'Applied mutation triggers are missing or differ from the committed migrations: ' +
+        detail: 'Applied mutation triggers are missing, differ from, or are not in the committed migrations: ' +
           driftedTriggers.join(', '),
       }],
     });
@@ -831,30 +848,53 @@ async function waitForHealth(url, fetchImpl, state, deadlineMs = HEALTH_DEADLINE
 }
 
 // Proves, before the control token or payload is sent, that the listener holds
-// this launch's control token and bound exactly the committed descriptor. The
-// challenge is fresh per launch, so a stale or squatting listener cannot answer.
-export async function verifyWorkerIdentity(url, fetchImpl, controlToken, expected) {
-  const challenge = randomBytes(32).toString('hex');
-  let body = null;
-  try {
-    const response = await fetchImpl(url + '/identity?challenge=' + challenge, {
-      headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
-    });
-    if (response.ok) body = await response.json();
-  } catch {
-    body = null;
+// this launch's control token and bound exactly the committed descriptor. Each
+// attempt uses a fresh challenge, so a stale or squatting listener cannot
+// answer. Only transport failures are retried; a Worker refusal or a wrong
+// proof is final.
+export async function verifyWorkerIdentity(
+  url,
+  fetchImpl,
+  controlToken,
+  expected,
+  { attempts = 3, retryDelayMs = 500 } = {},
+) {
+  let lastProblem = 'no answer';
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const challenge = randomBytes(32).toString('hex');
+    let response = null;
+    let body = null;
+    try {
+      response = await fetchImpl(url + '/identity?challenge=' + challenge, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
+      });
+      body = await response.json();
+    } catch (error) {
+      lastProblem = error instanceof Error ? error.message : String(error);
+    }
+    if (response && !response.ok && body?.service === MUTATION_WORKER_SERVICE) {
+      fail(
+        'the ephemeral Worker refused the identity challenge: ' + String(body.faultClass ?? 'HTTP ' + response.status) +
+        (body.faultClass === 'CONTROL_TOKEN_UNAVAILABLE' ? ' (wrangler did not bind MUTATION_CONTROL_TOKEN)' : ''),
+      );
+    }
+    if (response?.ok && body) {
+      if (body.challenge !== challenge || typeof body.challengeResponse !== 'string') {
+        fail('the listener on the intake port did not answer the identity challenge');
+      }
+      const proof = Buffer.from(await identityProof(controlToken, challenge, body.bindings ?? null), 'utf8');
+      const answer = Buffer.from(body.challengeResponse, 'utf8');
+      if (proof.length !== answer.length || !timingSafeEqual(proof, answer)) {
+        fail('the listener on the intake port does not hold this launch\'s control token');
+      }
+      assertHealthIdentity(body, expected);
+      return body;
+    }
+    if (response) lastProblem = 'HTTP ' + response.status;
+    if (attempt < attempts) await sleep(retryDelayMs);
   }
-  if (!body || body.challenge !== challenge || typeof body.challengeResponse !== 'string') {
-    fail('the listener on the intake port did not answer the identity challenge');
-  }
-  const proof = Buffer.from(await identityProof(controlToken, challenge, body.bindings ?? null), 'utf8');
-  const answer = Buffer.from(body.challengeResponse, 'utf8');
-  if (proof.length !== answer.length || !timingSafeEqual(proof, answer)) {
-    fail('the listener on the intake port does not hold this launch\'s control token');
-  }
-  assertHealthIdentity(body, expected);
-  return body;
+  fail('the listener on the intake port did not answer the identity challenge (' + lastProblem + ')');
 }
 
 export function verifyTreeUnchanged(candidate, run = runSync) {
@@ -904,7 +944,7 @@ export async function invokeEphemeralWorker({
   const envDir = mkdtempSync(join(tmpdir(), 'xqueue-mutation-env-'));
   const envFile = join(envDir, 'empty.env');
 
-  const state = { exited: false, spawnError: null, dispatched: false };
+  const state = { exited: false, spawnError: null, dispatched: false, answer: null };
   let child = null;
   // The Worker binds production D1 and holds the control token, so it must not
   // outlive this process even when the CLI is interrupted by a signal.
@@ -928,23 +968,31 @@ export async function invokeEphemeralWorker({
     rmSync(envDir, { recursive: true, force: true });
   };
   const forwardedSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  let signalled = false;
   const onSignal = (signal) => {
+    if (signalled) return;
+    signalled = true;
     // No time to wait on a signal: kill the whole group outright.
     killGroup('SIGKILL');
-    rmSync(envDir, { recursive: true, force: true });
-    for (const name of forwardedSignals) processImpl.removeListener(name, onSignal);
-    // Once the request may have reached production, the operator must read
-    // back before any retry, even though no answer arrived.
+    // Report first, while the handlers are still installed, so neither a
+    // failing cleanup nor a second signal can cut it short. Past dispatch the
+    // operator needs the Worker's answer if one arrived, else a readback.
     if (state.dispatched) {
       try {
-        onInterruptedAfterDispatch(signal);
+        onInterruptedAfterDispatch(signal, state.answer);
       } catch {
         // Reporting must never stop the signal from terminating the process.
       }
     }
+    try {
+      rmSync(envDir, { recursive: true, force: true });
+    } catch {
+      // Terminating anyway; the env file is empty and holds no secret.
+    }
+    for (const name of forwardedSignals) processImpl.removeListener(name, onSignal);
     processImpl.kill(processImpl.pid, signal);
   };
-  for (const name of forwardedSignals) processImpl.once(name, onSignal);
+  for (const name of forwardedSignals) processImpl.on(name, onSignal);
 
   const stderr = tailBuffer();
   const secrets = [controlToken, env.MUTATION_D1_API_TOKEN, env.CLOUDFLARE_API_TOKEN];
@@ -995,7 +1043,11 @@ export async function invokeEphemeralWorker({
     } catch (error) {
       throw withOutput(state.spawnError ?? error);
     }
-    await verifyWorkerIdentity(baseUrl, fetchImpl, controlToken, expected);
+    try {
+      await verifyWorkerIdentity(baseUrl, fetchImpl, controlToken, expected);
+    } catch (error) {
+      throw withOutput(error);
+    }
 
     // wrangler dev rebuilds on file changes, so the tree proven at preflight
     // must still be the tree serving the request.
@@ -1041,6 +1093,9 @@ export async function invokeEphemeralWorker({
       // says nothing about whether the intake ran.
       throw postDispatchAmbiguity('intake request failed outside the Worker (HTTP ' + response.status + ')', null);
     }
+    // A definitive Worker answer: an interruption during teardown reports it
+    // instead of asking for a blind readback.
+    state.answer = Object.freeze({ httpStatus: response.status, ok: response.ok, body });
     if (!response.ok) {
       const detail = JSON.stringify(body);
       const error = new Error(
@@ -1195,10 +1250,29 @@ export async function main(
       payload,
       port: options.port,
       env,
-      onInterruptedAfterDispatch: (signal) => {
-        console.error('XQUEUE PRODUCTION INTAKE: INTERRUPTED AFTER DISPATCH (' + signal + ')');
-        console.error('readback_required=1');
-        console.error(JSON.stringify({ planned }, null, 2));
+      onInterruptedAfterDispatch: (signal, answer) => {
+        if (!answer) {
+          console.error('XQUEUE PRODUCTION INTAKE: INTERRUPTED AFTER DISPATCH (' + signal + ')');
+          console.error('readback_required=1');
+          console.error(JSON.stringify({ planned }, null, 2));
+          return;
+        }
+        console.error(
+          'XQUEUE PRODUCTION INTAKE: INTERRUPTED DURING TEARDOWN (' + signal +
+          '); the Worker answered HTTP ' + answer.httpStatus,
+        );
+        let identityMatches = true;
+        if (answer.ok) {
+          try {
+            assertObservedIdentity(planned, answer.body?.planned);
+          } catch {
+            identityMatches = false;
+          }
+        }
+        if (answer.body?.requiresReadback === true || !identityMatches) {
+          console.error('readback_required=1');
+        }
+        console.error(JSON.stringify({ planned, response: answer.body }, null, 2));
       },
     });
     assertObservedIdentity(planned, result?.planned);

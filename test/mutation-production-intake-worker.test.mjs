@@ -698,22 +698,19 @@ test('replay refuses when publication authority changed since the operator verif
     );
   }
 
-  // Only an operation with no effect is still pre-dispatch: replan and retry.
-  // (The re-plan trigger refuses any other effect state.)
-  for (const effectState of ['none']) {
-    await assert.rejects(
-      () => runProductionIntakeRequest(
-        env(fakeDb({ replay: true })),
-        changedAuthority,
-        deps({ replayOperation: { ...existingOperation(), effect_state: effectState } }),
-      ),
-      (error) =>
-        error?.faultClass === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
-        error?.retryable === true &&
-        error?.requiresReadback !== true,
-      effectState,
-    );
-  }
+  // A never-dispatched operation is not resumable by replay, so it is never
+  // advertised as a retryable replan that could not succeed.
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      changedAuthority,
+      deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } }),
+    ),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.retryable !== true &&
+      error?.requiresReadback === true,
+  );
 });
 
 test('an unexpected runner exception on the fresh path always requires readback', async () => {
@@ -801,6 +798,48 @@ test('a past-dispatch replay that does not complete exactly always requires read
     (error) =>
       error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
       error?.requiresReadback === true,
+  );
+});
+
+test('every way a past-dispatch replay can stop requires readback, applied once', async () => {
+  const stops = {
+    'safety read outage': (d) => {
+      const create = d.createTransport;
+      d.createTransport = (args) => ({
+        ...create(args),
+        async readPublicationSafety() { throw new Error('D1 temporarily unavailable'); },
+      });
+    },
+    'post-commit verification failure': (d) => {
+      const verify = d.verifyRuntime;
+      d.verifyRuntime = async (envValue, options) => {
+        if (options.includeSnapshot === false) throw new Error('network timeout after commit');
+        return verify(envValue, options);
+      };
+    },
+  };
+  for (const [name, breakIt] of Object.entries(stops)) {
+    for (const effectState of ['applied', 'dispatched']) {
+      const d = deps({ replayOperation: { ...existingOperation(), effect_state: effectState } });
+      breakIt(d);
+      await assert.rejects(
+        () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
+        (error) => {
+          if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+          assert.equal(error.requiresReadback, true);
+          assert.equal(error.retryable, false);
+          return true;
+        },
+        name + ' / ' + effectState,
+      );
+    }
+  }
+  // Before dispatch the same outage stays a retryable pre-dispatch stop.
+  const d = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
+  stops['safety read outage'](d);
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
+    (error) => error?.faultClass === 'PRE_DISPATCH_STATE_UNAVAILABLE' && error?.retryable === true,
   );
 });
 

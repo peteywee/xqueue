@@ -699,6 +699,136 @@ function json(value, init = {}) {
   return new Response(JSON.stringify(value, null, 2), { ...init, headers });
 }
 
+// Replays an operation that already exists. Faults here are raised as for a
+// pre-dispatch stop; the caller turns every one of them into readback when the
+// operation is past dispatch.
+async function replayExistingOperation({
+  env,
+  db,
+  transport,
+  trustedAuth,
+  candidate,
+  expectedPublicationAuthority,
+  normalized,
+  operationId,
+  existingOperation,
+  pastDispatch,
+  recordedAt,
+  verifyRuntime,
+  resumeMutation,
+}) {
+  let replaySafety;
+  try {
+    replaySafety = await transport.readPublicationSafety();
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+
+  const replayPreflight = evaluateProductionMutationPreflight({
+    environment: 'production',
+    auth: trustedAuth,
+    candidate,
+    safety: replaySafety,
+  });
+  if (!replayPreflight.ok) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_CONFLICT',
+      'production replay preflight blocked: ' +
+        replayPreflight.blockers.map((item) => item.id).join(','),
+      { httpStatus: 409 },
+    );
+  }
+
+  // Read-only, and it decides whether the operation is resumable at all, so a
+  // non-resumable operation is never advertised as a retryable replan.
+  const replay = await loadReplayState(db, normalized, existingOperation);
+
+  const replayAuthorityMismatch = publicationAuthorityMismatch(
+    replayPreflight.observed.publicationAuthority,
+    expectedPublicationAuthority,
+  );
+  if (replayAuthorityMismatch) {
+    throw productionFault(
+      'PRE_DISPATCH_REPLAN_REQUIRED',
+      replayAuthorityMismatch,
+      { httpStatus: 409, retryable: true },
+    );
+  }
+
+  const mutation = await resumeMutation({
+    intakePlan: replay.intakePlan,
+    controlPlan: replay.controlPlan,
+    runtimeRevision: replay.runtimeRevision,
+    transport,
+    recordedAt,
+  });
+
+  const planned = Object.freeze({
+    operationId,
+    intakeOperationId: replay.intakePlan.operation_id,
+    itemCount: replay.intakePlan.items.length,
+    contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
+    contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
+  });
+
+  if (!['applied', 'already_applied'].includes(mutation?.status)) {
+    if (pastDispatch) {
+      throw productionFault(
+        'POST_DISPATCH_READBACK_AMBIGUOUS',
+        'production ' + existingOperation.effect_state +
+          '-operation resume did not produce exact completion (status ' +
+          String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
+          String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
+        { httpStatus: 409, requiresReadback: true },
+      );
+    }
+    return Object.freeze({
+      ok: false,
+      publicationCapable: false,
+      schedulerAuthority: false,
+      replay: true,
+      productionPreflight: replayPreflight,
+      planned,
+      mutation,
+    });
+  }
+
+  const verified = await verifyCommittedResult({
+    db,
+    verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
+    mutation,
+    controlPlan: replay.controlPlan,
+    runtimeRevision: replay.runtimeRevision,
+  });
+
+  return Object.freeze({
+    ok: true,
+    replay: true,
+    publicationCapable: false,
+    schedulerAuthority: false,
+    productionPreflight: replayPreflight,
+    recoveryCheckpointCaptured:
+      typeof existingOperation.checkpoint_bookmark === 'string' &&
+      existingOperation.checkpoint_bookmark.length >= 8,
+    planned,
+    mutation,
+    committedRuntimeRevision: Object.freeze({
+      generation: Number(verified.committedRuntime.generation),
+      revisionDigest: verified.committedRuntime.revision_digest,
+      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
+      sourceOperationId: verified.committedRuntime.source_operation_id,
+    }),
+    after: Object.freeze({
+      generation: verified.after.generation,
+      revisionDigest: verified.after.revisionDigest,
+    }),
+  });
+}
+
 // Pure request authorization and identity: no D1, network, or clock. The
 // Worker and the operator CLI share it so observe mode reports the same
 // operation identity that apply will claim.
@@ -852,162 +982,36 @@ export async function runProductionIntakeRequest(
   }
 
   if (existingOperation) {
-    let replaySafety;
-    try {
-      replaySafety = await transport.readPublicationSafety();
-    } catch (error) {
-      throw productionFault(
-        'PRE_DISPATCH_STATE_UNAVAILABLE',
-        error instanceof Error ? error.message : String(error),
-        { httpStatus: 503, retryable: true },
-      );
-    }
-
-    const replayPreflight = evaluateProductionMutationPreflight({
-      environment: 'production',
-      auth: trustedAuth,
-      candidate,
-      safety: replaySafety,
-    });
     // The runner's own rule (and the re-plan trigger's): any effect state but
-    // 'none' is past dispatch, so an unknown state fails closed.
+    // 'none' is past dispatch, and an unknown state fails closed. Past
+    // dispatch, every way the replay can stop requires readback, so the rule is
+    // applied once here rather than at each step.
     const pastDispatch = existingOperation.effect_state !== 'none';
-    if (!replayPreflight.ok) {
-      const blocked = replayPreflight.blockers.map((item) => item.id).join(',');
-      if (pastDispatch) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'replay of ' + existingOperation.effect_state + ' operation blocked by preflight: ' + blocked,
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw productionFault(
-        'PRE_DISPATCH_STATE_CONFLICT',
-        'production replay preflight blocked: ' + blocked,
-        { httpStatus: 409 },
-      );
-    }
-    const replayAuthorityMismatch = publicationAuthorityMismatch(
-      replayPreflight.observed.publicationAuthority,
-      expectedPublicationAuthority,
-    );
-    if (replayAuthorityMismatch) {
-      // An operation past dispatch must be read back, not treated as a clean
-      // pre-dispatch stop.
-      if (pastDispatch) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'replay of ' + existingOperation.effect_state + ' operation refused: ' + replayAuthorityMismatch,
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw productionFault(
-        'PRE_DISPATCH_REPLAN_REQUIRED',
-        replayAuthorityMismatch,
-        { httpStatus: 409, retryable: true },
-      );
-    }
-
-    let replay;
     try {
-      replay = await loadReplayState(db, normalized, existingOperation);
-    } catch (error) {
-      if (pastDispatch) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production replay state readback failed: ' +
-            (error instanceof Error ? error.message : String(error)),
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw error;
-    }
-
-    let mutation;
-    try {
-      mutation = await resumeMutation({
-        intakePlan: replay.intakePlan,
-        controlPlan: replay.controlPlan,
-        runtimeRevision: replay.runtimeRevision,
+      return await replayExistingOperation({
+        env,
+        db,
         transport,
+        trustedAuth,
+        candidate,
+        expectedPublicationAuthority,
+        normalized,
+        operationId,
+        existingOperation,
+        pastDispatch,
         recordedAt,
+        verifyRuntime,
+        resumeMutation,
       });
     } catch (error) {
-      if (pastDispatch) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production ' + existingOperation.effect_state + '-operation resume readback failed: ' +
-            (error instanceof Error ? error.message : String(error)),
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw error;
+      if (!pastDispatch || error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+      throw productionFault(
+        'POST_DISPATCH_READBACK_AMBIGUOUS',
+        'replay of ' + existingOperation.effect_state + ' operation stopped: ' +
+          (error instanceof Error ? error.message : String(error)),
+        { httpStatus: 409, requiresReadback: true },
+      );
     }
-
-    if (!['applied', 'already_applied'].includes(mutation?.status)) {
-      if (pastDispatch) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production ' + existingOperation.effect_state +
-            '-operation resume did not produce exact completion (status ' +
-            String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
-            String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      return Object.freeze({
-        ok: false,
-        publicationCapable: false,
-        schedulerAuthority: false,
-        replay: true,
-        productionPreflight: replayPreflight,
-        planned: Object.freeze({
-          operationId,
-          intakeOperationId: replay.intakePlan.operation_id,
-          itemCount: replay.intakePlan.items.length,
-          contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
-          contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
-        }),
-        mutation,
-      });
-    }
-
-    const verified = await verifyCommittedResult({
-      db,
-      verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
-      mutation,
-      controlPlan: replay.controlPlan,
-      runtimeRevision: replay.runtimeRevision,
-    });
-
-    return Object.freeze({
-      ok: true,
-      replay: true,
-      publicationCapable: false,
-      schedulerAuthority: false,
-      productionPreflight: replayPreflight,
-      recoveryCheckpointCaptured:
-        typeof existingOperation.checkpoint_bookmark === 'string' &&
-        existingOperation.checkpoint_bookmark.length >= 8,
-      planned: Object.freeze({
-        operationId,
-        intakeOperationId: replay.intakePlan.operation_id,
-        itemCount: replay.intakePlan.items.length,
-        contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
-        contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
-      }),
-      mutation,
-      committedRuntimeRevision: Object.freeze({
-        generation: Number(verified.committedRuntime.generation),
-        revisionDigest: verified.committedRuntime.revision_digest,
-        previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
-        sourceOperationId: verified.committedRuntime.source_operation_id,
-      }),
-      after: Object.freeze({
-        generation: verified.after.generation,
-        revisionDigest: verified.after.revisionDigest,
-      }),
-    });
   }
 
   let before;
@@ -1313,7 +1317,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
         payload = await request.json();
       } catch {
         return json({
-          service: 'xqueue-mutation-production-intake',
+          ...WORKER_IDENTITY,
           status: 'error',
           faultClass: 'INVALID_JSON',
           retryable: false,
@@ -1358,11 +1362,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
             result.mutation?.fault_class === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
             result.mutation?.retryable === true;
           return json({
-            service: 'xqueue-mutation-production-intake',
-            role: 'production-mutation-intake',
-            environment: 'production',
-            publicationCapable: false,
-            schedulerAuthority: false,
+            ...WORKER_IDENTITY,
             status: 'blocked',
             faultClass: postDispatch
               ? 'POST_DISPATCH_RECONCILIATION_REQUIRED'
@@ -1381,11 +1381,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
         }
 
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'ok',
           retryable: false,
           requiresReadback: false,
@@ -1394,11 +1390,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       } catch (error) {
         const fault = faultDescriptor(error);
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'error',
           faultClass: fault.faultClass,
           retryable: fault.retryable,
