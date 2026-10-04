@@ -7,6 +7,7 @@ import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-produ
 import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
+  REQUIRED_MUTATION_TRIGGERS,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   SAFETY_SQL,
   assertMutationSchema,
@@ -272,12 +273,15 @@ test('apply refuses before launching the Worker when the publisher predates the 
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -344,12 +348,15 @@ function readyRun() {
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -518,12 +525,15 @@ test('observe mode never invokes the mutation Worker', async () => {
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -579,10 +589,13 @@ test('automated single-item apply passes signed approval evidence, never a diges
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -706,10 +719,13 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([

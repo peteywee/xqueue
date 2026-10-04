@@ -642,6 +642,7 @@ test('replay refuses when publication authority changed since the operator verif
     let resumed = false;
     const resume = d.resumeMutation;
     d.resumeMutation = async (args) => { resumed = true; return resume(args); };
+    // existingOperation() is applied: past dispatch, so the operator must read back.
     await assert.rejects(
       () => runProductionIntakeRequest(
         env(fakeDb({ replay: true })),
@@ -649,12 +650,42 @@ test('replay refuses when publication authority changed since the operator verif
         d,
       ),
       (error) =>
-        error?.faultClass === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.requiresReadback === true &&
         error?.httpStatus === 409 &&
         /authority changed since the operator verified it/.test(error.message),
       JSON.stringify(changed),
     );
     assert.equal(resumed, false);
+  }
+
+  // An operation with no effect yet is still pre-dispatch: replan and retry.
+  const d = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      payload({ expectedPublicationAuthority: { ...payload().expectedPublicationAuthority, generation: 10 } }),
+      d,
+    ),
+    (error) =>
+      error?.faultClass === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+      error?.retryable === true &&
+      error?.requiresReadback !== true,
+  );
+});
+
+test('an unexpected runner exception on the fresh path always requires readback', async () => {
+  for (const message of ['completion evidence operation mismatch', 'network timeout']) {
+    const d = deps();
+    d.runMutation = async () => { throw new Error(message); };
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(), payload(), d),
+      (error) =>
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.requiresReadback === true &&
+        error?.httpStatus === 409,
+      message,
+    );
   }
 });
 

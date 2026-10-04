@@ -863,6 +863,15 @@ export async function runProductionIntakeRequest(
       expectedPublicationAuthority,
     );
     if (replayAuthorityMismatch) {
+      // An operation whose effect is already applied is past dispatch: the
+      // operator must read back, not treat this as a clean pre-dispatch stop.
+      if (existingOperation.effect_state !== 'none') {
+        throw productionFault(
+          'POST_DISPATCH_READBACK_AMBIGUOUS',
+          'replay of ' + existingOperation.effect_state + ' operation refused: ' + replayAuthorityMismatch,
+          { httpStatus: 409, requiresReadback: true },
+        );
+      }
       throw productionFault(
         'PRE_DISPATCH_REPLAN_REQUIRED',
         replayAuthorityMismatch,
@@ -1096,17 +1105,30 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const mutation = await runMutation({
-    environment: 'production',
-    auth: trustedAuth,
-    candidate,
-    transport,
-    expectedPublicationAuthority,
-    intakePlan,
-    controlPlan,
-    runtimeRevision,
-    recordedAt,
-  });
+  // The guarded runner reports every known outcome as a result. An exception
+  // means an unexpected failure at an unknown point, possibly after the
+  // atomic apply committed, so it always requires readback.
+  let mutation;
+  try {
+    mutation = await runMutation({
+      environment: 'production',
+      auth: trustedAuth,
+      candidate,
+      transport,
+      expectedPublicationAuthority,
+      intakePlan,
+      controlPlan,
+      runtimeRevision,
+      recordedAt,
+    });
+  } catch (error) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'guarded mutation runner failed unexpectedly: ' +
+        (error instanceof Error ? error.message : String(error)),
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
 
   const planned = Object.freeze({
     operationId: controlPlan.operation_id,

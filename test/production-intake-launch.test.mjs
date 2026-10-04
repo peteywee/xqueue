@@ -14,6 +14,7 @@ import {
 import {
   MUTATION_WORKER_SERVICE,
   REQUIRED_MUTATION_MIGRATIONS,
+  REQUIRED_MUTATION_TRIGGERS,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   assertHealthIdentity,
   childEnvironment,
@@ -72,16 +73,21 @@ function jsonResponse(body, status = 200) {
   };
 }
 
+// Fake children lead their own process group; fakeProcess().kill(-pid) reaches
+// the whole group, the way the CLI tears wrangler down.
+const CHILDREN = new Map();
+let NEXT_PID = 40_000;
+
 function fakeChild({ exitImmediately = false, stderrText = null, spawnError = null } = {}) {
-  const calls = { spawn: null, killed: false };
+  const calls = { spawn: null, killed: false, groupSignals: [] };
   const spawnImpl = (command, args, options) => {
     const child = new EventEmitter();
+    child.pid = ++NEXT_PID;
     child.stdout = new EventEmitter();
+    child.stdout.resume = () => {};
     child.stderr = new EventEmitter();
-    child.kill = () => {
-      calls.killed = true;
-      child.emit('exit', null, 'SIGTERM');
-    };
+    CHILDREN.set(child.pid, { child, calls, exited: false });
+    child.on('exit', () => { CHILDREN.get(child.pid).exited = true; });
     calls.spawn = { command, args, options, child };
     queueMicrotask(() => {
       if (stderrText) child.stderr.emit('data', stderrText(options.env));
@@ -91,6 +97,26 @@ function fakeChild({ exitImmediately = false, stderrText = null, spawnError = nu
     return child;
   };
   return { spawnImpl, calls };
+}
+
+function fakeProcess() {
+  const signals = new EventEmitter();
+  const record = [];
+  return {
+    pid: 4242,
+    signals,
+    record,
+    once: (name, fn) => signals.once(name, fn),
+    removeListener: (name, fn) => signals.removeListener(name, fn),
+    kill: (pid, signal) => {
+      record.push([pid, signal]);
+      const entry = CHILDREN.get(-pid);
+      if (!entry) return;
+      entry.calls.killed = true;
+      entry.calls.groupSignals.push(signal);
+      if (!entry.exited) entry.child.emit('exit', null, signal);
+    },
+  };
 }
 
 function launch(overrides = {}) {
@@ -104,6 +130,7 @@ function launch(overrides = {}) {
     verifyTree: () => true,
     healthDeadlineMs: 2_000,
     intakeTimeoutMs: 2_000,
+    processImpl: fakeProcess(),
     ...overrides,
   });
 }
@@ -244,7 +271,9 @@ test('a successful launch sends the generated bearer only after a verified healt
   // An empty --env-file stops wrangler loading .env or .dev.vars at all.
   assert.equal(args[9], '--env-file');
   assert.match(args[10], /xqueue-mutation-env-[^/]+\/empty\.env$/);
-  assert.equal(args.length, 11);
+  assert.deepEqual(args.slice(11), ['--inspector-ip', '127.0.0.1']);
+  assert.equal(calls.spawn.options.detached, true, 'child leads its own process group');
+  assert.deepEqual(calls.groupSignals, ['SIGTERM', 'SIGKILL'], 'group terminated, then killed');
   const token = calls.spawn.options.env.MUTATION_CONTROL_TOKEN;
   assert.match(token, /^[0-9a-f]{64}$/);
   assert.equal(
@@ -308,13 +337,25 @@ test('a definitive Worker error keeps the Worker\'s own readback decision', asyn
     const { spawnImpl } = fakeChild();
     const fetchImpl = async (url) => (url.endsWith('/health')
       ? jsonResponse(healthBody())
-      : jsonResponse({ status: 'blocked', requiresReadback, faultClass: 'X' }, 409));
+      : jsonResponse({ service: MUTATION_WORKER_SERVICE, status: 'blocked', requiresReadback, faultClass: 'X' }, 409));
     await assert.rejects(launch({ spawnImpl, fetchImpl }), (error) => {
       assert.equal(error.httpStatus, 409);
       assert.equal(error.response.requiresReadback, requiresReadback);
       return true;
     });
   }
+});
+
+test('a JSON error that did not come from the Worker requires readback', async () => {
+  const { spawnImpl } = fakeChild();
+  const fetchImpl = async (url) => (url.endsWith('/health')
+    ? jsonResponse(healthBody())
+    : jsonResponse({ error: 'upstream connect error' }, 502));
+  await assert.rejects(launch({ spawnImpl, fetchImpl }), (error) => {
+    assert.equal(error.response?.requiresReadback, true);
+    assert.equal(error.response?.faultClass, 'POST_DISPATCH_TRANSPORT_AMBIGUOUS');
+    return true;
+  });
 });
 
 test('a child that exits or fails to spawn stops the launch with redacted output', async () => {
@@ -372,7 +413,7 @@ test('a missing mutation schema is a structured blocker and production tables ar
     if (key === 'git branch --show-current') return 'main\n';
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
-    if (key === 'git rev-parse HEAD' || key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify({ ok: true, environment: 'production', token_type: 'account', token_status: 'active', d1: { readable: true } });
     }
@@ -556,7 +597,7 @@ test('a missing schema still reports candidate, auth and Worker-credential block
     if (key === 'git status --porcelain --untracked-files=all') return ' M x\n';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'b'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'b'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       throw new Error('pnpm cf:auth:preflight --environment production failed with exit 1');
     }
@@ -619,35 +660,26 @@ test('publisher code is unchanged since the mutex pin, or the pin must be re-eva
 
 test('a signal tears the ephemeral Worker down before the CLI exits', async () => {
   const { spawnImpl, calls } = fakeChild();
-  const signals = new EventEmitter();
-  const killed = [];
-  const processImpl = {
-    pid: 4242,
-    once: (name, fn) => signals.once(name, fn),
-    removeListener: (name, fn) => signals.removeListener(name, fn),
-    kill: (pid, signal) => killed.push([pid, signal]),
-  };
+  const processImpl = fakeProcess();
   let envDirSeen = null;
   const fetchImpl = async () => {
     envDirSeen = path.dirname(calls.spawn.args[10]);
-    signals.emit('SIGTERM', 'SIGTERM');
+    processImpl.signals.emit('SIGTERM', 'SIGTERM');
     throw new TypeError('aborted by signal');
   };
   await assert.rejects(launch({ spawnImpl, fetchImpl, processImpl, healthDeadlineMs: 300 }));
-  assert.equal(calls.killed, true, 'wrangler child was killed');
-  assert.deepEqual(killed, [[4242, 'SIGTERM']], 'the signal was re-raised after cleanup');
+  const pid = calls.spawn.child.pid;
+  // On a signal there is no time to wait: the whole group is killed at once,
+  // then the signal is re-raised for this process.
+  assert.deepEqual(processImpl.record.slice(0, 2), [[-pid, 'SIGKILL'], [4242, 'SIGTERM']]);
+  assert.equal(calls.killed, true, 'wrangler group was killed');
   assert.equal(existsSync(envDirSeen), false, 'temp env dir removed');
-  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(signals.listenerCount(name), 0, name);
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) assert.equal(processImpl.signals.listenerCount(name), 0, name);
 });
 
 test('a synchronous spawn failure still removes the temporary env dir and handlers', async () => {
-  const signals = new EventEmitter();
-  const processImpl = {
-    pid: 1,
-    once: (name, fn) => signals.once(name, fn),
-    removeListener: (name, fn) => signals.removeListener(name, fn),
-    kill: () => {},
-  };
+  const processImpl = fakeProcess();
+  const signals = processImpl.signals;
   let envFile = null;
   const spawnImpl = (command, args) => {
     envFile = args[10];
@@ -680,12 +712,15 @@ test('a failed safety read is a structured blocker, not a raw exception', () => 
     if (key === 'git branch --show-current') return 'main\n';
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
-    if (key === 'git rev-parse HEAD' || key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify({ ok: true, environment: 'production', token_type: 'account', token_status: 'active', d1: { readable: true } });
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) throw new Error('wrangler rate limited');
     throw new Error('unexpected command: ' + key);
@@ -737,4 +772,46 @@ test('a Worker with any binding beyond its descriptor is refused', () => {
     [...EXPECTED.bindingNames],
     ['CLOUDFLARE_ACCOUNT_ID', 'DB', 'MUTATION_CONTROL_TOKEN', 'MUTATION_D1_API_TOKEN', 'OWNER_APPROVAL_PUBLIC_KEY_PEM', 'XQUEUE_PRODUCTION_DATABASE_ID'],
   );
+});
+
+test('a mutation schema missing any required trigger is incomplete, not active', () => {
+  // 0017 gained its authority guards after it was first written; names alone are not proof.
+  for (const name of ['authority_event_mutation_lane_guard', 'authority_state_mutation_lane_guard',
+    'publication_lease_mutation_lane_insert_guard', 'mutation_lane_claim_guard']) {
+    assert.ok(REQUIRED_MUTATION_TRIGGERS.includes(name), name);
+  }
+  const run = (triggers) => (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git fetch origin main') return '';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      throw new Error('pnpm cf:auth:preflight --environment production failed with exit 1\nCloudflare account API token verification failed (1000)');
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: triggers.map((name) => ({ name })) },
+      ]);
+    }
+    throw new Error('unexpected command: ' + key);
+  };
+  const missing = REQUIRED_MUTATION_TRIGGERS.filter((name) => name !== 'authority_state_mutation_lane_guard');
+  const preflight = collectOperatorPreflight(run(missing), () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: true, blockers: [] },
+  });
+  const byId = Object.fromEntries(preflight.readiness.blockers.map((item) => [item.id, item.detail]));
+  assert.match(byId.production_mutation_schema_incomplete, /authority_state_mutation_lane_guard/);
+  // The launch credential failure keeps its cause.
+  assert.match(byId.cloudflare_auth_not_verified, /Cause: .*verification failed \(1000\)/);
+});
+
+test('the process group is torn down even when pnpm has already exited', async () => {
+  const exited = fakeChild({ exitImmediately: true });
+  await assert.rejects(launch({
+    spawnImpl: exited.spawnImpl,
+    fetchImpl: async () => { throw new TypeError('ECONNREFUSED'); },
+  }));
+  assert.deepEqual(exited.calls.groupSignals, ['SIGTERM', 'SIGKILL']);
 });

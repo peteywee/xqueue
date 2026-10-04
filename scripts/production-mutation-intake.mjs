@@ -19,6 +19,16 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
   '0017_publication_mutation_mutex.sql',
 ]);
 
+// Names alone do not prove content (0017 gained its authority guards after it
+// was first written), so readiness also requires every trigger these
+// migrations create, read from the committed files.
+export const REQUIRED_MUTATION_TRIGGERS = Object.freeze(
+  REQUIRED_MUTATION_MIGRATIONS.flatMap((name) =>
+    [...readFileSync(new URL('../cloudflare/migrations-production/' + name, import.meta.url), 'utf8')
+      .matchAll(/CREATE TRIGGER\s+([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]),
+  ).sort(),
+);
+
 // The last #168 commit that touched the publisher's module graph (5185545).
 // From here on, the publisher holds its lease across missed-slot deferral and
 // runtime promotion, and reports mutation-lane exclusion as a lease block. An
@@ -156,18 +166,21 @@ export function parseJsonOutput(raw) {
   throw new Error('command output did not contain valid JSON');
 }
 
+function localTreeState(run) {
+  return {
+    branch: run('git', ['branch', '--show-current']).trim(),
+    clean: run('git', ['status', '--porcelain', '--untracked-files=all']).trim() === '',
+    headSha: run('git', ['rev-parse', 'HEAD']).trim().toLowerCase(),
+  };
+}
+
 export function collectExactMainCandidate(run = runSync) {
-  const branch = run('git', ['branch', '--show-current']).trim();
-  const dirty = run('git', ['status', '--porcelain', '--untracked-files=all']).trim();
+  const local = localTreeState(run);
   run('git', ['fetch', 'origin', 'main']);
-  const headSha = run('git', ['rev-parse', 'HEAD']).trim().toLowerCase();
-  const originMainSha = run('git', ['rev-parse', 'origin/main']).trim().toLowerCase();
-  return Object.freeze({
-    branch,
-    clean: dirty === '',
-    headSha,
-    originMainSha,
-  });
+  // FETCH_HEAD is what this fetch wrote; origin/main can be stale when the
+  // clone's refspec does not track main.
+  const originMainSha = run('git', ['rev-parse', 'FETCH_HEAD']).trim().toLowerCase();
+  return Object.freeze({ ...local, originMainSha });
 }
 
 export function assertMutationSchema(migrationNames) {
@@ -312,15 +325,19 @@ export function evaluateOperatorReadiness({
   });
 }
 
-function readMigrations(run) {
+function readSchema(run) {
   const raw = run('pnpm', [
     'wrangler', 'd1', 'execute', 'xqueue-production',
     '--config', 'wrangler.status.jsonc',
     '--remote', '--yes', '--json',
-    '--command', 'SELECT name FROM d1_migrations ORDER BY id;',
+    '--command',
+    "SELECT name FROM d1_migrations ORDER BY id; SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name;",
   ]);
   const payload = parseJsonOutput(raw);
-  return (payload?.[0]?.results ?? []).map((row) => row.name);
+  return {
+    migrations: (payload?.[0]?.results ?? []).map((row) => row.name),
+    triggers: (payload?.[1]?.results ?? []).map((row) => row.name),
+  };
 }
 
 function readSafety(run) {
@@ -353,7 +370,14 @@ const SAFETY_DEPENDENT_BLOCKERS = new Set([
   'mutation_runtime_unreadable',
 ]);
 
-function blockedWithoutSafety({ auth, candidate, migrations, plannedOperationId, d1Token, extra }) {
+function withAuthCause(blockers, authError) {
+  if (!authError) return blockers;
+  return blockers.map((item) => (item.id === 'cloudflare_auth_not_verified'
+    ? { ...item, detail: item.detail + ' Cause: ' + authError }
+    : item));
+}
+
+function blockedWithoutSafety({ auth, candidate, migrations, plannedOperationId, d1Token, extra, authError = null }) {
   const readiness = evaluateOperatorReadiness({
     auth,
     candidate,
@@ -371,12 +395,12 @@ function blockedWithoutSafety({ auth, candidate, migrations, plannedOperationId,
     publisherMutex: null,
     readiness: Object.freeze({
       ok: false,
-      blockers: Object.freeze([
+      blockers: Object.freeze(withAuthCause([
         ...extra,
         ...readiness.blockers.filter((item) =>
           !SAFETY_DEPENDENT_BLOCKERS.has(item.id) &&
           !(migrations === null && item.id === 'production_mutation_schema_not_active')),
-      ]),
+      ], authError)),
       productionPreflight: null,
     }),
   });
@@ -532,17 +556,22 @@ export function collectOperatorPreflight(
 ) {
   const candidate = collectExactMainCandidate(run);
   let auth;
+  let authError = null;
   try {
     auth = parseJsonOutput(run('pnpm', ['cf:auth:preflight', '--environment', 'production']));
-  } catch {
+  } catch (error) {
     // cf:auth:preflight exits non-zero on every failure; report it as a blocker.
     auth = { ok: false };
+    authError = redactedReason(error, [process.env.CLOUDFLARE_API_TOKEN]);
   }
   let migrations = null;
+  let triggers = [];
+  let schemaReadError = null;
   try {
-    migrations = readMigrations(run);
-  } catch {
+    ({ migrations, triggers } = readSchema(run));
+  } catch (error) {
     migrations = null;
+    schemaReadError = redactedReason(error, [process.env.CLOUDFLARE_API_TOKEN]);
   }
   const schemaActive = Array.isArray(migrations) &&
     REQUIRED_MUTATION_MIGRATIONS.every((name) => migrations.includes(name));
@@ -550,10 +579,20 @@ export function collectOperatorPreflight(
     // The safety read needs the mutation tables, so report the schema blocker
     // as structured evidence instead of querying tables that do not exist.
     return blockedWithoutSafety({
-      auth, candidate, migrations, plannedOperationId, d1Token,
+      auth, candidate, migrations, plannedOperationId, d1Token, authError,
       extra: migrations === null
-        ? [{ id: 'production_migrations_unreadable', detail: 'Production d1_migrations could not be read.' }]
+        ? [{ id: 'production_migrations_unreadable', detail: 'Production d1_migrations could not be read: ' + schemaReadError }]
         : [],
+    });
+  }
+  const missingTriggers = REQUIRED_MUTATION_TRIGGERS.filter((name) => !triggers.includes(name));
+  if (missingTriggers.length > 0) {
+    return blockedWithoutSafety({
+      auth, candidate, migrations, plannedOperationId, d1Token, authError,
+      extra: [{
+        id: 'production_mutation_schema_incomplete',
+        detail: 'Applied mutation migrations lack required triggers: ' + missingTriggers.join(', '),
+      }],
     });
   }
   let safety;
@@ -561,7 +600,7 @@ export function collectOperatorPreflight(
     safety = readSafety(run);
   } catch {
     return blockedWithoutSafety({
-      auth, candidate, migrations, plannedOperationId, d1Token,
+      auth, candidate, migrations, plannedOperationId, d1Token, authError,
       extra: [{
         id: 'publication_safety_unreadable',
         detail: 'Production publication, lane and runtime safety facts could not be read.',
@@ -569,7 +608,7 @@ export function collectOperatorPreflight(
     });
   }
   const publisherMutex = checkPublisher(safety.authority?.candidate_sha);
-  const readiness = evaluateOperatorReadiness({
+  const evaluated = evaluateOperatorReadiness({
     auth,
     candidate,
     migrations,
@@ -577,6 +616,10 @@ export function collectOperatorPreflight(
     publisherMutex,
     plannedOperationId,
     d1Token,
+  });
+  const readiness = Object.freeze({
+    ...evaluated,
+    blockers: Object.freeze(withAuthCause(evaluated.blockers, authError)),
   });
   return Object.freeze({ candidate, auth, migrations, safety, publisherMutex, readiness });
 }
@@ -741,10 +784,8 @@ async function waitForHealth(url, fetchImpl, state, expected, deadlineMs = HEALT
 }
 
 export function verifyTreeUnchanged(candidate, run = runSync) {
-  const branch = run('git', ['branch', '--show-current']).trim();
-  const dirty = run('git', ['status', '--porcelain', '--untracked-files=all']).trim();
-  const headSha = run('git', ['rev-parse', 'HEAD']).trim().toLowerCase();
-  if (branch !== candidate?.branch || dirty !== '' || headSha !== candidate?.headSha) {
+  const { branch, clean, headSha } = localTreeState(run);
+  if (branch !== candidate?.branch || !clean || headSha !== candidate?.headSha) {
     fail('the checkout changed after preflight; refusing to send the production intake request');
   }
   return true;
@@ -792,25 +833,35 @@ export async function invokeEphemeralWorker({
   let child = null;
   // The Worker binds production D1 and holds the control token, so it must not
   // outlive this process even when the CLI is interrupted by a signal.
-  const cleanup = () => {
-    if (child && !state.exited) {
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        // Already gone.
-      }
+  // The child leads its own process group (detached), so pnpm, wrangler and
+  // workerd are signalled together even if pnpm has already exited.
+  const killGroup = (signal) => {
+    if (!child?.pid) return;
+    try {
+      processImpl.kill(-child.pid, signal);
+    } catch {
+      // Group already gone.
+    }
+  };
+  const cleanup = async () => {
+    if (child?.pid) {
+      killGroup('SIGTERM');
+      const deadline = Date.now() + 5_000;
+      while (!state.exited && Date.now() < deadline) await sleep(50);
+      killGroup('SIGKILL');
     }
     rmSync(envDir, { recursive: true, force: true });
   };
   const forwardedSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   const onSignal = (signal) => {
-    cleanup();
+    // No time to wait on a signal: kill the whole group outright.
+    killGroup('SIGKILL');
+    rmSync(envDir, { recursive: true, force: true });
     for (const name of forwardedSignals) processImpl.removeListener(name, onSignal);
     processImpl.kill(processImpl.pid, signal);
   };
   for (const name of forwardedSignals) processImpl.once(name, onSignal);
 
-  const stdout = tailBuffer();
   const stderr = tailBuffer();
   const secrets = [controlToken, env.MUTATION_D1_API_TOKEN, env.CLOUDFLARE_API_TOKEN];
   const withOutput = (error) => {
@@ -833,15 +884,19 @@ export async function invokeEphemeralWorker({
         '--ip', '127.0.0.1',
         '--port', String(port),
         '--env-file', envFile,
+        // wrangler always opens a devtools inspector; keep it on loopback. A
+        // same-user local process could already read this CLI's environment.
+        '--inspector-ip', '127.0.0.1',
       ],
       {
         cwd: process.cwd(),
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
       },
     );
     // Drain both pipes so wrangler never blocks on a full buffer.
-    child.stdout?.on('data', (chunk) => stdout.push(chunk));
+    child.stdout?.resume?.();
     child.stderr?.on('data', (chunk) => stderr.push(chunk));
     child.on?.('error', (error) => {
       state.exited = true;
@@ -895,6 +950,11 @@ export async function invokeEphemeralWorker({
       );
     }
 
+    if (!response.ok && body?.service !== MUTATION_WORKER_SERVICE) {
+      // A JSON error from something other than the Worker (wrangler's proxy)
+      // says nothing about whether the intake ran.
+      throw postDispatchAmbiguity('intake request failed outside the Worker (HTTP ' + response.status + ')', null);
+    }
     if (!response.ok) {
       const detail = JSON.stringify(body);
       const error = new Error(
@@ -907,7 +967,7 @@ export async function invokeEphemeralWorker({
     return body;
   } finally {
     for (const name of forwardedSignals) processImpl.removeListener(name, onSignal);
-    cleanup();
+    await cleanup();
   }
 }
 
