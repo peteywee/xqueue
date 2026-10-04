@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
+  SAFETY_SQL,
   assertMutationSchema,
   evaluateOperatorReadiness,
   main,
@@ -173,6 +174,15 @@ test('safety parser keeps publication and mutation-lane facts distinct', () => {
   assert.equal(parsed.mutationHalt.generation, 4);
   assert.equal(parsed.mutationLane.generation, 8);
   assert.equal(parsed.runtimeState.generation, 12);
+});
+
+test('operator lease read uses the same held-lease exclusion as the mutation Worker', async () => {
+  const { readFileSync } = await import('node:fs');
+  const transport = readFileSync(new URL('../src/mutation-control-transport.mjs', import.meta.url), 'utf8');
+  assert.match(transport, /FROM publication_leases ' \+\s*'WHERE owner_token IS NOT NULL'/);
+  assert.match(SAFETY_SQL, /FROM publication_leases WHERE owner_token IS NOT NULL;/);
+  // An expired-but-held lease still blocks; no TTL or clock predicate may relax it.
+  assert.doesNotMatch(SAFETY_SQL, /expires_at_ms|strftime|julianday/);
 });
 
 test('observe mode never invokes the mutation Worker', async () => {

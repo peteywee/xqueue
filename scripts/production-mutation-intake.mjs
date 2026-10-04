@@ -164,10 +164,12 @@ export function parseSafetyPayload(payload) {
   });
 }
 
-const SAFETY_SQL = [
+export const SAFETY_SQL = [
   "SELECT owner,generation,transition_state,candidate_sha,deployment_id,updated_at FROM authority_state WHERE singleton_id=1;",
   "SELECT COUNT(*) AS unresolved FROM publication_state WHERE status IN ('prepared','publishing','needs_reconciliation');",
-  "SELECT COUNT(*) AS active_leases FROM publication_leases WHERE owner_token IS NOT NULL AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000;",
+  // Any held publisher lease excludes mutation, expired or not: the Worker
+  // transport and the atomic lane claim use the same predicate.
+  'SELECT COUNT(*) AS active_leases FROM publication_leases WHERE owner_token IS NOT NULL;',
   "SELECT json_extract(value, '$.inflight') AS inflight FROM runtime_metadata WHERE key='state.snapshot_json';",
   "SELECT generation AS publication_lease_generation FROM publication_leases WHERE lease_name='publisher';",
   "SELECT COALESCE(MAX(id),0) AS publication_event_cursor FROM publication_events;",
