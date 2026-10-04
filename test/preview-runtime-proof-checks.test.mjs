@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import {
   assertPreviewHaltState,
   assertPreviewMigrationLane,
+  assertPreviewMutationLaneIdle,
   assertPreviewRevisionChain,
   PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS,
   PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
@@ -15,6 +16,13 @@ const LANE = readdirSync(new URL('../cloudflare/migrations/', import.meta.url))
   .sort();
 
 const D = (c) => c.repeat(64);
+const HEX24 = 'a1'.repeat(12);
+const WRITERS = Object.freeze({
+  deferral: 'deferred-lifecycle:' + HEX24,
+  owner: 'owner-revise-' + HEX24,
+  reschedule: 'reschedule-place-' + HEX24,
+  intake: 'intake-' + HEX24,
+});
 const OP = (generation) => 'mutation-intake-' + String(generation).repeat(24).slice(0, 24);
 
 // sources[i] is the source for generation i + 2; 'mutation' builds a guarded
@@ -88,15 +96,43 @@ test('migration lane must contain 0006-0012 contiguously', () => {
 
 test('halt check binds to the migration initialization event and accepts later clears', () => {
   assert.deepEqual(
-    { ...assertPreviewHaltState({ state: { halted: 0, generation: 1 }, events: [INIT] }) },
-    { generation: 1, events: 1 },
+    { ...assertPreviewHaltState({ state: { halted: 0, generation: 1, reason: 'initial_unhalted', actor_class: 'migration' }, events: [INIT] }) },
+    { generation: 1, events: 1, lastAction: 'initialized' },
   );
   const drilled = [
     INIT,
     { generation: 2, action: 'set', actor_class: 'owner', reason: 'drill' },
     { generation: 3, action: 'clear', actor_class: 'owner', reason: 'drill done' },
   ];
-  assert.equal(assertPreviewHaltState({ state: { halted: 0, generation: 3 }, events: drilled }).generation, 3);
+  assert.equal(
+    assertPreviewHaltState({ state: { halted: 0, generation: 3, reason: 'drill done', actor_class: 'owner' }, events: drilled }).generation,
+    3,
+  );
+});
+
+test('halt events must be contiguous and the state must match the latest event', () => {
+  const gapped = [INIT, { generation: 3, action: 'clear', actor_class: 'owner', reason: 'r' }];
+  assert.throws(
+    () => assertPreviewHaltState({ state: { halted: 0, generation: 3, reason: 'r', actor_class: 'owner' }, events: gapped }),
+    /not contiguous from generation 1/,
+  );
+  const cleared = [
+    INIT,
+    { generation: 2, action: 'set', actor_class: 'automation', reason: 'incident' },
+    { generation: 3, action: 'clear', actor_class: 'owner', reason: 'resolved' },
+  ];
+  assert.throws(
+    () => assertPreviewHaltState({ state: { halted: 0, generation: 3, reason: 'other', actor_class: 'owner' }, events: cleared }),
+    /does not match its latest event/,
+  );
+  assert.throws(
+    () => assertPreviewHaltState({ state: { halted: 0, generation: 3, reason: 'resolved', actor_class: 'automation' }, events: cleared }),
+    /does not match its latest event/,
+  );
+  assert.equal(
+    assertPreviewHaltState({ state: { halted: 0, generation: 3, reason: 'resolved', actor_class: 'owner' }, events: cleared }).lastAction,
+    'clear',
+  );
 });
 
 test('halt check rejects a wrong initialization, a stale state, or an active halt', () => {
@@ -114,15 +150,15 @@ test('halt check rejects a wrong initialization, a stale state, or an active hal
   );
   const set = [INIT, { generation: 2, action: 'set', actor_class: 'owner', reason: 'drill' }];
   assert.throws(
-    () => assertPreviewHaltState({ state: { halted: 0, generation: 1 }, events: set }),
-    /not at its latest event generation/,
+    () => assertPreviewHaltState({ state: { halted: 0, generation: 1, reason: 'initial_unhalted', actor_class: 'migration' }, events: set }),
+    /does not match its latest event/,
   );
   assert.throws(
-    () => assertPreviewHaltState({ state: { halted: 1, generation: 2 }, events: set }),
+    () => assertPreviewHaltState({ state: { halted: 1, generation: 2, reason: 'drill', actor_class: 'owner' }, events: set }),
     /halt is set/,
   );
   assert.throws(
-    () => assertPreviewHaltState({ state: { halted: 0, generation: 2 }, events: set }),
+    () => assertPreviewHaltState({ state: { halted: 0, generation: 2, reason: 'drill', actor_class: 'owner' }, events: set }),
     /halt is set/,
   );
 });
@@ -148,11 +184,38 @@ test('guarded mutation revisions pass when each is an exact completed result', (
   assert.equal(result.headRevisionDigest, D('d'));
 });
 
-test('revisions from other preview writers are accepted when they chain and carry a source', () => {
-  const fx = chain(5, ['mutation', 'deferred-lifecycle:' + 'a'.repeat(24), 'queue-owner-revise-0123', 'mutation']);
+test('revisions from each known preview writer are accepted when they chain', () => {
+  const fx = chain(6, [WRITERS.deferral, WRITERS.owner, WRITERS.reschedule, WRITERS.intake, 'mutation']);
   const result = assertPreviewRevisionChain(fx);
-  assert.equal(result.mutationRevisions, 2);
-  assert.equal(result.otherRevisions, 2);
+  assert.equal(result.mutationRevisions, 1);
+  assert.equal(result.otherRevisions, 4);
+});
+
+test('a revision source that no known writer produces fails', () => {
+  for (const source of [
+    'x',
+    'owner-revise-short',
+    'intake-' + 'A1'.repeat(12),
+    'deferred-lifecycle-' + HEX24,
+    'mutation-unknownkind-' + HEX24,
+    'mutation-intake-' + 'A1'.repeat(12),
+  ]) {
+    const fx = chain(2, [source]);
+    assert.throws(
+      () => assertPreviewRevisionChain(fx),
+      /is not a recognized preview revision writer/,
+      source,
+    );
+  }
+});
+
+test('a source that names a stored operation is verified even if its id format drifted', () => {
+  const fx = chain(2, ['mutation']);
+  const drifted = 'mutation-intake-' + 'A1'.repeat(12);
+  fx.revisions[1].source_operation_id = drifted;
+  fx.operations[0].operation_id = drifted;
+  fx.operations[0].expected_runtime_revision_digest = D('f');
+  assert.throws(() => assertPreviewRevisionChain(fx), /revision 2 is not the exact result of guarded mutation/);
 });
 
 test('the 180-assignment static parity still binds the bootstrap revision', () => {
@@ -179,12 +242,12 @@ test('revision generations must be contiguous from 1', () => {
 });
 
 test('each later revision must chain to its predecessor digest and carry a source', () => {
-  const broken = chain(3, ['other-writer', 'other-writer']);
+  const broken = chain(3, [WRITERS.owner, WRITERS.intake]);
   broken.revisions[2].previous_revision_digest = D('f');
   assert.throws(() => assertPreviewRevisionChain(broken), /revision 3 does not chain to its predecessor/);
 
   for (const missing of [null, '']) {
-    const fx = chain(3, ['other-writer', 'other-writer']);
+    const fx = chain(3, [WRITERS.owner, WRITERS.intake]);
     fx.revisions[1].source_operation_id = missing;
     assert.throws(() => assertPreviewRevisionChain(fx), /revision 2 has no source operation/);
   }
@@ -241,7 +304,7 @@ test('every applied guarded mutation must appear as its own revision in the chai
   });
   assert.throws(() => assertPreviewRevisionChain(beyond), /claims applied generation 4 that is not its revision/);
 
-  const displaced = chain(3, ['other-writer', 'mutation']);
+  const displaced = chain(3, [WRITERS.reschedule, 'mutation']);
   displaced.operations.push({
     operation_id: 'mutation-intake-' + 'e'.repeat(24),
     state: 'COMPLETE',
@@ -252,6 +315,22 @@ test('every applied guarded mutation must appear as its own revision in the chai
     resulting_runtime_revision_digest: D('b'),
   });
   assert.throws(() => assertPreviewRevisionChain(displaced), /claims applied generation 2 that is not its revision/);
+});
+
+test('the mutation lane must be released with no unresolved effects', () => {
+  assertPreviewMutationLaneIdle({ lane: { active_operation_id: null }, operations: chain(3).operations });
+  assert.throws(() => assertPreviewMutationLaneIdle({ lane: null, operations: [] }), /lane state is missing/);
+  assert.throws(
+    () => assertPreviewMutationLaneIdle({ lane: { active_operation_id: OP(4) }, operations: [] }),
+    /lane is held by mutation-intake-/,
+  );
+  for (const effect of ['dispatched', 'ambiguous']) {
+    const operations = [...chain(3).operations, { operation_id: OP(9), state: 'VERIFYING', effect_state: effect }];
+    assert.throws(
+      () => assertPreviewMutationLaneIdle({ lane: { active_operation_id: null }, operations }),
+      new RegExp('unresolved ' + effect + ' effect'),
+    );
+  }
 });
 
 test('runtime state must be the head of the revision history', () => {
@@ -282,7 +361,10 @@ test('proof script uses the post-mutation checks instead of fresh-preview snapsh
   assert.doesNotMatch(source, /Number\(state\.generation\) !== 1/);
   assert.doesNotMatch(source, /Number\(halt\.generation\) !== 1/);
   assert.doesNotMatch(source, /migrationTail/);
-  assert.match(source, /if \(!state\) \{\n    if \(computed\.active_assignment_count !== PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS\)/);
+  assert.match(source, /if \(!state\) \{\s*if \(computed\.active_assignment_count !== PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS\)/);
+  assert.match(source, /assertPreviewMutationLaneIdle\(/);
+  assert.match(source, /format: 2,/);
+  assert.match(source, /cwd: REPO_ROOT,/);
 
   const workflow = readFileSync(new URL('../.github/workflows/preview-dynamic-runtime.yml', import.meta.url), 'utf8');
   assert.match(workflow, /- 'src\/preview-runtime-proof-checks\.mjs'/);

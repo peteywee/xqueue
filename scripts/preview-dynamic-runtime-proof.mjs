@@ -30,10 +30,12 @@ import { assertPreviewConfig } from '../src/d1-preview-shadow-proof.mjs';
 import {
   assertPreviewHaltState,
   assertPreviewMigrationLane,
+  assertPreviewMutationLaneIdle,
   assertPreviewRevisionChain,
   PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS,
   PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
   PREVIEW_HALT_EVENTS_SQL,
+  PREVIEW_MUTATION_LANE_SQL,
   PREVIEW_MUTATION_OPERATIONS_SQL,
   PREVIEW_REVISION_HISTORY_SQL,
 } from '../src/preview-runtime-proof-checks.mjs';
@@ -41,6 +43,8 @@ import {
 const PREVIEW_DB = 'xqueue-preview';
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
+// Absolute, so the config wrangler uses is the one assertPreviewConfig pins.
+const PREVIEW_CONFIG_PATH = join(REPO_ROOT, PREVIEW_CONFIG);
 const PROOF_URL =
   process.env.XQUEUE_PREVIEW_PROOF_URL ??
   'http://127.0.0.1:8787/proof';
@@ -58,6 +62,7 @@ const MIME = Object.freeze({
 
 function run(command, args, { capture = true } = {}) {
   const result = spawnSync(command, args, {
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     env: process.env,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
@@ -104,7 +109,7 @@ function query(sql) {
       'execute',
       PREVIEW_DB,
       '--config',
-      PREVIEW_CONFIG,
+      PREVIEW_CONFIG_PATH,
       '--remote',
       '--yes',
       '--json',
@@ -129,7 +134,7 @@ function executeFile(sql) {
       'execute',
       PREVIEW_DB,
       '--config',
-      PREVIEW_CONFIG,
+      PREVIEW_CONFIG_PATH,
       '--remote',
       '--yes',
       '--file',
@@ -316,7 +321,7 @@ async function main() {
   const migrations = query('SELECT id,name,applied_at FROM d1_migrations ORDER BY id;');
   // The lane is wrangler.preview.jsonc's migrations_dir, the same directory the
   // workflow's apply step uses; assertPreviewConfig pins it.
-  const previewConfig = JSON.parse(readFileSync(join(REPO_ROOT, PREVIEW_CONFIG), 'utf8'));
+  const previewConfig = JSON.parse(readFileSync(PREVIEW_CONFIG_PATH, 'utf8'));
   assertPreviewConfig(previewConfig);
   const migrationsDir = join(REPO_ROOT, previewConfig.d1_databases[0].migrations_dir);
   const names = assertPreviewMigrationLane(
@@ -406,16 +411,21 @@ async function main() {
     throw new Error('preview runtime revision state does not match recomputed durable truth');
   }
 
+  const mutationOperations = query(PREVIEW_MUTATION_OPERATIONS_SQL);
+  assertPreviewMutationLaneIdle({
+    lane: query(PREVIEW_MUTATION_LANE_SQL)[0] ?? null,
+    operations: mutationOperations,
+  });
   const revisionChain = assertPreviewRevisionChain({
     revisions: query(PREVIEW_REVISION_HISTORY_SQL),
-    operations: query(PREVIEW_MUTATION_OPERATIONS_SQL),
+    operations: mutationOperations,
     state,
   });
 
   const r2 = await verifyR2Bytes(mediaActual);
 
   const evidence = {
-    format: 1,
+    format: 2,
     environment: 'preview',
     database: PREVIEW_DB,
     config: PREVIEW_CONFIG,
@@ -430,6 +440,7 @@ async function main() {
       actorClass: halt.actor_class,
       updatedAt: halt.updated_at,
       events: haltSummary.events,
+      lastAction: haltSummary.lastAction,
     },
     mediaAction,
     revisionAction,
