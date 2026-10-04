@@ -256,10 +256,13 @@ test('expected change is exactly the mutation-control objects and initial lane s
     'mutation_operation_items',
     'publication_lease_mutation_lane_insert_guard',
     'publication_lease_mutation_lane_update_guard',
+    'authority_event_mutation_lane_guard',
+    'authority_state_mutation_lane_guard',
   ]) {
     assert.ok(names.includes(name), name);
   }
-  assert.ok(change.objects.every((row) => /^(mutation_|publication_lease_mutation_lane_)/.test(row.name)));
+  assert.ok(change.objects.every((row) =>
+    /^(mutation_|publication_lease_mutation_lane_|authority_(event|state)_mutation_lane_guard$)/.test(row.name)));
   assert.deepEqual(change.singletons, {
     mutation_lane_state: [{ singleton_id: 1, generation: 1, active_operation_id: null, actor_class: 'migration' }],
     mutation_lane_halt_state: [{ singleton_id: 1, halted: 0, generation: 1, reason: 'initial_unhalted', actor_class: 'migration' }],
