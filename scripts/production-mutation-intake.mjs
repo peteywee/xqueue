@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 import { evaluateProductionMutationPreflight } from '../src/mutation-production-preflight.mjs';
 
 export const PRODUCTION_INTAKE_CONFIRM = 'xqueue-production-intake';
@@ -52,6 +53,7 @@ export function parseArgs(argv = []) {
     mode: 'single',
     sourceMode: 'owner-manual',
     ownerApprovalFile: null,
+    approvedCandidateFile: null,
     apply: false,
     confirm: null,
     port: DEFAULT_PORT,
@@ -75,6 +77,10 @@ export function parseArgs(argv = []) {
     else if (arg === '--automated') options.sourceMode = 'automated';
     else if (arg === '--approval-file') options.ownerApprovalFile = next();
     else if (arg.startsWith('--approval-file=')) options.ownerApprovalFile = arg.slice(16);
+    else if (arg === '--approved-candidate-file') options.approvedCandidateFile = next();
+    else if (arg.startsWith('--approved-candidate-file=')) {
+      options.approvedCandidateFile = arg.slice(26);
+    }
     else if (arg === '--apply') options.apply = true;
     else if (arg === '--confirm') options.confirm = next();
     else if (arg.startsWith('--confirm=')) options.confirm = arg.slice(10);
@@ -94,13 +100,22 @@ export function parseArgs(argv = []) {
   if (options.ownerApprovalFile && options.sourceMode !== 'automated') {
     fail('--approval-file is valid only with --automated');
   }
+  if (options.approvedCandidateFile && options.sourceMode !== 'automated') {
+    fail('--approved-candidate-file is valid only with --automated');
+  }
+  if (Boolean(options.ownerApprovalFile) !== Boolean(options.approvedCandidateFile)) {
+    fail('--approval-file and --approved-candidate-file must be supplied together');
+  }
   if (
     options.apply &&
     options.sourceMode === 'automated' &&
     options.mode === 'single' &&
     !options.ownerApprovalFile
   ) {
-    fail('automated single-item apply requires --approval-file <signed-approval.json>');
+    fail(
+      'automated single-item apply requires --approval-file <signed-approval.json> ' +
+      'and --approved-candidate-file <approved-candidate.json>',
+    );
   }
   if (options.apply && options.confirm !== PRODUCTION_INTAKE_CONFIRM) {
     fail('--apply requires --confirm ' + PRODUCTION_INTAKE_CONFIRM);
@@ -403,12 +418,64 @@ export async function invokeEphemeralWorker({
   }
 }
 
+export function mutationWorkerOwnerPublicKey(
+  path = 'wrangler.mutation-production-intake.jsonc',
+) {
+  const descriptor = JSON.parse(
+    readFileSync(resolve(path), 'utf8').replace(/^\s*\/\/.*$/gm, ''),
+  );
+  return descriptor?.vars?.OWNER_APPROVAL_PUBLIC_KEY_PEM ?? null;
+}
+
+// Runs the Worker's own authorization and identity derivation offline, so
+// observe mode reports the exact operation identity that apply will claim.
+export function planIntakeIdentity(payload, options = {}) {
+  try {
+    const { mode, sourceMode, normalized, operationId } =
+      authorizeProductionIntakeInput(payload, options);
+    return Object.freeze({
+      ok: true,
+      operationId,
+      batchDigest: normalized.batch_digest,
+      mode,
+      sourceMode,
+      itemCount: normalized.items.length,
+      contentIds: Object.freeze(normalized.items.map((item) => item.content_id)),
+      contentDigests: Object.freeze(normalized.items.map((item) => item.content_digest)),
+    });
+  } catch (error) {
+    return Object.freeze({
+      ok: false,
+      faultClass: typeof error?.faultClass === 'string' ? error.faultClass : 'INVALID_INTAKE',
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+export function assertObservedIdentity(planned, observed) {
+  const same =
+    observed?.operationId === planned.operationId &&
+    JSON.stringify(observed?.contentIds ?? null) === JSON.stringify(planned.contentIds) &&
+    JSON.stringify(observed?.contentDigests ?? null) === JSON.stringify(planned.contentDigests);
+  if (!same) {
+    const error = new Error(
+      'production mutation Worker reported an operation identity that contradicts the ' +
+      'offline plan; reconcile by readback before any retry',
+    );
+    error.response = { requiresReadback: true, planned, observed: observed ?? null };
+    throw error;
+  }
+  return true;
+}
+
 export async function main(
   argv = process.argv.slice(2),
   {
     run = runSync,
     invokeWorker = invokeEphemeralWorker,
     checkPublisher = checkPublisherMutexCompatibility,
+    ownerPublicKeyPem = null,
+    verifyOwnerApproval = undefined,
     readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8')),
   } = {},
 ) {
@@ -417,10 +484,33 @@ export async function main(
   const ownerApproval = options.ownerApprovalFile
     ? readJson(options.ownerApprovalFile)
     : null;
+  const approvedCandidate = options.approvedCandidateFile
+    ? readJson(options.approvedCandidateFile)
+    : null;
+  const payload = {
+    mode: options.mode,
+    sourceMode: options.sourceMode,
+    ownerApproval,
+    approvedCandidate,
+    input,
+  };
+  const planned = planIntakeIdentity(payload, {
+    ownerPublicKeyPem: ownerPublicKeyPem ?? mutationWorkerOwnerPublicKey(),
+    ...(verifyOwnerApproval ? { verifyOwnerApproval } : {}),
+  });
   const preflight = collectOperatorPreflight(run, checkPublisher);
+  const blockers = [...preflight.readiness.blockers];
+  if (!planned.ok) {
+    blockers.push({ id: planned.faultClass, detail: planned.error });
+  }
+  const readiness = Object.freeze({
+    ...preflight.readiness,
+    ok: preflight.readiness.ok && planned.ok,
+    blockers: Object.freeze(blockers),
+  });
 
   const summary = {
-    status: preflight.readiness.ok ? 'ready' : 'blocked',
+    status: readiness.ok ? 'ready' : 'blocked',
     mode: options.apply ? 'apply' : 'observe',
     environment: 'production',
     candidate: preflight.candidate,
@@ -430,10 +520,11 @@ export async function main(
         preflight.migrations.includes(name)),
     },
     publisherMutex: preflight.publisherMutex,
-    readiness: preflight.readiness,
+    planned,
+    readiness,
   };
 
-  if (!preflight.readiness.ok) {
+  if (!readiness.ok) {
     console.log(JSON.stringify(summary, null, 2));
     process.exitCode = 1;
     return summary;
@@ -446,18 +537,15 @@ export async function main(
 
   const result = await invokeWorker({
     candidate: preflight.candidate,
-    payload: {
-      mode: options.mode,
-      sourceMode: options.sourceMode,
-      ownerApproval,
-      input,
-    },
+    payload,
     port: options.port,
   });
+  assertObservedIdentity(planned, result?.planned);
 
   const output = {
     ...summary,
     status: 'complete',
+    identityBinding: { planned: planned.operationId, observed: result.planned.operationId },
     mutation: result,
   };
   console.log(JSON.stringify(output, null, 2));

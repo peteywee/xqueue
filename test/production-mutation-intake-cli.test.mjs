@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { candidateDigest } from '../src/authoring/contracts.mjs';
+import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-production-intake-worker.mjs';
+
 import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   SAFETY_SQL,
   assertMutationSchema,
+  assertObservedIdentity,
   checkPublisherMutexCompatibility,
+  mutationWorkerOwnerPublicKey,
+  planIntakeIdentity,
   evaluateOperatorReadiness,
   main,
   parseArgs,
@@ -103,10 +109,32 @@ test('production operator CLI requires explicit environment and apply confirmati
     '--file', 'item.json',
     '--automated',
     '--approval-file', 'approval.json',
+    '--approved-candidate-file', 'candidate.json',
     '--apply',
     '--confirm', PRODUCTION_INTAKE_CONFIRM,
   ]);
   assert.equal(signed.ownerApprovalFile, 'approval.json');
+  assert.equal(signed.approvedCandidateFile, 'candidate.json');
+
+  // The Worker verifies the signature over the full approved candidate, so a
+  // signed approval without that candidate can never authorize intake.
+  assert.throws(
+    () => parseArgs([
+      '--environment', 'production',
+      '--file', 'item.json',
+      '--automated',
+      '--approval-file', 'approval.json',
+    ]),
+    /must be supplied together/,
+  );
+  assert.throws(
+    () => parseArgs([
+      '--environment', 'production',
+      '--file', 'item.json',
+      '--approved-candidate-file', 'candidate.json',
+    ]),
+    /valid only with --automated/,
+  );
 
   assert.throws(
     () => parseArgs([
@@ -287,6 +315,172 @@ test('apply refuses before launching the Worker when the publisher predates the 
   assert.equal(result.publisherMutex.reason, 'publisher_predates_mutation_mutex');
 });
 
+function readyRun() {
+  return (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git fetch origin main') return '';
+    if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      return JSON.stringify(auth());
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+    }
+    if (key.includes('SELECT owner,generation,transition_state')) {
+      return JSON.stringify([
+        { results: [safety().authority] },
+        { results: [{ unresolved: 0 }] },
+        { results: [{ active_leases: 0 }] },
+        { results: [{ inflight: null }] },
+        { results: [{ publication_lease_generation: 5 }] },
+        { results: [{ publication_event_cursor: 17 }] },
+        { results: [safety().mutationHalt] },
+        { results: [safety().mutationLane] },
+        { results: [safety().runtimeState] },
+      ]);
+    }
+    throw new Error('unexpected command: ' + key);
+  };
+}
+
+async function withExitCode(fn) {
+  const previous = process.exitCode;
+  try {
+    const value = await fn();
+    return { value, exitCode: process.exitCode };
+  } finally {
+    process.exitCode = previous;
+  }
+}
+
+test('invalid intake input blocks apply offline before the Worker is launched', async () => {
+  let invoked = false;
+  const { value: result, exitCode } = await withExitCode(() => main(
+    [
+      '--environment', 'production',
+      '--file', 'item.json',
+      '--apply',
+      '--confirm', PRODUCTION_INTAKE_CONFIRM,
+    ],
+    {
+      run: readyRun(),
+      readJson: () => ({ content_id: 'I-1', pillar: 'A' }),
+      checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
+      invokeWorker: async () => {
+        invoked = true;
+        throw new Error('must not invoke');
+      },
+    },
+  ));
+
+  assert.equal(invoked, false);
+  assert.equal(exitCode, 1);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.planned.ok, false);
+  assert.ok(result.readiness.blockers.some((item) => item.id === 'INVALID_INTAKE'));
+});
+
+test('automated intake whose fields differ from the signed candidate is blocked offline', async () => {
+  const approvedCandidate = {
+    candidate_id: 'I-2',
+    artifact_kind: 'post',
+    title: 'Signed title',
+    body: 'signed body',
+    pillar: 'A',
+    figure: null,
+    source_refs: ['source:test'],
+  };
+  const files = new Map([
+    ['item.json', {
+      content_id: 'I-2',
+      pillar: 'A',
+      title: 'Signed title',
+      body: 'edited after signing',
+      source_ref: 'source:test',
+    }],
+    ['approval.json', { owner_proof: { payload_digest: 'sha256:' + '3'.repeat(64) } }],
+    ['candidate.json', approvedCandidate],
+  ]);
+  let invoked = false;
+  const { value: result } = await withExitCode(() => main(
+    [
+      '--environment', 'production',
+      '--file', 'item.json',
+      '--automated',
+      '--approval-file', 'approval.json',
+      '--approved-candidate-file', 'candidate.json',
+    ],
+    {
+      run: readyRun(),
+      readJson: (path) => files.get(path),
+      ownerPublicKeyPem: 'test-owner-public-key',
+      verifyOwnerApproval: () => true,
+      checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
+      invokeWorker: async () => {
+        invoked = true;
+        throw new Error('must not invoke');
+      },
+    },
+  ));
+
+  assert.equal(invoked, false);
+  assert.equal(result.status, 'blocked');
+  assert.ok(result.readiness.blockers.some((item) => item.id === 'INVALID_OWNER_APPROVAL'));
+});
+
+test('a Worker identity that contradicts the offline plan requires readback, not success', async () => {
+  await assert.rejects(
+    main(
+      [
+        '--environment', 'production',
+        '--file', 'item.json',
+        '--apply',
+        '--confirm', PRODUCTION_INTAKE_CONFIRM,
+      ],
+      {
+        run: readyRun(),
+        readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
+        checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
+        invokeWorker: async () => ({
+          status: 'ok',
+          planned: {
+            operationId: 'mutation-intake-' + 'f'.repeat(24),
+            contentIds: ['I-1'],
+            contentDigests: ['0'.repeat(64)],
+          },
+          mutation: { status: 'applied' },
+        }),
+      },
+    ),
+    (error) => {
+      assert.match(error.message, /contradicts the offline plan/);
+      assert.equal(error.response.requiresReadback, true);
+      return true;
+    },
+  );
+
+  const planned = planIntakeIdentity({
+    mode: 'single',
+    input: { content_id: 'I-1', pillar: 'A', body: 'approved' },
+  });
+  assert.throws(() => assertObservedIdentity(planned, undefined), /contradicts/);
+  assert.equal(
+    assertObservedIdentity(planned, {
+      operationId: planned.operationId,
+      contentIds: planned.contentIds,
+      contentDigests: planned.contentDigests,
+    }),
+    true,
+  );
+});
+
+test('offline authorization uses the committed Worker owner public key', () => {
+  assert.match(mutationWorkerOwnerPublicKey(), /^-----BEGIN PUBLIC KEY-----\n/);
+});
+
 test('observe mode never invokes the mutation Worker', async () => {
   const commands = [];
   const run = (command, argv) => {
@@ -336,6 +530,16 @@ test('observe mode never invokes the mutation Worker', async () => {
   assert.equal(result.status, 'ready');
   assert.equal(result.mode, 'observe');
   assert.equal(invoked, false);
+  // Observe mode reports the identity the Worker itself will derive.
+  const expected = authorizeProductionIntakeInput({
+    mode: 'single',
+    sourceMode: 'owner-manual',
+    input: { content_id: 'I-1', pillar: 'A', body: 'approved' },
+  });
+  assert.equal(result.planned.ok, true);
+  assert.equal(result.planned.operationId, expected.operationId);
+  assert.equal(result.planned.batchDigest, expected.normalized.batch_digest);
+  assert.deepEqual(result.planned.contentIds, ['I-1']);
   assert.ok(commands.some((row) => row.join(' ') === 'git fetch origin main'));
 });
 
@@ -367,10 +571,25 @@ test('automated single-item apply passes signed approval evidence, never a diges
     throw new Error('unexpected command: ' + key);
   };
 
+  const approvedCandidate = {
+    candidate_id: 'I-1',
+    artifact_kind: 'post',
+    status: 'awaiting_owner',
+    title: 'Approved operator intake',
+    body: 'approved',
+    pillar: 'A',
+    figure: null,
+    knowledge_unit_refs: ['knowledge:test'],
+    source_refs: ['source:test'],
+    created_at: '2026-10-03T06:58:00.000Z',
+    generator: null,
+    validation: { result: 'pass', findings: [] },
+  };
+  approvedCandidate.content_digest = candidateDigest(approvedCandidate);
   const approval = {
     approval_id: 'approval:test',
-    candidate_id: 'I-1',
-    candidate_digest: 'sha256:' + '1'.repeat(64),
+    candidate_id: approvedCandidate.candidate_id,
+    candidate_digest: approvedCandidate.content_digest,
     decision: 'approve',
     decided_by: 'Patrick Craven',
     decided_at: '2026-10-03T06:59:00.000Z',
@@ -382,33 +601,71 @@ test('automated single-item apply passes signed approval evidence, never a diges
     },
   };
   const files = new Map([
-    ['item.json', { content_id: 'I-1', pillar: 'A', body: 'approved' }],
+    ['item.json', {
+      content_id: approvedCandidate.candidate_id,
+      pillar: approvedCandidate.pillar,
+      title: approvedCandidate.title,
+      body: approvedCandidate.body,
+      source_ref: approvedCandidate.source_refs[0],
+    }],
     ['approval.json', approval],
+    ['candidate.json', approvedCandidate],
   ]);
+  const verified = [];
+  const verifyOwnerApproval = (candidate, provided, publicKeyPem) => {
+    verified.push({ candidate, provided, publicKeyPem });
+    return true;
+  };
+  const ownerPublicKeyPem = 'test-owner-public-key';
   let call;
 
-  await main(
+  const result = await main(
     [
       '--environment', 'production',
       '--file', 'item.json',
       '--automated',
       '--approval-file', 'approval.json',
+      '--approved-candidate-file', 'candidate.json',
       '--apply',
       '--confirm', PRODUCTION_INTAKE_CONFIRM,
     ],
     {
       run,
       readJson: (path) => files.get(path),
+      ownerPublicKeyPem,
+      verifyOwnerApproval,
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async (args) => {
         call = args;
-        return { status: 'ok', mutation: { status: 'applied' } };
+        const planned = planIntakeIdentity(args.payload, {
+          ownerPublicKeyPem,
+          verifyOwnerApproval: () => true,
+        });
+        return {
+          status: 'ok',
+          planned: {
+            operationId: planned.operationId,
+            contentIds: planned.contentIds,
+            contentDigests: planned.contentDigests,
+          },
+          mutation: { status: 'applied' },
+        };
       },
     },
   );
 
+  // Offline authorization verified the signed approval against the full candidate.
+  assert.equal(verified.length, 1);
+  assert.equal(verified[0].candidate, approvedCandidate);
+  assert.equal(verified[0].provided, approval);
+  assert.equal(verified[0].publicKeyPem, ownerPublicKeyPem);
+  assert.equal(result.planned.sourceMode, 'automated');
+  assert.match(result.planned.operationId, /^mutation-intake-[0-9a-f]{24}$/);
+  assert.equal(result.identityBinding.planned, result.identityBinding.observed);
+
   assert.equal(call.payload.sourceMode, 'automated');
   assert.deepEqual(call.payload.ownerApproval, approval);
+  assert.deepEqual(call.payload.approvedCandidate, approvedCandidate);
   assert.equal('ownerApprovalDigest' in call.payload, false);
 });
 
@@ -454,7 +711,16 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async (args) => {
         call = args;
-        return { status: 'ok', mutation: { status: 'applied' } };
+        const planned = planIntakeIdentity(args.payload);
+        return {
+          status: 'ok',
+          planned: {
+            operationId: planned.operationId,
+            contentIds: planned.contentIds,
+            contentDigests: planned.contentDigests,
+          },
+          mutation: { status: 'applied' },
+        };
       },
     },
   );

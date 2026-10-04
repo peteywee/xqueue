@@ -626,6 +626,81 @@ function json(value, init = {}) {
   return new Response(JSON.stringify(value, null, 2), { ...init, headers });
 }
 
+// Pure request authorization and identity: no D1, network, or clock. The
+// Worker and the operator CLI share it so observe mode reports the same
+// operation identity that apply will claim.
+export function authorizeProductionIntakeInput(
+  payload,
+  {
+    ownerPublicKeyPem,
+    verifyOwnerApproval = assertAuthenticatedOwnerApprovalForCandidate,
+    normalizeInput = normalizeIntakeInput,
+    deriveOperationId = intakeMutationOperationId,
+  } = {},
+) {
+  const input = payload?.input;
+  if (input == null) {
+    throw productionFault('INVALID_INTAKE', 'intake input is required', { httpStatus: 400 });
+  }
+
+  let mode;
+  let sourceMode;
+  let normalized;
+  try {
+    mode = requiredMode(payload?.mode);
+    sourceMode = requiredSourceMode(payload?.sourceMode);
+    assertSourceModeConsistency(input, sourceMode);
+    const authorizedInput = sourceMode === 'automated'
+      ? authorizeAutomatedInput({
+          raw: input,
+          mode,
+          ownerApproval: payload?.ownerApproval ?? null,
+          approvedCandidate: payload?.approvedCandidate ?? null,
+          ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
+          ownerPublicKeyPem,
+          verifyOwnerApproval,
+        })
+      : input;
+    normalized = normalizeInput(authorizedInput, {
+      mode,
+      sourceMode,
+      ownerApprovalDigest:
+        sourceMode === 'automated' ? null : (payload?.ownerApprovalDigest ?? null),
+    });
+  } catch (error) {
+    if (error?.authorityUnavailable === true) {
+      throw productionFault(
+        'OWNER_APPROVAL_AUTHORITY_UNAVAILABLE',
+        error.message,
+        { httpStatus: 503 },
+      );
+    }
+    throw productionFault(
+      sourceMode === 'automated' || error?.authorizationModeMismatch === true
+        ? 'INVALID_OWNER_APPROVAL'
+        : 'INVALID_INTAKE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 400 },
+    );
+  }
+
+  if (normalized.count > MAX_PRODUCTION_INTAKE_ITEMS) {
+    throw productionFault(
+      'PRODUCTION_BATCH_LIMIT_EXCEEDED',
+      'production intake is limited to ' + MAX_PRODUCTION_INTAKE_ITEMS + ' items per mutation',
+      { httpStatus: 413 },
+    );
+  }
+
+  const operationId = deriveOperationId({
+    batchDigest: normalized.batch_digest,
+    targetAccount: DEFAULT_TARGET_ACCOUNT,
+    contentIds: normalized.items.map((item) => item.content_id),
+  });
+
+  return Object.freeze({ mode, sourceMode, normalized, operationId });
+}
+
 export async function runProductionIntakeRequest(
   env,
   payload,
@@ -672,68 +747,16 @@ export async function runProductionIntakeRequest(
       { httpStatus: 400 },
     );
   }
-  const input = payload?.input;
-  if (input == null) {
-    throw productionFault('INVALID_INTAKE', 'intake input is required', { httpStatus: 400 });
-  }
-
-  let mode;
-  let sourceMode;
-  let normalized;
-  try {
-    mode = requiredMode(payload?.mode);
-    sourceMode = requiredSourceMode(payload?.sourceMode);
-    assertSourceModeConsistency(input, sourceMode);
-    const authorizedInput = sourceMode === 'automated'
-      ? authorizeAutomatedInput({
-          raw: input,
-          mode,
-          ownerApproval: payload?.ownerApproval ?? null,
-          approvedCandidate: payload?.approvedCandidate ?? null,
-          ownerApprovalDigest: payload?.ownerApprovalDigest ?? null,
-          ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
-          verifyOwnerApproval,
-        })
-      : input;
-    normalized = normalizeInput(authorizedInput, {
-      mode,
-      sourceMode,
-      ownerApprovalDigest:
-        sourceMode === 'automated' ? null : (payload?.ownerApprovalDigest ?? null),
-    });
-  } catch (error) {
-    if (error?.authorityUnavailable === true) {
-      throw productionFault(
-        'OWNER_APPROVAL_AUTHORITY_UNAVAILABLE',
-        error.message,
-        { httpStatus: 503 },
-      );
-    }
-    throw productionFault(
-      sourceMode === 'automated' || error?.authorizationModeMismatch === true
-        ? 'INVALID_OWNER_APPROVAL'
-        : 'INVALID_INTAKE',
-      error instanceof Error ? error.message : String(error),
-      { httpStatus: 400 },
-    );
-  }
-
-  if (normalized.count > MAX_PRODUCTION_INTAKE_ITEMS) {
-    throw productionFault(
-      'PRODUCTION_BATCH_LIMIT_EXCEEDED',
-      'production intake is limited to ' + MAX_PRODUCTION_INTAKE_ITEMS + ' items per mutation',
-      { httpStatus: 413 },
-    );
-  }
+  const { normalized, operationId } = authorizeProductionIntakeInput(payload, {
+    ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
+    verifyOwnerApproval,
+    normalizeInput,
+    deriveOperationId,
+  });
 
   const recordedAt = now().toISOString();
   const trustedAuth = await trustedProductionAuth(env, verifyAuth, fetchImpl);
   const transport = productionTransport(env, db, createTransport, fetchImpl);
-  const operationId = deriveOperationId({
-    batchDigest: normalized.batch_digest,
-    targetAccount: DEFAULT_TARGET_ACCOUNT,
-    contentIds: normalized.items.map((item) => item.content_id),
-  });
 
   let existingOperation;
   try {
