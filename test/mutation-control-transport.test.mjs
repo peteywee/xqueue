@@ -37,6 +37,8 @@ function fakeDb() {
           if (sql.startsWith('SELECT COUNT(*) AS unresolved')) return { unresolved: 0 };
           if (sql.startsWith('SELECT COUNT(*) AS active_leases')) return { active_leases: 0 };
           if (sql.startsWith('SELECT json_extract')) return { inflight: null };
+          if (sql.startsWith("SELECT generation FROM publication_leases")) return { generation: 5 };
+          if (sql.startsWith('SELECT COALESCE(MAX(id),0) AS event_cursor')) return { event_cursor: 17 };
           return rows.get(sql) ?? null;
         },
         async all() {
@@ -78,21 +80,36 @@ test('bookmark capture requires an explicit successful usable response', async (
   assert.equal(calls[0].init.headers.Authorization, 'Bearer token');
 });
 
-test('bookmark transport failures fail closed as checkpoint corruption', async () => {
-  await assert.rejects(
-    getD1TimeTravelBookmark({
-      accountId: 'acct', databaseId: 'db', apiToken: 'token',
-      fetchImpl: async () => { throw new Error('network down'); },
-    }),
-    (error) => error?.code === 'CHECKPOINT_CORRUPT',
-  );
-  await assert.rejects(
-    getD1TimeTravelBookmark({
-      accountId: 'acct', databaseId: 'db', apiToken: 'token',
-      fetchImpl: async () => ({ ok: true, json: async () => ({ success: true, result: { bookmark: 'bad' } }) }),
-    }),
-    (error) => error?.code === 'CHECKPOINT_CORRUPT',
-  );
+test('bookmark service outages are unavailable reads, not checkpoint corruption', async () => {
+  const outages = [
+    async () => { throw new Error('network down'); },
+    async () => ({ ok: false, status: 503, json: async () => { throw new SyntaxError('Unexpected token <'); } }),
+    async () => ({ ok: false, status: 500, json: async () => ({ success: false }) }),
+    async () => ({ ok: false, status: 429, json: async () => ({ success: false }) }),
+  ];
+  for (const fetchImpl of outages) {
+    await assert.rejects(
+      getD1TimeTravelBookmark({ accountId: 'acct', databaseId: 'db', apiToken: 'token', fetchImpl }),
+      (error) => error?.code === 'D1_READ_UNAVAILABLE',
+    );
+  }
+});
+
+test('unusable bookmark responses fail closed as checkpoint corruption', async () => {
+  const unusable = [
+    async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { bookmark: 'bad' } }) }),
+    async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } }),
+    async () => ({ ok: true, status: 200, json: async () => ({ success: false }) }),
+    async () => ({ ok: false, status: 401, json: async () => ({ success: false }) }),
+    async () => ({ ok: false, status: 403, json: async () => ({ success: false }) }),
+    async () => ({ ok: false, status: 404, json: async () => ({ success: false }) }),
+  ];
+  for (const fetchImpl of unusable) {
+    await assert.rejects(
+      getD1TimeTravelBookmark({ accountId: 'acct', databaseId: 'db', apiToken: 'token', fetchImpl }),
+      (error) => error?.code === 'CHECKPOINT_CORRUPT',
+    );
+  }
 });
 
 test('D1-only transport exposes reads, checkpoint and batch with no publication surface', async () => {
@@ -116,6 +133,8 @@ test('D1-only transport exposes reads, checkpoint and batch with no publication 
   assert.equal(safety.authority.owner, 'cloudflare');
   assert.equal(safety.unresolvedAttemptCount, 0);
   assert.equal(safety.activeLeaseCount, 0);
+  assert.equal(safety.publicationLeaseGeneration, 5);
+  assert.equal(safety.publicationEventCursor, 17);
   assert.equal(safety.runtimeSnapshotObserved, true);
   assert.equal(safety.inflight, null);
   assert.equal(await transport.captureCheckpoint(), 'bookmark_12345');

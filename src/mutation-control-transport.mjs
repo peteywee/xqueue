@@ -26,9 +26,19 @@ export async function getD1TimeTravelBookmark({
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
     });
   } catch (error) {
+    // No response means nothing was read; the checkpoint is unavailable, not corrupt.
     const wrapped = new Error('D1 Time Travel bookmark request failed');
-    wrapped.code = 'CHECKPOINT_CORRUPT';
+    wrapped.code = 'D1_READ_UNAVAILABLE';
     wrapped.cause = error;
+    throw wrapped;
+  }
+
+  // Rate limiting and server errors are service outages. Any other failure,
+  // including auth errors and unusable bodies, still fails closed as corrupt.
+  const status = Number(response?.status);
+  if (response?.ok !== true && (status === 429 || (status >= 500 && status <= 599))) {
+    const wrapped = new Error('D1 Time Travel bookmark service unavailable (HTTP ' + status + ')');
+    wrapped.code = 'D1_READ_UNAVAILABLE';
     throw wrapped;
   }
 
@@ -111,18 +121,25 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
       ).first();
       const leases = await d1.prepare(
         'SELECT COUNT(*) AS active_leases FROM publication_leases ' +
-        'WHERE owner_token IS NOT NULL ' +
-        "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000",
+        'WHERE owner_token IS NOT NULL',
       ).first();
       const runtime = await d1.prepare(
         "SELECT json_extract(value, '$.inflight') AS inflight " +
         "FROM runtime_metadata WHERE key='state.snapshot_json'",
+      ).first();
+      const leaseEpoch = await d1.prepare(
+        "SELECT generation FROM publication_leases WHERE lease_name='publisher'",
+      ).first();
+      const publicationCursor = await d1.prepare(
+        'SELECT COALESCE(MAX(id),0) AS event_cursor FROM publication_events',
       ).first();
 
       return Object.freeze({
         authority: authority ?? null,
         unresolvedAttemptCount: Number(unresolved?.unresolved ?? -1),
         activeLeaseCount: Number(leases?.active_leases ?? -1),
+        publicationLeaseGeneration: Number(leaseEpoch?.generation ?? -1),
+        publicationEventCursor: Number(publicationCursor?.event_cursor ?? -1),
         runtimeSnapshotObserved: runtime !== null,
         inflight: runtime?.inflight ?? null,
       });

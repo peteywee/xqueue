@@ -3,6 +3,9 @@ import { runIntakeMutation } from './mutation-intake-runner.mjs';
 
 const SHA40_RE = /^[0-9a-f]{40}$/i;
 
+// Blast-radius ceiling for one guarded production intake mutation.
+export const MAX_PRODUCTION_INTAKE_ITEMS = 5;
+
 function blocker(id, detail) {
   return Object.freeze({ id, detail });
 }
@@ -156,6 +159,12 @@ export function evaluateProductionMutationPreflight({
     safety?.unresolvedAttemptCount,
   );
   const activeLeaseCount = nonNegativeInteger(safety?.activeLeaseCount);
+  const publicationLeaseGeneration = positiveInteger(
+    safety?.publicationLeaseGeneration,
+  );
+  const publicationEventCursor = nonNegativeInteger(
+    safety?.publicationEventCursor,
+  );
 
   if (unresolvedAttemptCount === null || activeLeaseCount === null) {
     blockers.push(blocker(
@@ -172,9 +181,20 @@ export function evaluateProductionMutationPreflight({
     if (activeLeaseCount !== 0) {
       blockers.push(blocker(
         'active_publication_lease',
-        'An unexpired publication lease is active.',
+        'A publication lease is held (an expired lease retained after partial ' +
+          'missed-slot deferral still excludes mutation).',
       ));
     }
+  }
+
+  if (
+    publicationLeaseGeneration === null ||
+    publicationEventCursor === null
+  ) {
+    blockers.push(blocker(
+      'publication_epoch_unreadable',
+      'Monotonic publication lease/event cursors are missing or invalid.',
+    ));
   }
 
   if (safety?.runtimeSnapshotObserved !== true) {
@@ -203,6 +223,8 @@ export function evaluateProductionMutationPreflight({
       publicationAuthority: Object.freeze(authority),
       unresolvedAttemptCount,
       activeLeaseCount,
+      publicationLeaseGeneration,
+      publicationEventCursor,
       runtimeSnapshotObserved: safety?.runtimeSnapshotObserved === true,
       inflight: safety?.inflight ?? null,
     }),
@@ -223,7 +245,7 @@ export async function runProductionIntakeMutation({
   let safety;
   try {
     safety = await transport.readPublicationSafety();
-  } catch {
+  } catch (error) {
     const preflight = Object.freeze({
       ok: false,
       authority: 'unknown',
@@ -238,6 +260,9 @@ export async function runProductionIntakeMutation({
     return Object.freeze({
       status: 'blocked',
       phase: 'production_preflight',
+      fault_class: 'PRE_DISPATCH_STATE_UNAVAILABLE',
+      retryable: true,
+      error: error instanceof Error ? error.message : String(error),
       preflight,
     });
   }
@@ -257,10 +282,22 @@ export async function runProductionIntakeMutation({
     });
   }
 
+  const publicationAuthority = preflight.observed.publicationAuthority;
+  const publicationSafetyFence = Object.freeze({
+    authority_generation: publicationAuthority.generation,
+    candidate_sha: publicationAuthority.candidateSha,
+    deployment_id: publicationAuthority.deploymentId,
+    publication_lease_generation:
+      preflight.observed.publicationLeaseGeneration,
+    publication_event_cursor:
+      preflight.observed.publicationEventCursor,
+  });
+
   const result = await runIntakeMutation({
     ...mutationArgs,
     transport,
     authority: preflight.authority,
+    publicationSafetyFence,
   });
 
   return Object.freeze({

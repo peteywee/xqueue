@@ -20,6 +20,7 @@ export const MUTATION_KINDS = Object.freeze([
 
 export const MUTATION_ERROR_MAP = Object.freeze({
   D1_READ_UNAVAILABLE: 'state_read_failure',
+  D1_READ_CONTRADICTORY: 'inconsistent_read_results',
   HALT_GENERATION_CHANGED: 'halt_generation_changed',
   MUTATION_LANE_HALTED: 'halt_set',
   MUTATION_LANE_CONTENDED: 'lease_contended',

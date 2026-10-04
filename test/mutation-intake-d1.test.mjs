@@ -314,6 +314,69 @@ test('checkpoint and projected runtime are mandatory exact fences', async () => 
 });
 
 
+test('completion reader distinguishes canonical contradiction from read unavailability', async () => {
+  const { raw, d1 } = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const checkpoint = intakeMutationCheckpointEvidence(
+    controlPlan,
+    'bookmark_12345',
+    '2026-09-29T10:04:00.000Z',
+  );
+  const apply = prepareIntakeAtomicApply({
+    db: d1,
+    controlPlan,
+    intakePlan,
+    runtimeRevision,
+    checkpointEvidence: checkpoint,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+  await d1.batch(apply.statements);
+
+  await assert.rejects(
+    () => readIntakeMutationCompletion({
+      db: d1,
+      controlPlan: { ...controlPlan, plan_digest: 'f'.repeat(64) },
+      intakePlan,
+    }),
+    (error) =>
+      error?.readback === 'contradictory' &&
+      /mutation operation readback is not exact applied state/.test(error.message),
+  );
+
+  await assert.rejects(
+    () => readIntakeMutationCompletion({
+      db: d1,
+      controlPlan: {
+        ...controlPlan,
+        plan_context: { ...controlPlan.plan_context, intake_plan_digest: 'e'.repeat(64) },
+      },
+      intakePlan,
+    }),
+    (error) =>
+      error?.readback === 'contradictory' &&
+      /intake plan digest does not match mutation plan/.test(error.message),
+  );
+
+  const unavailableDb = {
+    prepare() {
+      throw new Error('network timeout reading D1');
+    },
+  };
+  await assert.rejects(
+    () => readIntakeMutationCompletion({
+      db: unavailableDb,
+      controlPlan,
+      intakePlan,
+    }),
+    (error) =>
+      error?.readback === 'unavailable' &&
+      /network timeout reading D1/.test(error.message),
+  );
+
+  raw.close();
+});
+
 test('exact completion readback refuses corrupted canonical item state', async () => {
   const { raw, d1 } = fixture();
   const { intakePlan, controlPlan, state } = plans();

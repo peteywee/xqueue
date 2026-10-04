@@ -409,14 +409,53 @@ export async function runScheduledPublication(
       });
     }
 
+    let deferralLease;
+    try {
+      const identity = createPublicationLeaseIdentity();
+      const acquired = await acquireLease(env.DB, {
+        ...identity,
+        ttlMs: LEASE_TTL_MS,
+        nowMs: Date.now(),
+      });
+      if (!acquired?.acquired || !acquired.lease) {
+        return idle('missed_deferral_mutex_unavailable', { eligibility });
+      }
+      deferralLease = acquired.lease;
+    } catch {
+      return idle('missed_deferral_mutex_unavailable', { eligibility });
+    }
+
     let deferral;
+    let deferralFailed = false;
+    let releaseFailed = false;
     try {
       deferral = await deferMissed(env.DB, {
         now,
         graceMinutes: eligibilityOptions.graceMinutes,
+        publicationLease: deferralLease,
       });
     } catch {
-      return idle('missed_deferral_failed', { eligibility });
+      deferralFailed = true;
+    }
+
+    if (deferralFailed) {
+      return idle('missed_deferral_failed_lease_retained', { eligibility });
+    }
+
+    try {
+      const released = await releaseLease(env.DB, deferralLease, {
+        nowMs: Date.now(),
+      });
+      releaseFailed = released?.released !== true;
+    } catch {
+      releaseFailed = true;
+    }
+
+    if (releaseFailed) {
+      return idle('missed_deferral_mutex_release_failed', {
+        eligibility,
+        deferral: deferral ?? null,
+      });
     }
 
     const deferredIds = Array.isArray(deferral?.outcomes)
@@ -501,11 +540,26 @@ export async function runScheduledPublication(
         }
 
         const identity = createPublicationLeaseIdentity();
-        const acquired = await acquireLease(env.DB, {
-          ...identity,
-          ttlMs: LEASE_TTL_MS,
-          nowMs: Date.now(),
-        });
+        let acquired;
+        try {
+          acquired = await acquireLease(env.DB, {
+            ...identity,
+            ttlMs: LEASE_TTL_MS,
+            nowMs: Date.now(),
+          });
+        } catch (error) {
+          // Acquisition is one atomic D1 batch before any X dispatch (only
+          // the read-only identity probe precedes it). The 0017 trigger aborts
+          // it while a guarded mutation holds the lane; that is routine
+          // exclusion, not an unhandled publisher failure.
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            acquired: false,
+            reason: /active mutation lane/i.test(message)
+              ? 'publication_lease_blocked_by_mutation_lane'
+              : 'publication_lease_unavailable',
+          };
+        }
         activeLease = acquired?.acquired ? acquired.lease : null;
         return acquired;
       },
