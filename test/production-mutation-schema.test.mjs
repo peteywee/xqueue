@@ -104,7 +104,7 @@ function simulatedProduction({
     if (key === 'git branch --show-current') return 'main\n';
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
-    if (key === 'git rev-parse HEAD' || key === 'git rev-parse origin/main') return SHA + '\n';
+    if (key === 'git rev-parse HEAD' || key === 'git rev-parse FETCH_HEAD') return SHA + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
     if (key.startsWith('pnpm wrangler d1 migrations apply xqueue-production')) {
       assert.deepEqual(argv, [
@@ -228,6 +228,16 @@ test('gates refuse unverified auth, inexact candidates, and unsafe publication s
     assert.ok(result.blockers.some((item) => item.id === id), id);
   }
   assert.equal(DUE_SLOT_EXCLUSION_MINUTES, 30);
+
+  // A failed origin fetch is reported with its cause, never as exact main.
+  const unfetched = evaluateSchemaGates({
+    auth: auth(),
+    candidate: candidate({ originMainSha: null, originMainError: 'Could not resolve host: github.com' }),
+    plan,
+    safety: safety(),
+  });
+  const exact = unfetched.blockers.find((item) => item.id === 'candidate_not_exact_main');
+  assert.match(exact.detail, /Cause: git fetch origin main failed: Could not resolve host/);
 });
 
 test('schema comparison requires the same objects bound to the same tables with identical SQL', () => {

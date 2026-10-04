@@ -269,7 +269,11 @@ export function evaluateSchemaGates({ auth, candidate, plan, safety }) {
     blockers.push({ id: 'candidate_dirty', detail: 'The checkout must be clean.' });
   }
   if (!candidate?.headSha || candidate.headSha !== candidate.originMainSha) {
-    blockers.push({ id: 'candidate_not_exact_main', detail: 'HEAD must equal fetched origin/main.' });
+    blockers.push({
+      id: 'candidate_not_exact_main',
+      detail: 'HEAD must equal fetched origin/main.' +
+        (candidate?.originMainError ? ' Cause: git fetch origin main failed: ' + candidate.originMainError : ''),
+    });
   }
   const authority = safety?.authority;
   if (authority?.owner !== 'cloudflare' || authority?.transition_state !== 'stable') {
