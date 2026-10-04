@@ -435,12 +435,18 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
 });
 
 test('publication lease blocked by an active mutation lane stops before X dispatch or fencing', async () => {
+  let identityReads = 0;
   let posts = 0;
   let fences = 0;
   let outcomes = 0;
   let releases = 0;
   const source = ledger();
   const client = mockXClient();
+  const getMe = client.users.getMe;
+  client.users.getMe = async () => {
+    identityReads += 1;
+    return getMe();
+  };
   client.posts.create = async () => {
     posts += 1;
     return { data: { id: '999999' } };
@@ -504,6 +510,9 @@ test('publication lease blocked by an active mutation lane stops before X dispat
   assert.equal(unavailable.reason, 'publication_lease_unavailable');
   assert.equal(unavailable.dispatched, false);
 
+  // The read-only identity probe precedes lease acquisition by design (one per
+  // wake); the exclusion guarantee is that nothing is dispatched or fenced.
+  assert.equal(identityReads, 2);
   assert.equal(posts, 0);
   assert.equal(fences, 0);
   assert.equal(outcomes, 0);
