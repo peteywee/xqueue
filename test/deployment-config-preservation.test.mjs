@@ -70,6 +70,36 @@ test('authority deployment targets only publisher Worker and pins one 15-minute 
   assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
 });
 
+test('production intake mutation descriptor is separate, D1-only, unrouted, and scheduler-free', () => {
+  const config = readJsonc('wrangler.mutation-production-intake.jsonc');
+
+  assert.equal(config.name, 'xqueue-mutation-production-intake');
+  assert.equal(config.main, 'cloudflare/src/mutation-production-intake-worker.mjs');
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.preview_urls, false);
+  assert.equal(declaresSchedulerMutation(config), false);
+  assert.equal(config.routes, undefined);
+  assert.equal(config.route, undefined);
+  assert.equal(config.d1_databases?.length, 1);
+  assert.equal(config.d1_databases?.[0]?.binding, 'DB');
+  assert.equal(config.d1_databases?.[0]?.database_id, PRODUCTION_DB_ID);
+  assert.equal(config.d1_databases?.[0]?.database_name, 'xqueue-production');
+  // Remote dev resolves preview_database_id ?? database_id; pinning it absent
+  // keeps the recovery checkpoint and the binding on the same production D1.
+  assert.equal(config.d1_databases?.[0]?.preview_database_id, undefined);
+  assert.equal(config.vars?.XQUEUE_PRODUCTION_DATABASE_ID, PRODUCTION_DB_ID);
+  for (const key of [
+    'r2_buckets',
+    'services',
+    'queues',
+    'kv_namespaces',
+    'durable_objects',
+    'dispatch_namespaces',
+  ]) {
+    assert.equal(config[key], undefined, key);
+  }
+});
+
 test('status and publisher roles share storage but not deployment identity or entrypoint', () => {
   const status = readJsonc('wrangler.status.jsonc');
   const publisher = readJsonc('wrangler.publisher.jsonc');
@@ -96,6 +126,7 @@ test('explicit preview config remains isolated from all production topology conf
     readJsonc('wrangler.status.jsonc'),
     readJsonc('wrangler.publisher.jsonc'),
     readJsonc('wrangler.authority.jsonc'),
+    readJsonc('wrangler.mutation-production-intake.jsonc'),
   ];
 
   assert.equal(preview.name, 'xqueue-preview');
@@ -137,6 +168,10 @@ test('all xqueue-production descriptors are status-only', () => {
     ['wrangler.publisher.jsonc', readJsonc('wrangler.publisher.jsonc')],
     ['wrangler.authority.jsonc', readJsonc('wrangler.authority.jsonc')],
     ['wrangler.preview.jsonc', readJsonc('wrangler.preview.jsonc')],
+    [
+      'wrangler.mutation-production-intake.jsonc',
+      readJsonc('wrangler.mutation-production-intake.jsonc'),
+    ],
   ];
   const owners = configs.filter(([, config]) => config.name === 'xqueue-production');
   assert.deepEqual(owners.map(([path]) => path), ['wrangler.jsonc', 'wrangler.status.jsonc']);

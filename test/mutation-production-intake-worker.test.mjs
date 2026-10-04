@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { normalizeIntakeInput } from '../src/continuous-queue-intake.mjs';
+import { candidateDigest } from '../src/authoring/contracts.mjs';
+import { MAX_PRODUCTION_INTAKE_ITEMS } from '../src/mutation-production-preflight.mjs';
 import {
-  MAX_PRODUCTION_INTAKE_ITEMS,
   createMutationProductionIntakeWorker,
   runProductionIntakeRequest,
 } from '../cloudflare/src/mutation-production-intake-worker.mjs';
@@ -709,15 +710,29 @@ test('automated intake rejects caller-supplied approval digests before normaliza
   );
 });
 
-test('automated intake derives durable approval digest only from verified signed evidence', async () => {
+test('automated intake derives durable approval digest only from verified full-candidate evidence', async () => {
   const seen = [];
   const approvalDigest = 'sha256:' + '3'.repeat(64);
+  const approvedCandidate = {
+    candidate_id: 'I-PRODUCTION-TEST-1',
+    artifact_kind: 'post',
+    status: 'awaiting_owner',
+    title: 'Approved production intake test',
+    body: 'Approved production intake test.',
+    pillar: 'A',
+    figure: null,
+    knowledge_unit_refs: ['knowledge:test'],
+    source_refs: ['source:test'],
+    created_at: '2026-10-03T06:58:00.000Z',
+    generator: null,
+    validation: { result: 'pass', findings: [] },
+  };
+  approvedCandidate.content_digest = candidateDigest(approvedCandidate);
+
   const approval = {
     approval_id: 'approval:test-owner-signed',
-    candidate_id: 'I-PRODUCTION-TEST-1',
-    candidate_digest:
-      'sha256:' +
-      '0'.repeat(64),
+    candidate_id: approvedCandidate.candidate_id,
+    candidate_digest: approvedCandidate.content_digest,
     decision: 'approve',
     decided_by: 'Patrick Craven',
     decided_at: '2026-10-03T06:59:00.000Z',
@@ -729,8 +744,9 @@ test('automated intake derives durable approval digest only from verified signed
     },
   };
   const d = deps();
-  d.verifyOwnerApproval = (candidateRef, provided, publicKeyPem) => {
-    seen.push({ candidateRef, provided, publicKeyPem });
+  d.verifyOwnerApproval = (candidate, provided, publicKeyPem) => {
+    seen.push({ candidate, provided, publicKeyPem });
+    assert.equal(candidate.content_digest, candidateDigest(candidate));
     return true;
   };
   const originalNormalize = normalizeIntakeInput;
@@ -739,6 +755,7 @@ test('automated intake derives durable approval digest only from verified signed
     assert.equal(input[0].source_mode, 'automated');
     assert.equal(input[0].owner_approval_digest, approvalDigest);
     assert.equal('owner_approval' in input[0], false);
+    assert.equal('approved_candidate' in input[0], false);
     return originalNormalize(input, options);
   };
 
@@ -747,15 +764,79 @@ test('automated intake derives durable approval digest only from verified signed
     payload({
       sourceMode: 'automated',
       ownerApproval: approval,
+      approvedCandidate,
+      input: {
+        content_id: approvedCandidate.candidate_id,
+        pillar: approvedCandidate.pillar,
+        title: approvedCandidate.title,
+        body: approvedCandidate.body,
+        source_ref: approvedCandidate.source_refs[0],
+      },
     }),
     d,
   );
 
   assert.equal(result.ok, true);
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].candidateRef.candidateId, 'I-PRODUCTION-TEST-1');
-  assert.match(seen[0].candidateRef.candidateDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(seen[0].candidate, approvedCandidate);
+  assert.equal(seen[0].provided, approval);
   assert.equal(seen[0].publicKeyPem, OWNER_PUBLIC_KEY_PEM);
+});
+
+test('automated intake rejects metadata that differs from the signed approved candidate', async () => {
+  const approvedCandidate = {
+    candidate_id: 'I-PRODUCTION-TEST-1',
+    artifact_kind: 'post',
+    status: 'awaiting_owner',
+    title: 'Approved production intake test',
+    body: 'Approved production intake test.',
+    pillar: 'A',
+    figure: null,
+    knowledge_unit_refs: ['knowledge:test'],
+    source_refs: ['source:test'],
+    created_at: '2026-10-03T06:58:00.000Z',
+    generator: null,
+    validation: { result: 'pass', findings: [] },
+  };
+  approvedCandidate.content_digest = candidateDigest(approvedCandidate);
+
+  const approval = {
+    approval_id: 'approval:test-owner-signed',
+    candidate_id: approvedCandidate.candidate_id,
+    candidate_digest: approvedCandidate.content_digest,
+    decision: 'approve',
+    decided_by: 'Patrick Craven',
+    decided_at: '2026-10-03T06:59:00.000Z',
+    owner_proof: {
+      type: 'ed25519-detached',
+      public_key_fingerprint: 'sha256:' + '4'.repeat(64),
+      payload_digest: 'sha256:' + '3'.repeat(64),
+      signature_base64: 'signed-proof',
+    },
+  };
+
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(),
+      payload({
+        sourceMode: 'automated',
+        ownerApproval: approval,
+        approvedCandidate,
+        input: {
+          content_id: approvedCandidate.candidate_id,
+          pillar: approvedCandidate.pillar,
+          title: 'mutated title',
+          body: approvedCandidate.body,
+          source_ref: approvedCandidate.source_refs[0],
+        },
+      }),
+      deps(),
+    ),
+    (error) =>
+      error?.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      error?.httpStatus === 400 &&
+      /do not match approved_candidate/.test(error.message),
+  );
 });
 
 test('worker returns stable non-retryable 400 for malformed JSON', async () => {
@@ -918,10 +999,18 @@ test('production mutation worker config contains D1 only and no embedded secrets
   assert.match(config, /"XQUEUE_PRODUCTION_DATABASE_ID"/);
   assert.match(config, /"OWNER_APPROVAL_PUBLIC_KEY_PEM"/);
   assert.match(config, /BEGIN PUBLIC KEY/);
-  assert.doesNotMatch(config, /CLOUDFLARE_API_TOKEN/);
-  assert.doesNotMatch(config, /MUTATION_CONTROL_TOKEN/);
   assert.doesNotMatch(config, /MUTATION_CHECKPOINT_HMAC_KEY/);
   assert.doesNotMatch(config, /r2_buckets|queues|triggers|MEDIA|X_BEARER|X_API|TWITTER|scheduler/i);
+
+  // Secret values stay external. Declaring the names makes wrangler dev bind
+  // only these keys, so unrelated .env/process.env values never reach the Worker.
+  const parsed = JSON.parse(config);
+  assert.deepEqual(parsed.secrets, {
+    required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
+  });
+  for (const name of ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
+    assert.equal(Object.hasOwn(parsed.vars ?? {}, name), false, name);
+  }
 });
 
 test('production worker health is non-mutating and unknown routes stay closed', async () => {

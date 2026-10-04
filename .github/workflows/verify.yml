@@ -63,6 +63,17 @@ jobs:
       - name: Build future authority cutover publisher bundle
         run: pnpm wrangler deploy --config wrangler.authority.jsonc --dry-run --outdir /tmp/xqueue-authority-worker-bundle
 
+      - name: Build guarded production intake mutation Worker bundle
+        run: pnpm wrangler deploy --config wrangler.mutation-production-intake.jsonc --dry-run --outdir /tmp/xqueue-mutation-production-intake-bundle
+
+      - name: Assert mutation bundle has no X publication or publisher capability
+        shell: bash
+        run: |
+          if grep -R -E 'X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET|@xdevplatform|createPostViaClient|uploadMediaBytesViaClient|acquirePublicationLease|runScheduledPublication' /tmp/xqueue-mutation-production-intake-bundle; then
+            echo 'production intake mutation Worker bundle contains X publication or publisher capability'
+            exit 1
+          fi
+
       - name: Build inert XDK compatibility probe
         run: pnpm wrangler deploy --config wrangler.x-probe.jsonc --dry-run --outdir /tmp/xqueue-xdk-probe
 

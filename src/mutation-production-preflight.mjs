@@ -3,6 +3,9 @@ import { runIntakeMutation } from './mutation-intake-runner.mjs';
 
 const SHA40_RE = /^[0-9a-f]{40}$/i;
 
+// Blast-radius ceiling for one guarded production intake mutation.
+export const MAX_PRODUCTION_INTAKE_ITEMS = 5;
+
 function blocker(id, detail) {
   return Object.freeze({ id, detail });
 }

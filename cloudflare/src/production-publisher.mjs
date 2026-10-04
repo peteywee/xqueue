@@ -433,19 +433,22 @@ export async function runScheduledPublication(
         now,
         graceMinutes: eligibilityOptions.graceMinutes,
         publicationLease: deferralLease,
-        leaseNowMs: () => Date.now(),
       });
     } catch {
       deferralFailed = true;
-    } finally {
-      try {
-        const released = await releaseLease(env.DB, deferralLease, {
-          nowMs: Date.now(),
-        });
-        releaseFailed = released?.released !== true;
-      } catch {
-        releaseFailed = true;
-      }
+    }
+
+    if (deferralFailed) {
+      return idle('missed_deferral_failed_lease_retained', { eligibility });
+    }
+
+    try {
+      const released = await releaseLease(env.DB, deferralLease, {
+        nowMs: Date.now(),
+      });
+      releaseFailed = released?.released !== true;
+    } catch {
+      releaseFailed = true;
     }
 
     if (releaseFailed) {
@@ -453,9 +456,6 @@ export async function runScheduledPublication(
         eligibility,
         deferral: deferral ?? null,
       });
-    }
-    if (deferralFailed) {
-      return idle('missed_deferral_failed', { eligibility });
     }
 
     const deferredIds = Array.isArray(deferral?.outcomes)
@@ -540,11 +540,25 @@ export async function runScheduledPublication(
         }
 
         const identity = createPublicationLeaseIdentity();
-        const acquired = await acquireLease(env.DB, {
-          ...identity,
-          ttlMs: LEASE_TTL_MS,
-          nowMs: Date.now(),
-        });
+        let acquired;
+        try {
+          acquired = await acquireLease(env.DB, {
+            ...identity,
+            ttlMs: LEASE_TTL_MS,
+            nowMs: Date.now(),
+          });
+        } catch (error) {
+          // Acquisition is one atomic D1 batch before any X access. The 0017
+          // trigger aborts it while a guarded mutation holds the lane; that is
+          // routine exclusion, not an unhandled publisher failure.
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            acquired: false,
+            reason: /active mutation lane/i.test(message)
+              ? 'publication_lease_blocked_by_mutation_lane'
+              : 'publication_lease_unavailable',
+          };
+        }
         activeLease = acquired?.acquired ? acquired.lease : null;
         return acquired;
       },

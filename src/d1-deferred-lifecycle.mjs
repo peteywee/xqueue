@@ -89,7 +89,7 @@ WHERE
       AND generation = ?12
       AND acquired_at_ms = ?13
       AND expires_at_ms = ?14
-      AND expires_at_ms > ?15
+      AND expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   )
 `;
 
@@ -235,7 +235,7 @@ function sqlString(value) {
   return "'" + String(value).replaceAll("'", "''") + "'";
 }
 
-function publicationLeaseFence(lease, nowMs) {
+function publicationLeaseFence(lease) {
   if (!lease || typeof lease !== 'object') {
     throw new Error('publication lease handle is required');
   }
@@ -246,11 +246,7 @@ function publicationLeaseFence(lease, nowMs) {
     generation: positiveInt(lease.generation, 'publication lease generation'),
     acquiredAtMs: nonNegativeInt(lease.acquiredAtMs, 'publication lease acquiredAtMs'),
     expiresAtMs: nonNegativeInt(lease.expiresAtMs, 'publication lease expiresAtMs'),
-    nowMs: nonNegativeInt(nowMs, 'publication lease verification time'),
   });
-  if (fence.expiresAtMs <= fence.nowMs) {
-    throw new Error('publication lease is expired');
-  }
   return fence;
 }
 
@@ -268,8 +264,7 @@ function publicationLeaseGuardSql(fence) {
     String(fence.acquiredAtMs) +
     ' AND expires_at_ms=' +
     String(fence.expiresAtMs) +
-    ' AND expires_at_ms > ' +
-    String(fence.nowMs) +
+    " AND expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)" +
     ')'
   );
 }
@@ -375,7 +370,6 @@ async function transitionAssignmentToDeferred(
     now = new Date(),
     reason = MISSED_REASON,
     publicationLease = null,
-    publicationLeaseNowMs = null,
   } = {},
 ) {
   if (!db || typeof db.prepare !== 'function' || typeof db.batch !== 'function') {
@@ -393,7 +387,7 @@ async function transitionAssignmentToDeferred(
   const leaseFence =
     publicationLease === null
       ? null
-      : publicationLeaseFence(publicationLease, publicationLeaseNowMs);
+      : publicationLeaseFence(publicationLease);
 
   const detail = JSON.stringify({
     contentId: row.content_id,
@@ -441,7 +435,6 @@ async function transitionAssignmentToDeferred(
             leaseFence.generation,
             leaseFence.acquiredAtMs,
             leaseFence.expiresAtMs,
-            leaseFence.nowMs,
           );
 
     const results = await db.batch([
@@ -531,7 +524,6 @@ export async function deferOneMissedAssignment(
     now = new Date(),
     graceMinutes = 20,
     publicationLease = null,
-    publicationLeaseNowMs = null,
   } = {},
 ) {
   const classification = classifyMissedAssignment(row, { now, graceMinutes });
@@ -547,7 +539,6 @@ export async function deferOneMissedAssignment(
     now,
     reason: MISSED_REASON,
     publicationLease,
-    publicationLeaseNowMs,
   });
 }
 
@@ -582,7 +573,6 @@ async function promoteRuntimeRevisionIfNeeded(
   recordedAt,
   {
     publicationLease = null,
-    publicationLeaseNowMs = null,
   } = {},
 ) {
   const current = await readRuntimeState(db);
@@ -623,7 +613,7 @@ async function promoteRuntimeRevisionIfNeeded(
   const leaseFence =
     publicationLease === null
       ? null
-      : publicationLeaseFence(publicationLease, publicationLeaseNowMs);
+      : publicationLeaseFence(publicationLease);
   const sql = renderRuntimeRevisionInsertSql(revision, {
     additionalGuardSql:
       leaseFence === null ? null : publicationLeaseGuardSql(leaseFence),
@@ -717,14 +707,10 @@ export async function deferMissedAssignments(
     now = new Date(),
     graceMinutes = 20,
     publicationLease = null,
-    leaseNowMs = () => Date.now(),
   } = {},
 ) {
   isoNow(now);
   graceMs(graceMinutes);
-  if (publicationLease !== null && typeof leaseNowMs !== 'function') {
-    throw new Error('leaseNowMs must be a function when publicationLease is provided');
-  }
 
   const result = await db.prepare(CANDIDATES_SQL).all();
   const rows = Array.isArray(result) ? result : (result?.results ?? []);
@@ -738,8 +724,6 @@ export async function deferMissedAssignments(
         now,
         graceMinutes,
         publicationLease,
-        publicationLeaseNowMs:
-          publicationLease === null ? null : leaseNowMs(),
       }));
       continue;
     }
@@ -758,8 +742,6 @@ export async function deferMissedAssignments(
     isoNow(now),
     {
       publicationLease,
-      publicationLeaseNowMs:
-        publicationLease === null ? null : leaseNowMs(),
     },
   );
 

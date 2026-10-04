@@ -2,8 +2,13 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "xqueue-mutation-production-intake",
   "main": "cloudflare/src/mutation-production-intake-worker.mjs",
-  "compatibility_date": "2026-10-03",
+  "compatibility_date": "2026-09-29",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "secrets": {
+    "required": ["CLOUDFLARE_API_TOKEN", "MUTATION_CONTROL_TOKEN"]
+  },
   "observability": {
     "enabled": true,
     "logs": {

@@ -111,8 +111,7 @@ export function createD1MutationTransport({ db, fetchImpl, accountId, databaseId
       ).first();
       const leases = await d1.prepare(
         'SELECT COUNT(*) AS active_leases FROM publication_leases ' +
-        'WHERE owner_token IS NOT NULL ' +
-        "AND expires_at_ms > CAST(strftime('%s','now') AS INTEGER) * 1000",
+        'WHERE owner_token IS NOT NULL',
       ).first();
       const runtime = await d1.prepare(
         "SELECT json_extract(value, '$.inflight') AS inflight " +

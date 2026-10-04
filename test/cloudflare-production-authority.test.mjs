@@ -434,6 +434,82 @@ test('enabled publisher runs one real-shaped transaction with one selected post'
   assert.equal(releaseCalls, 1);
 });
 
+test('publication lease blocked by an active mutation lane stops before X dispatch or fencing', async () => {
+  let posts = 0;
+  let fences = 0;
+  let outcomes = 0;
+  let releases = 0;
+  const source = ledger();
+  const client = mockXClient();
+  client.posts.create = async () => {
+    posts += 1;
+    return { data: { id: '999999' } };
+  };
+
+  const run = (error) => runScheduledPublication(
+    publisherEnv(),
+    {
+      now: new Date('2026-09-02T16:00:00.000Z'),
+      dependencies: {
+        async inspectAuthorityOwnership() { return cloudflareAuthority(); },
+        async verifyDynamicRuntime() { return dynamicRuntime(); },
+        async readPublicationSnapshot() {
+          return { raw: JSON.stringify(source), ledger: source };
+        },
+        async readGlobalPublicationHalt() {
+          return {
+            ok: true,
+            halted: false,
+            generation: 1,
+            reason: 'initial_unhalted',
+            actorClass: 'migration',
+            updatedAt: '2026-09-02T15:00:00.000Z',
+          };
+        },
+        evaluateEligibility() { return eligible(); },
+        publicationQueueFromSnapshot() { return queue(); },
+        async readCurrentAssignmentHandle() { return assignmentHandle('C99'); },
+        async prepareSelectedMedia() {
+          return { ok: true, required: false, bytes: null, mediaObject: null };
+        },
+        makeClient() { return client; },
+        async acquirePublicationLease() { throw error; },
+        async verifyPublicationLease() { return true; },
+        async releasePublicationLease() {
+          releases += 1;
+          return { released: true };
+        },
+        async beginPublishingFence() {
+          fences += 1;
+          throw new Error('publishing fence must not be reached');
+        },
+        async persistPublicationOutcome() {
+          outcomes += 1;
+        },
+      },
+    },
+  );
+
+  const blockedByLane = await run(new Error(
+    'D1_ERROR: publication lease acquisition blocked by active mutation lane: SQLITE_CONSTRAINT',
+  ));
+  assert.equal(blockedByLane.status, 'blocked');
+  assert.equal(blockedByLane.stage, 'lease');
+  assert.equal(blockedByLane.reason, 'publication_lease_blocked_by_mutation_lane');
+  assert.equal(blockedByLane.dispatched, false);
+
+  const unavailable = await run(new Error('D1_ERROR: network connection lost'));
+  assert.equal(unavailable.status, 'blocked');
+  assert.equal(unavailable.stage, 'lease');
+  assert.equal(unavailable.reason, 'publication_lease_unavailable');
+  assert.equal(unavailable.dispatched, false);
+
+  assert.equal(posts, 0);
+  assert.equal(fences, 0);
+  assert.equal(outcomes, 0);
+  assert.equal(releases, 0);
+});
+
 test('publishing fence mirrors local inflight semantics and advances state generation before dispatch', async () => {
   const state = ledger();
   const result = await beginPublishingFence(
@@ -757,7 +833,7 @@ test('publisher durably defers overdue assignments under the publication lease a
           assert.equal(options.publicationLease.leaseName, 'publisher');
           assert.equal(options.publicationLease.acquisitionId, 'deferral-acquisition');
           assert.equal(options.publicationLease.generation, 3);
-          assert.equal(typeof options.leaseNowMs, 'function');
+          assert.equal('leaseNowMs' in options, false);
           return {
             outcomes: [{
               status: 'deferred',
@@ -925,7 +1001,7 @@ test('halt race before missed-slot deferral stops the lifecycle mutation', async
   assert.equal(deferralCalls, 0);
 });
 
-test('missed-slot deferral ambiguity releases its mutex and fails closed before X access', async () => {
+test('missed-slot deferral ambiguity retains its mutex and fails closed before X access', async () => {
   let leaseCalls = 0;
   let releaseCalls = 0;
   let deferralCalls = 0;
@@ -995,10 +1071,10 @@ test('missed-slot deferral ambiguity releases its mutex and fails closed before 
   );
 
   assert.equal(result.status, 'idle');
-  assert.equal(result.reason, 'missed_deferral_failed');
+  assert.equal(result.reason, 'missed_deferral_failed_lease_retained');
   assert.equal(result.dispatched, false);
   assert.equal(leaseCalls, 1);
   assert.equal(deferralCalls, 1);
-  assert.equal(releaseCalls, 1);
-  assert.deepEqual(order, ['acquire', 'defer', 'release']);
+  assert.equal(releaseCalls, 0);
+  assert.deepEqual(order, ['acquire', 'defer']);
 });
