@@ -19,7 +19,7 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
 // deferral and runtime promotion, and reports mutation-lane exclusion as a
 // lease block. An older deployed publisher can still defer without the lease
 // while an intake holds the mutation lane.
-export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = 'cc820367f6d30977fe5ae6321062ca33de6cf47b';
+export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = '35eb0eb6f0f278e846f2b28daf034ef2ea6e4fb7';
 
 const DEFAULT_PORT = 8789;
 
