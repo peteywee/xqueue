@@ -24,6 +24,7 @@ import {
   deferConfirmedPublicationHandoff,
   deferMissedAssignments,
   deferOneMissedAssignment,
+  deferredLifecycleSql,
   MISSED_REASON,
   publicationDeferralHandoff,
 } from '../src/d1-deferred-lifecycle.mjs';
@@ -512,7 +513,7 @@ test('durable missed deferral promotes a new runtime revision and remains fail-c
   assert.equal(replay.runtimeRevision.generation, 2);
 });
 
-test('missed deferral fences assignment and runtime writes to the exact unexpired publication lease', async () => {
+async function seedLeaseFencedMissedAssignment({ acquiredAtMs, expiresAtMs }) {
   const db = new DatabaseSync(':memory:');
   for (const name of [
     '0001_xqueue_runtime.sql',
@@ -555,7 +556,7 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
     INSERT INTO publication_leases
       (lease_name,owner_token,acquisition_id,generation,acquired_at_ms,expires_at_ms,updated_at_ms)
     VALUES
-      ('publisher','owner-token-alpha','acquisition-alpha',7,1000,5000,1000);
+      ('publisher','owner-token-alpha','acquisition-alpha',7,${acquiredAtMs},${expiresAtMs},${acquiredAtMs});
   `);
 
   const api = d1Adapter(db);
@@ -566,6 +567,15 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
     sourceOperationId: 'fixture-bootstrap',
     recordedAt: at,
   })));
+
+  return { db, api };
+}
+
+test('missed deferral fences assignment and runtime writes to the exact unexpired publication lease', async () => {
+  const { db, api } = await seedLeaseFencedMissedAssignment({
+    acquiredAtMs: 1000,
+    expiresAtMs: 5000,
+  });
 
   const lease = {
     leaseName: 'publisher',
@@ -605,6 +615,46 @@ test('missed deferral fences assignment and runtime writes to the exact unexpire
   assert.equal(result.runtimeRevision.status, 'promoted');
 
   db.close();
+});
+
+test('missed deferral rejects a publication lease that expired less than one second ago', async () => {
+  // A second-resolution database clock would still treat this lease as
+  // unexpired for the remainder of the current second.
+  const expiresAtMs = Date.now() - 50;
+  const acquiredAtMs = expiresAtMs - 5 * 60 * 1000;
+  const { db, api } = await seedLeaseFencedMissedAssignment({ acquiredAtMs, expiresAtMs });
+
+  await assert.rejects(
+    deferMissedAssignments(api, {
+      now: new Date('2026-09-21T12:20:00.001Z'),
+      graceMinutes: 20,
+      publicationLease: {
+        leaseName: 'publisher',
+        ownerToken: 'owner-token-alpha',
+        acquisitionId: 'acquisition-alpha',
+        generation: 7,
+        acquiredAtMs,
+        expiresAtMs,
+      },
+    }),
+    /ambiguous or conflicted/,
+  );
+  assert.equal(
+    db.prepare("SELECT lifecycle_state FROM queue_assignments WHERE assignment_id='P1'").get().lifecycle_state,
+    'scheduled',
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM queue_deferrals').get().n, 0);
+
+  db.close();
+});
+
+test('deferred lifecycle lease guards never use a second-resolution database clock', () => {
+  const source = readFileSync(new URL('../src/d1-deferred-lifecycle.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /strftime\('%s'/);
+  assert.match(
+    deferredLifecycleSql.updateAssignmentWithLease,
+    /expires_at_ms > CAST\(\(julianday\('now'\) - 2440587\.5\) \* 86400000 AS INTEGER\)/,
+  );
 });
 
 test('confirmed handoff defers within grace and advances runtime revision', async () => {
