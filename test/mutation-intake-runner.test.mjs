@@ -70,7 +70,7 @@ function loadSchema(db) {
   }
 }
 
-function fixture() {
+function fixture({ bookmarkResponse = null } = {}) {
   const raw = new DatabaseSync(':memory:');
   raw.exec('PRAGMA foreign_keys=ON');
   loadSchema(raw);
@@ -96,6 +96,7 @@ function fixture() {
     apiToken: 'token',
     fetchImpl: async () => {
       checkpointCalls++;
+      if (bookmarkResponse) return bookmarkResponse();
       return {
         ok: true,
         json: async () => ({
@@ -317,6 +318,83 @@ test('runner refuses stale runtime at preflight before checkpoint or mutation', 
   );
 
   fx.raw.close();
+});
+
+test('checkpoint outages are retryable unavailable reads; unusable bookmarks still halt', async () => {
+  const cases = [
+    {
+      name: 'network failure',
+      response: () => { throw new Error('network down'); },
+      errorClass: 'D1_READ_UNAVAILABLE',
+      outcome: 'AUTO_RETRY',
+    },
+    {
+      name: 'HTTP 503 with non-JSON body',
+      response: () => ({
+        ok: false,
+        status: 503,
+        json: async () => { throw new SyntaxError('Unexpected token <'); },
+      }),
+      errorClass: 'D1_READ_UNAVAILABLE',
+      outcome: 'AUTO_RETRY',
+    },
+    {
+      name: 'HTTP 429',
+      response: () => ({ ok: false, status: 429, json: async () => ({ success: false }) }),
+      errorClass: 'D1_READ_UNAVAILABLE',
+      outcome: 'AUTO_RETRY',
+    },
+    {
+      name: 'HTTP 403',
+      response: () => ({ ok: false, status: 403, json: async () => ({ success: false }) }),
+      errorClass: 'CHECKPOINT_CORRUPT',
+      outcome: 'SYSTEM_HALT',
+    },
+    {
+      name: 'unusable bookmark',
+      response: () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, result: { bookmark: 'bad' } }),
+      }),
+      errorClass: 'CHECKPOINT_CORRUPT',
+      outcome: 'SYSTEM_HALT',
+    },
+  ];
+
+  for (const c of cases) {
+    const fx = fixture({ bookmarkResponse: c.response });
+    const { intakePlan, controlPlan, state } = plans();
+    const revision = await runtimeRevision(intakePlan, controlPlan, state);
+
+    const result = await runIntakeMutation({
+      intakePlan,
+      controlPlan,
+      runtimeRevision: revision,
+      transport: fx.transport,
+      recordedAt: '2026-09-29T10:05:00.000Z',
+    });
+
+    assert.equal(result.status, 'blocked', c.name);
+    assert.equal(result.phase, 'checkpoint', c.name);
+    assert.equal(result.error_class, c.errorClass, c.name);
+    assert.equal(result.decision.outcome, c.outcome, c.name);
+    assert.equal(fx.checkpointCalls(), 1, c.name);
+    assert.equal(
+      fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n,
+      0,
+      c.name,
+    );
+    assert.equal(
+      fx.raw.prepare(
+        'SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1',
+      ).get().active_operation_id,
+      null,
+      c.name,
+    );
+
+    fx.raw.close();
+  }
 });
 
 test('lost apply response after commit recovers by readback and never replays apply', async () => {
