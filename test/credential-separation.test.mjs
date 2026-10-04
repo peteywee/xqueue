@@ -101,6 +101,37 @@ test('only publisher configs identify the publisher deployment', () => {
   assert.equal(status.includes('xqueue-publisher-production'), false);
   assert.equal(publisher.includes('xqueue-publisher-production'), true);
   assert.equal(authority.includes('xqueue-publisher-production'), true);
+  assert.equal(
+    text('wrangler.mutation-production-intake.jsonc').includes('xqueue-publisher-production'),
+    false,
+  );
+});
+
+test('production intake mutation role is D1-only and has no publication surface', () => {
+  const source = text('cloudflare/src/mutation-production-intake-worker.mjs');
+  const config = jsonc('wrangler.mutation-production-intake.jsonc');
+
+  assert.match(source, /async fetch\s*\(/);
+  assert.doesNotMatch(source, /\bscheduled\s*\(/);
+  assert.doesNotMatch(source, /production-publisher|publisher-worker|publication-lease/);
+  assert.doesNotMatch(source, /@xdevplatform/);
+  assert.doesNotMatch(
+    source,
+    /X_API_KEY|X_API_SECRET|X_ACCESS_TOKEN|X_ACCESS_SECRET/,
+  );
+
+  assert.equal(config.name, 'xqueue-mutation-production-intake');
+  assert.equal(config.main, 'cloudflare/src/mutation-production-intake-worker.mjs');
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.preview_urls, false);
+  assert.equal(config.routes, undefined);
+  assert.equal(config.route, undefined);
+  assert.equal(config.triggers, undefined);
+  assert.equal(config.r2_buckets, undefined);
+  assert.equal(config.services, undefined);
+  assert.equal(config.queues, undefined);
+  assert.equal(config.d1_databases?.length, 1);
+  assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, undefined);
 });
 
 test('no tracked Wrangler topology descriptor embeds X write credentials', () => {
@@ -113,6 +144,7 @@ test('no tracked Wrangler topology descriptor embeds X write credentials', () =>
     'wrangler.publisher.jsonc',
     'wrangler.authority.jsonc',
     'wrangler.preview.jsonc',
+    'wrangler.mutation-production-intake.jsonc',
   ]) {
     assert.doesNotMatch(text(path), credential, path);
   }

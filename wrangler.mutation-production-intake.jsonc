@@ -4,6 +4,8 @@
   "main": "cloudflare/src/mutation-production-intake-worker.mjs",
   "compatibility_date": "2026-10-03",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "logs": {
