@@ -367,6 +367,24 @@ function deps({
           decision: { outcome: 'AUTO_RETRY' },
         };
       }
+      if (mutationStatus === 'checkpoint-unavailable') {
+        return {
+          status: 'blocked',
+          phase: 'checkpoint',
+          error_class: 'D1_READ_UNAVAILABLE',
+          decision: { outcome: 'AUTO_RETRY' },
+          recovered: false,
+        };
+      }
+      if (mutationStatus === 'checkpoint-corrupt') {
+        return {
+          status: 'blocked',
+          phase: 'checkpoint',
+          error_class: 'CHECKPOINT_CORRUPT',
+          decision: { outcome: 'SYSTEM_HALT' },
+          recovered: false,
+        };
+      }
       if (mutationStatus === 'pre-dispatch-unavailable') {
         return {
           status: 'blocked',
@@ -1037,6 +1055,32 @@ test('retryable pre-dispatch runner read failures are 503, not conflict 409', as
     assert.equal(body.faultClass, 'D1_READ_UNAVAILABLE');
     assert.equal(body.retryable, true);
     assert.equal(body.requiresReadback, false);
+  }
+});
+
+test('checkpoint outage is retryable 503; corrupt checkpoint stays a non-retryable 409', async () => {
+  const cases = [
+    ['checkpoint-unavailable', 503, 'D1_READ_UNAVAILABLE', true],
+    ['checkpoint-corrupt', 409, 'CHECKPOINT_CORRUPT', false],
+  ];
+  for (const [mutationStatus, status, faultClass, retryable] of cases) {
+    const worker = createMutationProductionIntakeWorker(deps({ mutationStatus }));
+    const response = await worker.fetch(
+      new Request('https://example.test/production-intake', {
+        method: 'POST',
+        body: JSON.stringify(payload()),
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer ' + CONTROL_TOKEN,
+        },
+      }),
+      env(),
+    );
+    assert.equal(response.status, status, mutationStatus);
+    const body = await response.json();
+    assert.equal(body.faultClass, faultClass, mutationStatus);
+    assert.equal(body.retryable, retryable, mutationStatus);
+    assert.equal(body.requiresReadback, false, mutationStatus);
   }
 });
 

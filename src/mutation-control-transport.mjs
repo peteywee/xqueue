@@ -26,9 +26,19 @@ export async function getD1TimeTravelBookmark({
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
     });
   } catch (error) {
+    // No response means nothing was read; the checkpoint is unavailable, not corrupt.
     const wrapped = new Error('D1 Time Travel bookmark request failed');
-    wrapped.code = 'CHECKPOINT_CORRUPT';
+    wrapped.code = 'D1_READ_UNAVAILABLE';
     wrapped.cause = error;
+    throw wrapped;
+  }
+
+  // Rate limiting and server errors are service outages. Any other failure,
+  // including auth errors and unusable bodies, still fails closed as corrupt.
+  const status = Number(response?.status);
+  if (response?.ok !== true && (status === 429 || (status >= 500 && status <= 599))) {
+    const wrapped = new Error('D1 Time Travel bookmark service unavailable (HTTP ' + status + ')');
+    wrapped.code = 'D1_READ_UNAVAILABLE';
     throw wrapped;
   }
 
