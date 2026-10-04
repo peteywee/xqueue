@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { ownerPublicKeyFingerprint } from '../src/authoring/owner-approval.mjs';
 import {
@@ -12,7 +16,6 @@ import {
   REQUIRED_MUTATION_MIGRATIONS,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   assertHealthIdentity,
-  assertNoLocalDevOverrides,
   childEnvironment,
   collectD1TokenReadiness,
   collectOperatorPreflight,
@@ -26,6 +29,12 @@ import {
 const DESCRIPTOR = readMutationWorkerDescriptor();
 const EXPECTED = expectedTrustRoot(DESCRIPTOR);
 const ACCOUNT = DESCRIPTOR.vars.CLOUDFLARE_ACCOUNT_ID;
+
+const AUTHORITY = Object.freeze({
+  generation: 9,
+  candidate_sha: 'b'.repeat(40),
+  deployment_id: 'cloudflare-worker:xqueue-publisher-production:version:11111111-1111-4111-8111-111111111111',
+});
 
 function launchEnv(overrides = {}) {
   return {
@@ -87,9 +96,9 @@ function launch(overrides = {}) {
   return invokeEphemeralWorker({
     payload: { mode: 'single', sourceMode: 'owner-manual', input: { body: 'b' } },
     candidate: { branch: 'main', clean: true, headSha: 'a'.repeat(40), originMainSha: 'a'.repeat(40) },
+    expectedPublicationAuthority: AUTHORITY,
     port: 18789,
     env: launchEnv(),
-    assertLocalOverrides: () => true,
     probePort: async () => true,
     verifyTree: () => true,
     healthDeadlineMs: 2_000,
@@ -131,10 +140,13 @@ test('health identity must name the Worker and match every committed binding', (
     () => assertHealthIdentity(healthBody(EXPECTED, { service: 'something-else' }), EXPECTED),
     /not the ephemeral production mutation Worker/,
   );
-  assert.throws(
-    () => assertHealthIdentity(healthBody(EXPECTED, { publicationCapable: true }), EXPECTED),
-    /not the ephemeral production mutation Worker/,
-  );
+  for (const override of [{ publicationCapable: true }, { schedulerAuthority: true }, { environment: 'preview' }]) {
+    assert.throws(
+      () => assertHealthIdentity(healthBody(undefined, override), EXPECTED),
+      /not the ephemeral production mutation Worker/,
+      JSON.stringify(override),
+    );
+  }
   for (const key of ['accountId', 'productionDatabaseId', 'ownerApprovalKeyFingerprint']) {
     assert.throws(
       () => assertHealthIdentity(healthBody({ ...EXPECTED, secretsBound: BOUND, [key]: 'overridden' }), EXPECTED),
@@ -205,17 +217,6 @@ test('the launch credential is never passed to the Worker as its D1 credential',
   );
 });
 
-test('a .dev.vars file blocks the launch; .env files are shadowed instead', () => {
-  const dir = (names) => ({ readDir: () => names });
-  assert.equal(assertNoLocalDevOverrides({ dir: '/repo', ...dir(['.env', '.env.example', 'README.md']) }), true);
-  for (const name of ['.dev.vars', '.dev.vars.production']) {
-    assert.throws(
-      () => assertNoLocalDevOverrides({ dir: '/repo', ...dir([name]) }),
-      new RegExp(name.replace(/\./g, '\\.') + ' exists'),
-    );
-  }
-});
-
 test('a successful launch sends the generated bearer only after a verified health check', async () => {
   const { spawnImpl, calls } = fakeChild();
   const requests = [];
@@ -227,10 +228,15 @@ test('a successful launch sends the generated bearer only after a verified healt
   const result = await launch({ spawnImpl, fetchImpl });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.spawn.args, [
+  const args = calls.spawn.args;
+  assert.deepEqual(args.slice(0, 9), [
     'wrangler', 'dev', '--config', 'wrangler.mutation-production-intake.jsonc', '--remote',
     '--ip', '127.0.0.1', '--port', '18789',
   ]);
+  // An empty --env-file stops wrangler loading .env or .dev.vars at all.
+  assert.equal(args[9], '--env-file');
+  assert.match(args[10], /xqueue-mutation-env-[^/]+\/empty\.env$/);
+  assert.equal(args.length, 11);
   const token = calls.spawn.options.env.MUTATION_CONTROL_TOKEN;
   assert.match(token, /^[0-9a-f]{64}$/);
   assert.equal(
@@ -242,6 +248,7 @@ test('a successful launch sends the generated bearer only after a verified healt
   assert.equal(requests[1].url, 'http://127.0.0.1:18789/production-intake');
   assert.equal(requests[1].init.headers.authorization, 'Bearer ' + token);
   assert.ok(requests[1].init.signal, 'intake request has a timeout signal');
+  assert.deepEqual(JSON.parse(requests[1].init.body).expectedPublicationAuthority, { ...AUTHORITY });
   assert.equal(calls.killed, true);
 });
 
@@ -366,11 +373,31 @@ test('a missing mutation schema is a structured blocker and production tables ar
     }
     throw new Error('unexpected command: ' + key);
   };
-  const preflight = collectOperatorPreflight(run, () => { throw new Error('publisher check must not run'); });
+  const preflight = collectOperatorPreflight(run, () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: true, blockers: [] },
+  });
   assert.equal(preflight.readiness.ok, false);
   assert.deepEqual(preflight.readiness.blockers.map((item) => item.id), ['production_mutation_schema_not_active']);
   assert.equal(preflight.safety, null);
   assert.equal(commands.some((key) => key.includes('mutation_lane_state')), false);
+
+  // cf:auth:preflight exits non-zero on failure, and a migrations read can fail:
+  // both become structured blockers instead of a raw exception.
+  const failing = (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      throw new Error('pnpm cf:auth:preflight --environment production failed with exit 1');
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) throw new Error('wrangler d1 execute failed with exit 1');
+    return run(command, argv);
+  };
+  const failed = collectOperatorPreflight(failing, () => { throw new Error('publisher check must not run'); }, {
+    d1Token: { ok: true, blockers: [] },
+  });
+  const ids = failed.readiness.blockers.map((item) => item.id);
+  assert.ok(ids.includes('cloudflare_auth_not_verified'), ids.join(','));
+  assert.ok(ids.includes('production_migrations_unreadable'), ids.join(','));
+  assert.equal(ids.includes('production_mutation_schema_not_active'), false);
 });
 
 test('approval evidence must come from the item or the top level, never both', () => {
@@ -469,13 +496,29 @@ test('readiness proves the Worker credential, not only the launch credential', a
     return authOk;
   };
   const env = launchEnv();
-  const ok = await collectD1TokenReadiness({ run, env, descriptor: DESCRIPTOR, probeTimeTravel: async () => true });
+  const probes = { probeTimeTravel: async () => true, probeWorkersAccess: async () => 'denied' };
+  const ok = await collectD1TokenReadiness({ run, env, descriptor: DESCRIPTOR, ...probes });
   assert.equal(ok.ok, true);
   assert.deepEqual(seen, [env.MUTATION_D1_API_TOKEN], 'auth preflight runs with the Worker token');
 
   const id = async (overrides) =>
-    (await collectD1TokenReadiness({ run, descriptor: DESCRIPTOR, probeTimeTravel: async () => true, ...overrides }))
+    (await collectD1TokenReadiness({ run, descriptor: DESCRIPTOR, ...probes, ...overrides }))
       .blockers.map((item) => item.id);
+  // Launch configuration apply would refuse is reported in observe mode too.
+  assert.deepEqual(await id({ env: launchEnv({ CLOUDFLARE_API_TOKEN: undefined }) }), ['launch_token_missing']);
+  assert.deepEqual(await id({ env: launchEnv({ CLOUDFLARE_ACCOUNT_ID: 'other' }) }), ['launch_account_mismatch']);
+  assert.deepEqual(
+    await id({ env, descriptor: { ...DESCRIPTOR, secrets: { required: ['MUTATION_D1_API_TOKEN', 'MUTATION_CONTROL_TOKEN', 'X_ACCESS_TOKEN'] } } }),
+    ['mutation_descriptor_secrets_invalid'],
+  );
+  // A Worker token that can reach Workers scripts is refused; an inconclusive probe also blocks.
+  assert.deepEqual(await id({ env, probeWorkersAccess: async () => 'granted' }), ['mutation_d1_token_overscoped']);
+  const scope = await collectD1TokenReadiness({
+    run, env, descriptor: DESCRIPTOR, ...probes,
+    probeWorkersAccess: async () => { throw new Error('HTTP 500 for ' + env.MUTATION_D1_API_TOKEN); },
+  });
+  assert.deepEqual(scope.blockers.map((item) => item.id), ['mutation_d1_token_scope_unverified']);
+  assert.doesNotMatch(scope.blockers[0].detail, /d1-scoped-token/);
   assert.deepEqual(await id({ env: launchEnv({ MUTATION_D1_API_TOKEN: '' }) }), ['mutation_d1_token_missing']);
   assert.deepEqual(
     await id({ env: launchEnv({ MUTATION_D1_API_TOKEN: env.CLOUDFLARE_API_TOKEN }) }),
@@ -485,10 +528,12 @@ test('readiness proves the Worker credential, not only the launch credential', a
     await id({ env, run: () => JSON.stringify({ ok: false }) }),
     ['mutation_d1_token_not_verified'],
   );
-  assert.deepEqual(
-    await id({ env, run: () => { throw new Error('auth failed'); } }),
-    ['mutation_d1_token_not_verified'],
-  );
+  const authFailed = await collectD1TokenReadiness({
+    env, descriptor: DESCRIPTOR, ...probes,
+    run: () => { throw new Error('auth failed for ' + env.MUTATION_D1_API_TOKEN + '\nstack'); },
+  });
+  assert.deepEqual(authFailed.blockers.map((item) => item.id), ['mutation_d1_token_not_verified']);
+  assert.match(authFailed.blockers[0].detail, /auth failed for \[redacted\]$/);
   assert.deepEqual(
     await id({ env, probeTimeTravel: async () => { throw new Error('HTTP 403'); } }),
     ['mutation_d1_time_travel_unavailable'],
@@ -504,7 +549,7 @@ test('a missing schema still reports candidate, auth and Worker-credential block
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'git rev-parse origin/main') return 'b'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
-      return JSON.stringify({ ok: false, environment: 'production', d1: { readable: false } });
+      throw new Error('pnpm cf:auth:preflight --environment production failed with exit 1');
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
       return JSON.stringify([{ results: [{ name: '0014_authority_event_projection.sql' }] }]);
@@ -528,6 +573,37 @@ test('a missing schema still reports candidate, auth and Worker-credential block
   assert.equal(ids.some((id) => id.startsWith('publication_') || id === 'active_publication_lease'), false);
 });
 
-test('the publisher pin is the last #168 commit that touched publisher code', () => {
+// sha256 over the publisher-worker module graph (path + content per file) at
+// MUTEX_COMPATIBLE_PUBLISHER_COMMIT. If publisher code changes, this fails so
+// the pin is re-evaluated in the same change; CI checkouts are shallow, so the
+// tripwire uses content rather than git ancestry.
+const PUBLISHER_GRAPH_DIGEST_AT_PIN = 'e54c37a1113160cedb6ab9e71cb64c3d25e3c5cd9cba08b68f97dcf0ad5200de';
+
+function publisherGraphDigest() {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const seen = new Set();
+  const walk = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const source = readFileSync(file, 'utf8');
+    const pattern = /(?:import|export)[^"']*?from\s*["'](\.[^"']+)["']|import\(\s*["'](\.[^"']+)["']\s*\)/g;
+    for (const match of source.matchAll(pattern)) walk(path.resolve(path.dirname(file), match[1] || match[2]));
+  };
+  walk(path.join(root, 'cloudflare/src/publisher-worker.mjs'));
+  const hash = createHash('sha256');
+  for (const file of [...seen].map((item) => path.relative(root, item)).sort()) {
+    hash.update(file + '\0');
+    hash.update(readFileSync(path.join(root, file)));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+test('publisher code is unchanged since the mutex pin, or the pin must be re-evaluated', () => {
   assert.equal(MUTEX_COMPATIBLE_PUBLISHER_COMMIT, '518554553c0a6654447a63a4871ce330ed100ad7');
+  assert.equal(
+    publisherGraphDigest(),
+    PUBLISHER_GRAPH_DIGEST_AT_PIN,
+    'publisher code changed after MUTEX_COMPATIBLE_PUBLISHER_COMMIT: re-evaluate the pin and record the new digest',
+  );
 });

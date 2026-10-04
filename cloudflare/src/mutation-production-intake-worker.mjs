@@ -16,7 +16,9 @@ import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import {
   evaluateProductionMutationPreflight,
   MAX_PRODUCTION_INTAKE_ITEMS,
+  publicationAuthorityMismatch,
   runProductionIntakeMutation,
+  validPublicationAuthorityEvidence,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
 import {
@@ -408,7 +410,9 @@ function preDispatchRuntimeFault(before) {
 async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
   try {
     const verified = await verifyAuth({
-      token: env?.MUTATION_D1_API_TOKEN,
+      // Never undefined: verifyCloudflareApiToken would default to
+      // process.env.CLOUDFLARE_API_TOKEN, the launch credential.
+      token: env?.MUTATION_D1_API_TOKEN ?? '',
       accountId: env?.CLOUDFLARE_ACCOUNT_ID,
       fetchImpl,
       label: 'MUTATION_D1_API_TOKEN',
@@ -797,6 +801,15 @@ export async function runProductionIntakeRequest(
       { httpStatus: 400 },
     );
   }
+  const expectedPublicationAuthority = payload?.expectedPublicationAuthority;
+  if (!validPublicationAuthorityEvidence(expectedPublicationAuthority)) {
+    throw productionFault(
+      'INVALID_PUBLICATION_AUTHORITY_EVIDENCE',
+      'production intake requires the operator-verified publication authority ' +
+        '(generation, candidate_sha, deployment_id)',
+      { httpStatus: 400 },
+    );
+  }
   const { normalized, operationId } = authorizeProductionIntakeInput(payload, {
     ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
     verifyOwnerApproval,
@@ -843,6 +856,17 @@ export async function runProductionIntakeRequest(
         'production replay preflight blocked: ' +
           replayPreflight.blockers.map((item) => item.id).join(','),
         { httpStatus: 409 },
+      );
+    }
+    const replayAuthorityMismatch = publicationAuthorityMismatch(
+      replayPreflight.observed.publicationAuthority,
+      expectedPublicationAuthority,
+    );
+    if (replayAuthorityMismatch) {
+      throw productionFault(
+        'PRE_DISPATCH_REPLAN_REQUIRED',
+        replayAuthorityMismatch,
+        { httpStatus: 409, retryable: true },
       );
     }
 
@@ -1077,6 +1101,7 @@ export async function runProductionIntakeRequest(
     auth: trustedAuth,
     candidate,
     transport,
+    expectedPublicationAuthority,
     intakePlan,
     controlPlan,
     runtimeRevision,

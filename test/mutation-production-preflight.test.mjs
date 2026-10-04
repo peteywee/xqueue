@@ -39,6 +39,11 @@ function candidate(overrides = {}) {
   };
 }
 
+// The authority the operator verified; every fixture binds the same one.
+function expectedAuthority(overrides = {}) {
+  return { generation: 9, candidate_sha: 'a'.repeat(40), deployment_id: DEPLOYMENT, ...overrides };
+}
+
 function safety(overrides = {}) {
   return {
     authority: {
@@ -315,6 +320,7 @@ test('production wrapper runs guarded intake only after clean production preflig
   };
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -332,6 +338,65 @@ test('production wrapper runs guarded intake only after clean production preflig
   fx.raw.close();
 });
 
+test('production wrapper refuses before checkpoint when authority differs from the verified one', async () => {
+  for (const changed of [
+    { generation: 10 },
+    { candidate_sha: 'f'.repeat(40) },
+    { deployment_id: DEPLOYMENT.replace(/[0-9a-f]{8}-/, '22222222-') },
+  ]) {
+    const fx = mutationFixture();
+    const { intakePlan, controlPlan, state } = mutationPlans();
+    const runtimeRevision = await projected(intakePlan, controlPlan, state);
+    const transport = {
+      ...fx.base,
+      async readPublicationSafety() {
+        return safety();
+      },
+    };
+
+    const result = await runProductionIntakeMutation({
+      expectedPublicationAuthority: expectedAuthority(changed),
+      environment: 'production',
+      auth: auth(),
+      candidate: candidate(),
+      transport,
+      intakePlan,
+      controlPlan,
+      runtimeRevision,
+      recordedAt: '2026-09-29T10:05:00.000Z',
+    });
+
+    assert.equal(result.status, 'blocked', JSON.stringify(changed));
+    assert.equal(result.fault_class, 'PRE_DISPATCH_REPLAN_REQUIRED');
+    assert.match(result.error, /authority changed since the operator verified it/);
+    assert.equal(fx.checkpointCalls(), 0);
+    assert.equal(fx.raw.prepare('SELECT COUNT(*) AS n FROM mutation_operations').get().n, 0);
+    assert.equal(
+      fx.raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id,
+      null,
+    );
+    fx.raw.close();
+  }
+
+  const fx = mutationFixture();
+  const { intakePlan, controlPlan, state } = mutationPlans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const missing = await runProductionIntakeMutation({
+    environment: 'production',
+    auth: auth(),
+    candidate: candidate(),
+    transport: { ...fx.base, async readPublicationSafety() { return safety(); } },
+    intakePlan,
+    controlPlan,
+    runtimeRevision,
+    recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+  assert.equal(missing.status, 'blocked');
+  assert.match(missing.error, /authority evidence is missing or invalid/);
+  assert.equal(fx.checkpointCalls(), 0);
+  fx.raw.close();
+});
+
 test('production wrapper preserves transient pre-dispatch safety read failure', async () => {
   const fx = mutationFixture();
   const { intakePlan, controlPlan, state } = mutationPlans();
@@ -344,6 +409,7 @@ test('production wrapper preserves transient pre-dispatch safety read failure', 
   };
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -375,6 +441,7 @@ test('production wrapper blocks dirty publication state before checkpoint or mut
   };
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -412,6 +479,7 @@ test('expired but still-held publisher lease blocks production mutation before c
   const runtimeRevision = await projected(intakePlan, controlPlan, state);
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -449,6 +517,7 @@ test('expired held lease appearing after safety read blocks the atomic mutation-
   const runtimeRevision = await projected(intakePlan, controlPlan, state);
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -494,6 +563,7 @@ test('production publication safety is reasserted atomically at mutation-lane cl
   };
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),
@@ -531,6 +601,7 @@ test('completed publication lease cycle after safety read invalidates the recove
   const runtimeRevision = await projected(intakePlan, controlPlan, state);
 
   const result = await runProductionIntakeMutation({
+    expectedPublicationAuthority: expectedAuthority(),
     environment: 'production',
     auth: auth(),
     candidate: candidate(),

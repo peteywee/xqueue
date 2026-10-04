@@ -231,11 +231,44 @@ export function evaluateProductionMutationPreflight({
   });
 }
 
+// The operator verifies the authority-bound publisher (including that it
+// carries the mutation mutex) before launching; this binds that verification
+// to the authority the mutation actually fences on, so a rebind during the
+// launch window cannot slip in. The lane claim's publication fence then holds
+// the same authority in the same atomic batch, and 0017 forbids authority
+// transitions while the lane is held.
+export function validPublicationAuthorityEvidence(expected) {
+  return Boolean(
+    expected &&
+    typeof expected === 'object' &&
+    Number.isSafeInteger(Number(expected.generation)) &&
+    Number(expected.generation) >= 1 &&
+    /^[0-9a-f]{40}$/i.test(String(expected.candidate_sha ?? '')) &&
+    typeof expected.deployment_id === 'string' &&
+    expected.deployment_id.length > 0,
+  );
+}
+
+export function publicationAuthorityMismatch(observed, expected) {
+  if (!validPublicationAuthorityEvidence(expected)) {
+    return 'operator-verified publication authority evidence is missing or invalid';
+  }
+  if (
+    Number(expected.generation) !== Number(observed?.generation) ||
+    String(expected.candidate_sha).toLowerCase() !== observed?.candidateSha ||
+    expected.deployment_id !== observed?.deploymentId
+  ) {
+    return 'publication authority changed since the operator verified it';
+  }
+  return null;
+}
+
 export async function runProductionIntakeMutation({
   environment,
   auth,
   candidate,
   transport,
+  expectedPublicationAuthority,
   ...mutationArgs
 }) {
   if (!transport || typeof transport.readPublicationSafety !== 'function') {
@@ -278,6 +311,21 @@ export async function runProductionIntakeMutation({
     return Object.freeze({
       status: 'blocked',
       phase: 'production_preflight',
+      preflight,
+    });
+  }
+
+  const authorityMismatch = publicationAuthorityMismatch(
+    preflight.observed.publicationAuthority,
+    expectedPublicationAuthority,
+  );
+  if (authorityMismatch) {
+    return Object.freeze({
+      status: 'blocked',
+      phase: 'production_preflight',
+      fault_class: 'PRE_DISPATCH_REPLAN_REQUIRED',
+      retryable: true,
+      error: authorityMismatch,
       preflight,
     });
   }

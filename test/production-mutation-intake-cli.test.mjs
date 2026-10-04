@@ -172,8 +172,23 @@ test('operator readiness consumes the existing production preflight and mutation
     migrations: REQUIRED_MUTATION_MIGRATIONS,
     safety: safety(),
     publisherMutex: { ok: true, reason: 'publisher_mutex_compatible' },
+    d1Token: { ok: true, blockers: [] },
   });
   assert.equal(ready.ok, true);
+
+  // Readiness never treats an unproven Worker credential as a pass.
+  for (const d1Token of [undefined, null, {}, { ok: false }, { ok: false, blockers: 'x' }]) {
+    const unproven = evaluateOperatorReadiness({
+      auth: auth(),
+      candidate: candidate(),
+      migrations: REQUIRED_MUTATION_MIGRATIONS,
+      safety: safety(),
+      publisherMutex: { ok: true, reason: 'publisher_mutex_compatible' },
+      d1Token,
+    });
+    assert.equal(unproven.ok, false, JSON.stringify(d1Token));
+    assert.ok(unproven.blockers.some((item) => item.id === 'mutation_d1_token_unverified'));
+  }
 
   const blocked = evaluateOperatorReadiness({
     auth: auth(),
@@ -531,9 +546,6 @@ test('observe mode never invokes the mutation Worker', async () => {
     ['--environment', 'production', '--file', 'item.json'],
     {
       run,
-      d1TokenReadiness: READY_D1,
-      d1TokenReadiness: READY_D1,
-      d1TokenReadiness: READY_D1,
       d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),

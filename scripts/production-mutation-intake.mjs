@@ -2,9 +2,10 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 import { evaluateProductionMutationPreflight } from '../src/mutation-production-preflight.mjs';
@@ -31,6 +32,8 @@ export const MUTATION_WORKER_SERVICE = 'xqueue-mutation-production-intake';
 const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
 const HEALTH_DEADLINE_MS = 60_000;
 const INTAKE_REQUEST_TIMEOUT_MS = 120_000;
+const CLOUDFLARE_PROBE_TIMEOUT_MS = 10_000;
+const MUTATION_WORKER_SECRETS = Object.freeze(['MUTATION_CONTROL_TOKEN', 'MUTATION_D1_API_TOKEN']);
 const CHILD_OUTPUT_TAIL_BYTES = 4_096;
 
 export function checkPublisherMutexCompatibility(candidateSha, spawnImpl = spawnSync) {
@@ -227,7 +230,16 @@ export function evaluateOperatorReadiness({
   d1Token = null,
 }) {
   const blockers = [];
-  for (const item of d1Token?.blockers ?? []) blockers.push(item);
+  if (d1Token?.ok === true) {
+    // Proven.
+  } else if (Array.isArray(d1Token?.blockers) && d1Token.blockers.length > 0) {
+    blockers.push(...d1Token.blockers);
+  } else {
+    blockers.push({
+      id: 'mutation_d1_token_unverified',
+      detail: 'The Worker credential (MUTATION_D1_API_TOKEN) was not proven.',
+    });
+  }
   try {
     assertMutationSchema(migrations);
   } catch (error) {
@@ -323,6 +335,13 @@ function readSafety(run) {
 
 const SCHEMA_INDEPENDENT_BLOCKERS = new Set([
   'production_mutation_schema_not_active',
+  'production_migrations_unreadable',
+  'mutation_d1_token_unverified',
+  'mutation_d1_token_overscoped',
+  'mutation_d1_token_scope_unverified',
+  'launch_token_missing',
+  'launch_account_mismatch',
+  'mutation_descriptor_secrets_invalid',
   'environment_not_production',
   'cloudflare_auth_not_verified',
   'production_d1_not_readable',
@@ -335,9 +354,35 @@ const SCHEMA_INDEPENDENT_BLOCKERS = new Set([
   'mutation_d1_time_travel_unavailable',
 ]);
 
+function boundedFetch(timeoutMs = CLOUDFLARE_PROBE_TIMEOUT_MS) {
+  return (url, init = {}) => globalThis.fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 async function defaultProbeTimeTravel({ token, accountId, databaseId }) {
-  await getD1TimeTravelBookmark({ apiToken: token, accountId, databaseId });
+  await getD1TimeTravelBookmark({ apiToken: token, accountId, databaseId, fetchImpl: boundedFetch() });
   return true;
+}
+
+// Least-privilege probe (read-only): a D1 + Time Travel token cannot list the
+// account's Workers scripts. If it can, it has Workers access the mutation
+// plane must not hold, since that is what redeploys the publisher.
+async function defaultProbeWorkersAccess({ token, accountId, fetchImpl = boundedFetch() }) {
+  const response = await fetchImpl(
+    'https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/scripts',
+    { method: 'GET', headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } },
+  );
+  if (response.ok) return 'granted';
+  if (response.status === 401 || response.status === 403) return 'denied';
+  throw new Error('Workers scripts probe returned HTTP ' + response.status);
+}
+
+function secretsExact(descriptor) {
+  const required = [...(descriptor?.secrets?.required ?? [])].sort();
+  return JSON.stringify(required) === JSON.stringify([...MUTATION_WORKER_SECRETS].sort());
+}
+
+function redactedReason(error, secrets) {
+  return redact(String(error instanceof Error ? error.message : error).split('\n')[0], secrets);
 }
 
 // The Worker verifies and uses MUTATION_D1_API_TOKEN, not the launch token, so
@@ -348,8 +393,35 @@ export async function collectD1TokenReadiness({
   env = process.env,
   descriptor,
   probeTimeTravel = defaultProbeTimeTravel,
+  probeWorkersAccess = defaultProbeWorkersAccess,
 }) {
+  // Launch configuration that apply would refuse is reported here, so observe
+  // mode never says ready for a setup apply cannot run.
+  const launchBlockers = [];
+  if (!secretsExact(descriptor)) {
+    launchBlockers.push({
+      id: 'mutation_descriptor_secrets_invalid',
+      detail: 'The mutation Worker descriptor must require exactly MUTATION_D1_API_TOKEN and MUTATION_CONTROL_TOKEN.',
+    });
+  }
+  if (typeof env.CLOUDFLARE_API_TOKEN !== 'string' || env.CLOUDFLARE_API_TOKEN.trim() === '') {
+    launchBlockers.push({
+      id: 'launch_token_missing',
+      detail: 'CLOUDFLARE_API_TOKEN (the wrangler launch credential) must be set in the process environment.',
+    });
+  }
+  if (env.CLOUDFLARE_ACCOUNT_ID !== descriptor?.vars?.CLOUDFLARE_ACCOUNT_ID) {
+    launchBlockers.push({
+      id: 'launch_account_mismatch',
+      detail: 'CLOUDFLARE_ACCOUNT_ID must equal the mutation Worker descriptor account id.',
+    });
+  }
+  if (launchBlockers.length > 0) {
+    return Object.freeze({ ok: false, blockers: Object.freeze(launchBlockers) });
+  }
+
   const token = env.MUTATION_D1_API_TOKEN;
+  const secrets = [token, env.CLOUDFLARE_API_TOKEN];
   if (typeof token !== 'string' || token.trim() === '') {
     return Object.freeze({
       ok: false,
@@ -376,14 +448,35 @@ export async function collectD1TokenReadiness({
       { env: { ...env, CLOUDFLARE_API_TOKEN: token } },
     ));
   } catch (error) {
-    auth = { ok: false, error: error instanceof Error ? error.message.split('\n')[0] : String(error) };
+    auth = { ok: false, error: redactedReason(error, secrets) };
   }
   if (auth?.ok !== true || auth?.d1?.readable !== true) {
     return Object.freeze({
       ok: false,
       blockers: Object.freeze([{
         id: 'mutation_d1_token_not_verified',
-        detail: 'MUTATION_D1_API_TOKEN did not pass typed auth and a production D1 read.',
+        detail: 'MUTATION_D1_API_TOKEN did not pass typed auth and a production D1 read' +
+          (auth?.error ? ': ' + auth.error : '.'),
+      }]),
+    });
+  }
+  try {
+    const access = await probeWorkersAccess({ token, accountId: descriptor.vars.CLOUDFLARE_ACCOUNT_ID });
+    if (access !== 'denied') {
+      return Object.freeze({
+        ok: false,
+        blockers: Object.freeze([{
+          id: 'mutation_d1_token_overscoped',
+          detail: 'MUTATION_D1_API_TOKEN can access Workers scripts; use a D1 + Time Travel only token.',
+        }]),
+      });
+    }
+  } catch (error) {
+    return Object.freeze({
+      ok: false,
+      blockers: Object.freeze([{
+        id: 'mutation_d1_token_scope_unverified',
+        detail: 'Could not prove MUTATION_D1_API_TOKEN lacks Workers access: ' + redactedReason(error, secrets),
       }]),
     });
   }
@@ -399,7 +492,7 @@ export async function collectD1TokenReadiness({
       blockers: Object.freeze([{
         id: 'mutation_d1_time_travel_unavailable',
         detail: 'MUTATION_D1_API_TOKEN could not read a production Time Travel bookmark: ' +
-          (error instanceof Error ? error.message : String(error)),
+          redactedReason(error, secrets),
       }]),
     });
   }
@@ -412,18 +505,28 @@ export function collectOperatorPreflight(
   { plannedOperationId = null, d1Token = null } = {},
 ) {
   const candidate = collectExactMainCandidate(run);
-  const auth = parseJsonOutput(
-    run('pnpm', ['cf:auth:preflight', '--environment', 'production']),
-  );
-  const migrations = readMigrations(run);
-  const schemaActive = REQUIRED_MUTATION_MIGRATIONS.every((name) => migrations.includes(name));
+  let auth;
+  try {
+    auth = parseJsonOutput(run('pnpm', ['cf:auth:preflight', '--environment', 'production']));
+  } catch {
+    // cf:auth:preflight exits non-zero on every failure; report it as a blocker.
+    auth = { ok: false };
+  }
+  let migrations = null;
+  try {
+    migrations = readMigrations(run);
+  } catch {
+    migrations = null;
+  }
+  const schemaActive = Array.isArray(migrations) &&
+    REQUIRED_MUTATION_MIGRATIONS.every((name) => migrations.includes(name));
   if (!schemaActive) {
     // The safety read needs the mutation tables, so report the schema blocker
     // as structured evidence instead of querying tables that do not exist.
     const readiness = evaluateOperatorReadiness({
       auth,
       candidate,
-      migrations,
+      migrations: migrations ?? [],
       safety: null,
       publisherMutex: null,
       plannedOperationId,
@@ -432,16 +535,21 @@ export function collectOperatorPreflight(
     return Object.freeze({
       candidate,
       auth,
-      migrations,
+      migrations: migrations ?? [],
       safety: null,
       publisherMutex: null,
       readiness: Object.freeze({
         ok: false,
         // Publication and lane facts were not read; keep every blocker that does
         // not depend on them so the operator sees them all now.
-        blockers: Object.freeze(
-          readiness.blockers.filter((item) => SCHEMA_INDEPENDENT_BLOCKERS.has(item.id)),
-        ),
+        blockers: Object.freeze([
+          ...(migrations === null
+            ? [{ id: 'production_migrations_unreadable', detail: 'Production d1_migrations could not be read.' }]
+            : []),
+          ...readiness.blockers.filter((item) =>
+            SCHEMA_INDEPENDENT_BLOCKERS.has(item.id) &&
+            !(migrations === null && item.id === 'production_mutation_schema_not_active')),
+        ]),
         productionPreflight: null,
       }),
     });
@@ -500,12 +608,7 @@ const WRANGLER_DEV_SWITCHES = Object.freeze([
 
 export function childEnvironment({ env = process.env, descriptor, controlToken }) {
   const vars = descriptor?.vars ?? {};
-  const secrets = descriptor?.secrets?.required ?? [];
-  if (
-    !secrets.includes('MUTATION_D1_API_TOKEN') ||
-    !secrets.includes('MUTATION_CONTROL_TOKEN') ||
-    secrets.includes('CLOUDFLARE_API_TOKEN')
-  ) {
+  if (!secretsExact(descriptor)) {
     fail('mutation Worker descriptor must require exactly its own D1 and control secrets');
   }
   const d1Token = env.MUTATION_D1_API_TOKEN;
@@ -533,17 +636,6 @@ export function childEnvironment({ env = process.env, descriptor, controlToken }
   return child;
 }
 
-// A .dev.vars file replaces .env loading and changes where wrangler reads
-// secrets from, so it is refused outright. .env entries are shadowed by the
-// explicit child environment, and /health proves the bound result.
-export function assertNoLocalDevOverrides({ dir, readDir = readdirSync }) {
-  for (const name of readDir(dir)) {
-    if (/^\.dev\.vars(\..+)?$/.test(name)) {
-      fail(name + ' exists beside the mutation Worker descriptor; remove it before apply');
-    }
-  }
-  return true;
-}
 
 export function probePortFree(port, connectImpl = connect) {
   return new Promise((resolveProbe, rejectProbe) => {
@@ -584,7 +676,9 @@ export function assertHealthIdentity(body, expected) {
   if (
     body?.service !== MUTATION_WORKER_SERVICE ||
     body?.role !== 'production-mutation-intake' ||
-    body?.publicationCapable !== false
+    body?.environment !== 'production' ||
+    body?.publicationCapable !== false ||
+    body?.schedulerAuthority !== false
   ) {
     fail('the listener on the intake port is not the ephemeral production mutation Worker');
   }
@@ -654,13 +748,13 @@ function postDispatchAmbiguity(message, cause) {
 export async function invokeEphemeralWorker({
   payload,
   candidate,
+  expectedPublicationAuthority,
   port = DEFAULT_PORT,
   spawnImpl = spawn,
   fetchImpl = globalThis.fetch,
   env = process.env,
   descriptorPath = MUTATION_WORKER_DESCRIPTOR,
   readDescriptor = readMutationWorkerDescriptor,
-  assertLocalOverrides = assertNoLocalDevOverrides,
   probePort = probePortFree,
   verifyTree = verifyTreeUnchanged,
   healthDeadlineMs = HEALTH_DEADLINE_MS,
@@ -669,10 +763,15 @@ export async function invokeEphemeralWorker({
   if (typeof fetchImpl !== 'function') fail('fetch support is required');
   const descriptor = readDescriptor(descriptorPath);
   const expected = expectedTrustRoot(descriptor);
-  assertLocalOverrides({ dir: dirname(resolve(descriptorPath)), descriptor });
   const controlToken = randomBytes(32).toString('hex');
   const childEnv = childEnvironment({ env, descriptor, controlToken });
   await probePort(port);
+  // An empty --env-file makes wrangler skip .env and .dev.vars entirely while
+  // still binding declared secrets from the process environment (observed with
+  // wrangler 4.131), so no local file can override a binding.
+  const envDir = mkdtempSync(join(tmpdir(), 'xqueue-mutation-env-'));
+  const envFile = join(envDir, 'empty.env');
+  writeFileSync(envFile, '', { mode: 0o600 });
 
   const child = spawnImpl(
     'pnpm',
@@ -682,6 +781,7 @@ export async function invokeEphemeralWorker({
       '--remote',
       '--ip', '127.0.0.1',
       '--port', String(port),
+      '--env-file', envFile,
     ],
     {
       cwd: process.cwd(),
@@ -738,6 +838,7 @@ export async function invokeEphemeralWorker({
         body: JSON.stringify({
           environment: 'production',
           candidate,
+          expectedPublicationAuthority,
           ...payload,
         }),
         signal: AbortSignal.timeout(intakeTimeoutMs),
@@ -768,6 +869,7 @@ export async function invokeEphemeralWorker({
     return body;
   } finally {
     if (!state.exited) child.kill('SIGTERM');
+    rmSync(envDir, { recursive: true, force: true });
   }
 }
 
@@ -822,7 +924,7 @@ export async function main(
     verifyOwnerApproval = undefined,
     readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8')),
     env = process.env,
-    d1TokenReadiness = (options) => collectD1TokenReadiness(options),
+    d1TokenReadiness = collectD1TokenReadiness,
   } = {},
 ) {
   const options = parseArgs(argv);
@@ -893,6 +995,13 @@ export async function main(
   try {
     result = await invokeWorker({
       candidate: preflight.candidate,
+      // The authority whose publisher passed the mutex gate; the Worker refuses
+      // unless its own fresh read is identical.
+      expectedPublicationAuthority: Object.freeze({
+        generation: Number(preflight.safety.authority.generation),
+        candidate_sha: String(preflight.safety.authority.candidate_sha).toLowerCase(),
+        deployment_id: preflight.safety.authority.deployment_id,
+      }),
       payload,
       port: options.port,
       env,

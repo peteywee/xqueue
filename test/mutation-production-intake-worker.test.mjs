@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { normalizeIntakeInput } from '../src/continuous-queue-intake.mjs';
 import { candidateDigest } from '../src/authoring/contracts.mjs';
 import { MAX_PRODUCTION_INTAKE_ITEMS } from '../src/mutation-production-preflight.mjs';
+import { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 import {
   createMutationProductionIntakeWorker,
   runProductionIntakeRequest,
@@ -472,6 +473,14 @@ function payload(overrides = {}) {
       headSha: '1'.repeat(40),
       originMainSha: '1'.repeat(40),
     },
+    // Matches the authority deps() serves from readPublicationSafety.
+    expectedPublicationAuthority: {
+      generation: 9,
+      candidate_sha: 'a'.repeat(40),
+      deployment_id:
+        'cloudflare-worker:xqueue-publisher-production:version:' +
+        '11111111-1111-4111-8111-111111111111',
+    },
     input: {
       content_id: 'I-PRODUCTION-TEST-1',
       pillar: 'A',
@@ -538,6 +547,90 @@ test('request replay still requires exact-main production preflight', async () =
       error?.httpStatus === 409 &&
       /candidate_dirty/.test(error.message),
   );
+});
+
+test('an unbound Worker credential never falls back to the launch credential', async () => {
+  const saved = process.env.CLOUDFLARE_API_TOKEN;
+  process.env.CLOUDFLARE_API_TOKEN = 'cfat_' + 'l'.repeat(40);
+  const fetched = [];
+  try {
+    const d = deps();
+    d.verifyAuth = verifyCloudflareApiToken;
+    d.fetchImpl = async (url) => {
+      fetched.push(String(url));
+      throw new Error('no network in tests');
+    };
+    const { MUTATION_D1_API_TOKEN: _unbound, ...withoutWorkerToken } = env();
+    await assert.rejects(
+      () => runProductionIntakeRequest(withoutWorkerToken, payload(), d),
+      (error) =>
+        error?.faultClass === 'PRODUCTION_AUTH_NOT_VERIFIED' &&
+        /MUTATION_D1_API_TOKEN is required/.test(error.message),
+    );
+    assert.deepEqual(fetched, [], 'the launch token was never sent anywhere');
+  } finally {
+    if (saved === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = saved;
+  }
+});
+
+test('production intake requires the operator-verified publication authority', async () => {
+  for (const expectedPublicationAuthority of [
+    undefined,
+    null,
+    { generation: 9, candidate_sha: 'not-a-sha', deployment_id: 'x' },
+    { generation: 0, candidate_sha: 'a'.repeat(40), deployment_id: 'x' },
+    { generation: 9, candidate_sha: 'a'.repeat(40) },
+  ]) {
+    const d = deps();
+    let ran = false;
+    d.runMutation = async () => { ran = true; };
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(), payload({ expectedPublicationAuthority }), d),
+      (error) =>
+        error?.faultClass === 'INVALID_PUBLICATION_AUTHORITY_EVIDENCE' && error?.httpStatus === 400,
+      JSON.stringify(expectedPublicationAuthority),
+    );
+    assert.equal(ran, false);
+  }
+});
+
+test('a fresh intake binds the operator-verified authority into the guarded runner', async () => {
+  const d = deps();
+  const seen = [];
+  const runMutation = d.runMutation;
+  d.runMutation = async (args) => {
+    seen.push(args.expectedPublicationAuthority);
+    return runMutation(args);
+  };
+  await runProductionIntakeRequest(env(), payload(), d);
+  assert.deepEqual(seen, [payload().expectedPublicationAuthority]);
+});
+
+test('replay refuses when publication authority changed since the operator verified it', async () => {
+  for (const changed of [
+    { generation: 10 },
+    { candidate_sha: 'c'.repeat(40) },
+    { deployment_id: 'cloudflare-worker:xqueue-publisher-production:version:22222222-2222-4222-8222-222222222222' },
+  ]) {
+    const d = deps({ replayOperation: existingOperation() });
+    let resumed = false;
+    const resume = d.resumeMutation;
+    d.resumeMutation = async (args) => { resumed = true; return resume(args); };
+    await assert.rejects(
+      () => runProductionIntakeRequest(
+        env(fakeDb({ replay: true })),
+        payload({ expectedPublicationAuthority: { ...payload().expectedPublicationAuthority, ...changed } }),
+        d,
+      ),
+      (error) =>
+        error?.faultClass === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+        error?.httpStatus === 409 &&
+        /authority changed since the operator verified it/.test(error.message),
+      JSON.stringify(changed),
+    );
+    assert.equal(resumed, false);
+  }
 });
 
 test('applied replay resume failures are non-retryable post-dispatch ambiguity', async () => {
