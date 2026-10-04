@@ -548,9 +548,10 @@ export async function runScheduledPublication(
             nowMs: Date.now(),
           });
         } catch (error) {
-          // Acquisition is one atomic D1 batch before any X access. The 0017
-          // trigger aborts it while a guarded mutation holds the lane; that is
-          // routine exclusion, not an unhandled publisher failure.
+          // Acquisition is one atomic D1 batch before any X dispatch (only
+          // the read-only identity probe precedes it). The 0017 trigger aborts
+          // it while a guarded mutation holds the lane; that is routine
+          // exclusion, not an unhandled publisher failure.
           const message = error instanceof Error ? error.message : String(error);
           return {
             acquired: false,
