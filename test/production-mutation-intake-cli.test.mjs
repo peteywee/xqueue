@@ -20,6 +20,10 @@ import {
   parseSafetyPayload,
 } from '../scripts/production-mutation-intake.mjs';
 
+// main() also proves the Worker's own D1 credential; these tests cover the rest
+// of readiness, so that step reports ready unless a test says otherwise.
+const READY_D1 = async () => ({ ok: true, blockers: [] });
+
 function auth(overrides = {}) {
   return {
     ok: true,
@@ -291,6 +295,7 @@ test('apply refuses before launching the Worker when the publisher predates the 
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: (sha) => {
         checkedSha = sha;
@@ -369,6 +374,7 @@ test('invalid intake input blocks apply offline before the Worker is launched', 
     ],
     {
       run: readyRun(),
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async () => {
@@ -417,6 +423,7 @@ test('automated intake whose fields differ from the signed candidate is blocked 
     ],
     {
       run: readyRun(),
+      d1TokenReadiness: READY_D1,
       readJson: (path) => files.get(path),
       ownerPublicKeyPem: 'test-owner-public-key',
       verifyOwnerApproval: () => true,
@@ -444,6 +451,7 @@ test('a Worker identity that contradicts the offline plan requires readback, not
       ],
       {
         run: readyRun(),
+        d1TokenReadiness: READY_D1,
         readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
         checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
         invokeWorker: async () => ({
@@ -460,6 +468,9 @@ test('a Worker identity that contradicts the offline plan requires readback, not
     (error) => {
       assert.match(error.message, /contradicts the offline plan/);
       assert.equal(error.response.requiresReadback, true);
+      // Readback needs the planned identity, so the failure carries it.
+      assert.match(error.planned.operationId, /^mutation-intake-[0-9a-f]{24}$/);
+      assert.notEqual(error.planned.operationId, 'mutation-intake-' + 'f'.repeat(24));
       return true;
     },
   );
@@ -520,6 +531,10 @@ test('observe mode never invokes the mutation Worker', async () => {
     ['--environment', 'production', '--file', 'item.json'],
     {
       run,
+      d1TokenReadiness: READY_D1,
+      d1TokenReadiness: READY_D1,
+      d1TokenReadiness: READY_D1,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async () => {
@@ -633,6 +648,7 @@ test('automated single-item apply passes signed approval evidence, never a diges
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: (path) => files.get(path),
       ownerPublicKeyPem,
       verifyOwnerApproval,
@@ -709,6 +725,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async (args) => {

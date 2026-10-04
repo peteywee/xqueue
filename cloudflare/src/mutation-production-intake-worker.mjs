@@ -411,6 +411,7 @@ async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
       token: env?.MUTATION_D1_API_TOKEN,
       accountId: env?.CLOUDFLARE_ACCOUNT_ID,
       fetchImpl,
+      label: 'MUTATION_D1_API_TOKEN',
     });
     return Object.freeze({
       ok: true,
@@ -1152,6 +1153,14 @@ function boundTrustRoot(env) {
     productionDatabaseId:
       typeof env?.XQUEUE_PRODUCTION_DATABASE_ID === 'string' ? env.XQUEUE_PRODUCTION_DATABASE_ID : null,
     ownerApprovalKeyFingerprint,
+    // Presence only, never values: a wrangler switch in the operator shell can
+    // stop secrets from loading while the vars still look correct.
+    secretsBound: Object.freeze({
+      MUTATION_D1_API_TOKEN:
+        typeof env?.MUTATION_D1_API_TOKEN === 'string' && env.MUTATION_D1_API_TOKEN.length > 0,
+      MUTATION_CONTROL_TOKEN:
+        typeof env?.MUTATION_CONTROL_TOKEN === 'string' && env.MUTATION_CONTROL_TOKEN.length > 0,
+    }),
   });
 }
 

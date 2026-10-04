@@ -4,10 +4,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 import { evaluateProductionMutationPreflight } from '../src/mutation-production-preflight.mjs';
+import { getD1TimeTravelBookmark } from '../src/mutation-control-transport.mjs';
 import { ownerPublicKeyFingerprint } from '../src/authoring/owner-approval.mjs';
 
 export const PRODUCTION_INTAKE_CONFIRM = 'xqueue-production-intake';
@@ -17,12 +18,12 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
   '0017_publication_mutation_mutex.sql',
 ]);
 
-// The #168 commit that completes the publisher's deferral mutex. From here on,
-// the publisher holds its lease across missed-slot deferral and runtime
-// promotion, and reports mutation-lane exclusion as a lease block. An older
-// deployed publisher can still defer without the lease while an intake holds
-// the mutation lane. Later #168 commits change no publisher code.
-export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = '35eb0eb6f0f278e846f2b28daf034ef2ea6e4fb7';
+// The last #168 commit that touched the publisher's module graph (5185545).
+// From here on, the publisher holds its lease across missed-slot deferral and
+// runtime promotion, and reports mutation-lane exclusion as a lease block. An
+// older deployed publisher can still defer without the lease while an intake
+// holds the mutation lane.
+export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = '518554553c0a6654447a63a4871ce330ed100ad7';
 
 const DEFAULT_PORT = 8789;
 export const MUTATION_WORKER_DESCRIPTOR = 'wrangler.mutation-production-intake.jsonc';
@@ -222,8 +223,11 @@ export function evaluateOperatorReadiness({
   migrations,
   safety,
   publisherMutex = null,
+  plannedOperationId = null,
+  d1Token = null,
 }) {
   const blockers = [];
+  for (const item of d1Token?.blockers ?? []) blockers.push(item);
   try {
     assertMutationSchema(migrations);
   } catch (error) {
@@ -267,7 +271,12 @@ export function evaluateOperatorReadiness({
       id: 'mutation_lane_unreadable',
       detail: 'The mutation lane state row is missing or unreadable.',
     });
-  } else if (safety.mutationLane.active_operation_id != null) {
+  } else if (
+    safety.mutationLane.active_operation_id != null &&
+    safety.mutationLane.active_operation_id !== plannedOperationId
+  ) {
+    // A lane held by this exact planned operation is an interrupted apply; the
+    // Worker's replay path resumes and finalizes it, so it is not contention.
     blockers.push({
       id: 'mutation_lane_contended',
       detail: 'Another mutation operation owns the mutation lane.',
@@ -312,9 +321,95 @@ function readSafety(run) {
   return parseSafetyPayload(parseJsonOutput(raw));
 }
 
+const SCHEMA_INDEPENDENT_BLOCKERS = new Set([
+  'production_mutation_schema_not_active',
+  'environment_not_production',
+  'cloudflare_auth_not_verified',
+  'production_d1_not_readable',
+  'candidate_not_main',
+  'candidate_dirty',
+  'candidate_not_exact_main',
+  'mutation_d1_token_missing',
+  'mutation_d1_token_not_separated',
+  'mutation_d1_token_not_verified',
+  'mutation_d1_time_travel_unavailable',
+]);
+
+async function defaultProbeTimeTravel({ token, accountId, databaseId }) {
+  await getD1TimeTravelBookmark({ apiToken: token, accountId, databaseId });
+  return true;
+}
+
+// The Worker verifies and uses MUTATION_D1_API_TOKEN, not the launch token, so
+// readiness proves that credential directly: typed auth plus a D1 read through
+// the existing preflight, and a read-only Time Travel bookmark request.
+export async function collectD1TokenReadiness({
+  run = runSync,
+  env = process.env,
+  descriptor,
+  probeTimeTravel = defaultProbeTimeTravel,
+}) {
+  const token = env.MUTATION_D1_API_TOKEN;
+  if (typeof token !== 'string' || token.trim() === '') {
+    return Object.freeze({
+      ok: false,
+      blockers: Object.freeze([{
+        id: 'mutation_d1_token_missing',
+        detail: 'MUTATION_D1_API_TOKEN (D1 + Time Travel scoped, no Workers script rights) is not set.',
+      }]),
+    });
+  }
+  if (token === env.CLOUDFLARE_API_TOKEN) {
+    return Object.freeze({
+      ok: false,
+      blockers: Object.freeze([{
+        id: 'mutation_d1_token_not_separated',
+        detail: 'MUTATION_D1_API_TOKEN must differ from the CLOUDFLARE_API_TOKEN launch credential.',
+      }]),
+    });
+  }
+  let auth = null;
+  try {
+    auth = parseJsonOutput(run(
+      'pnpm',
+      ['cf:auth:preflight', '--environment', 'production'],
+      { env: { ...env, CLOUDFLARE_API_TOKEN: token } },
+    ));
+  } catch (error) {
+    auth = { ok: false, error: error instanceof Error ? error.message.split('\n')[0] : String(error) };
+  }
+  if (auth?.ok !== true || auth?.d1?.readable !== true) {
+    return Object.freeze({
+      ok: false,
+      blockers: Object.freeze([{
+        id: 'mutation_d1_token_not_verified',
+        detail: 'MUTATION_D1_API_TOKEN did not pass typed auth and a production D1 read.',
+      }]),
+    });
+  }
+  try {
+    await probeTimeTravel({
+      token,
+      accountId: descriptor?.vars?.CLOUDFLARE_ACCOUNT_ID,
+      databaseId: descriptor?.vars?.XQUEUE_PRODUCTION_DATABASE_ID,
+    });
+  } catch (error) {
+    return Object.freeze({
+      ok: false,
+      blockers: Object.freeze([{
+        id: 'mutation_d1_time_travel_unavailable',
+        detail: 'MUTATION_D1_API_TOKEN could not read a production Time Travel bookmark: ' +
+          (error instanceof Error ? error.message : String(error)),
+      }]),
+    });
+  }
+  return Object.freeze({ ok: true, blockers: Object.freeze([]) });
+}
+
 export function collectOperatorPreflight(
   run = runSync,
   checkPublisher = checkPublisherMutexCompatibility,
+  { plannedOperationId = null, d1Token = null } = {},
 ) {
   const candidate = collectExactMainCandidate(run);
   const auth = parseJsonOutput(
@@ -331,6 +426,8 @@ export function collectOperatorPreflight(
       migrations,
       safety: null,
       publisherMutex: null,
+      plannedOperationId,
+      d1Token,
     });
     return Object.freeze({
       candidate,
@@ -340,8 +437,10 @@ export function collectOperatorPreflight(
       publisherMutex: null,
       readiness: Object.freeze({
         ok: false,
+        // Publication and lane facts were not read; keep every blocker that does
+        // not depend on them so the operator sees them all now.
         blockers: Object.freeze(
-          readiness.blockers.filter((item) => item.id === 'production_mutation_schema_not_active'),
+          readiness.blockers.filter((item) => SCHEMA_INDEPENDENT_BLOCKERS.has(item.id)),
         ),
         productionPreflight: null,
       }),
@@ -355,6 +454,8 @@ export function collectOperatorPreflight(
     migrations,
     safety,
     publisherMutex,
+    plannedOperationId,
+    d1Token,
   });
   return Object.freeze({ candidate, auth, migrations, safety, publisherMutex, readiness });
 }
@@ -386,9 +487,17 @@ export function expectedTrustRoot(descriptor) {
 }
 
 // wrangler dev lets same-named process.env and .env entries override committed
-// vars (observed with wrangler 4.131), so the child must not see them. The
-// Worker's Cloudflare credential is MUTATION_D1_API_TOKEN; CLOUDFLARE_API_TOKEN
-// is wrangler's own launch credential and is never bound into the Worker.
+// vars, with process.env taking precedence over .env (observed with wrangler
+// 4.131). The child therefore carries every committed var explicitly, which
+// also shadows any .env entry. The Worker's Cloudflare credential is
+// MUTATION_D1_API_TOKEN; CLOUDFLARE_API_TOKEN is wrangler's own launch
+// credential and is never bound into the Worker.
+const WRANGLER_DEV_SWITCHES = Object.freeze([
+  'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV',
+  'CLOUDFLARE_INCLUDE_PROCESS_ENV',
+  'CLOUDFLARE_ENV',
+]);
+
 export function childEnvironment({ env = process.env, descriptor, controlToken }) {
   const vars = descriptor?.vars ?? {};
   const secrets = descriptor?.secrets?.required ?? [];
@@ -403,6 +512,11 @@ export function childEnvironment({ env = process.env, descriptor, controlToken }
   if (typeof d1Token !== 'string' || d1Token.trim() === '') {
     fail('apply requires MUTATION_D1_API_TOKEN, a D1 + Time Travel scoped token for the Worker');
   }
+  // A launch token kept only in .env would make the separation check below
+  // meaningless, so the launch credential must be explicit.
+  if (typeof env.CLOUDFLARE_API_TOKEN !== 'string' || env.CLOUDFLARE_API_TOKEN.trim() === '') {
+    fail('apply requires CLOUDFLARE_API_TOKEN (the wrangler launch credential) in the process environment');
+  }
   if (d1Token === env.CLOUDFLARE_API_TOKEN) {
     fail(
       'MUTATION_D1_API_TOKEN must differ from CLOUDFLARE_API_TOKEN; the launch credential ' +
@@ -413,29 +527,19 @@ export function childEnvironment({ env = process.env, descriptor, controlToken }
     fail('CLOUDFLARE_ACCOUNT_ID must equal the mutation Worker descriptor account id');
   }
   const child = { ...env };
-  for (const name of Object.keys(vars)) {
-    if (name !== 'CLOUDFLARE_ACCOUNT_ID') delete child[name];
-  }
+  for (const name of WRANGLER_DEV_SWITCHES) delete child[name];
+  for (const [name, value] of Object.entries(vars)) child[name] = value;
   child.MUTATION_CONTROL_TOKEN = controlToken;
   return child;
 }
 
-export function assertNoLocalDevOverrides({ dir, descriptor, readDir = readdirSync, readText = readFileSync }) {
-  const guarded = new Set([
-    ...Object.keys(descriptor?.vars ?? {}),
-    ...(descriptor?.secrets?.required ?? []),
-  ]);
+// A .dev.vars file replaces .env loading and changes where wrangler reads
+// secrets from, so it is refused outright. .env entries are shadowed by the
+// explicit child environment, and /health proves the bound result.
+export function assertNoLocalDevOverrides({ dir, readDir = readdirSync }) {
   for (const name of readDir(dir)) {
     if (/^\.dev\.vars(\..+)?$/.test(name)) {
       fail(name + ' exists beside the mutation Worker descriptor; remove it before apply');
-    }
-    if (!/^\.env(\..+)?$/.test(name)) continue;
-    const text = String(readText(join(dir, name), 'utf8'));
-    for (const line of text.split(/\r?\n/)) {
-      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-      if (match && guarded.has(match[1])) {
-        fail(name + ' defines ' + match[1] + ', which would override the mutation Worker binding');
-      }
     }
   }
   return true;
@@ -485,6 +589,12 @@ export function assertHealthIdentity(body, expected) {
     fail('the listener on the intake port is not the ephemeral production mutation Worker');
   }
   const bound = body?.bindings ?? {};
+  if (
+    bound.secretsBound?.MUTATION_D1_API_TOKEN !== true ||
+    bound.secretsBound?.MUTATION_CONTROL_TOKEN !== true
+  ) {
+    fail('the ephemeral Worker did not bind both mutation secrets');
+  }
   for (const key of ['accountId', 'productionDatabaseId', 'ownerApprovalKeyFingerprint']) {
     if (typeof expected?.[key] !== 'string' || bound[key] !== expected[key]) {
       fail(
@@ -521,6 +631,16 @@ async function waitForHealth(url, fetchImpl, state, expected, deadlineMs = HEALT
   throw new Error('ephemeral production mutation Worker did not become healthy');
 }
 
+export function verifyTreeUnchanged(candidate, run = runSync) {
+  const branch = run('git', ['branch', '--show-current']).trim();
+  const dirty = run('git', ['status', '--porcelain', '--untracked-files=all']).trim();
+  const headSha = run('git', ['rev-parse', 'HEAD']).trim().toLowerCase();
+  if (branch !== candidate?.branch || dirty !== '' || headSha !== candidate?.headSha) {
+    fail('the checkout changed after preflight; refusing to send the production intake request');
+  }
+  return true;
+}
+
 function postDispatchAmbiguity(message, cause) {
   const error = new Error(message + '; production may have changed, reconcile by readback before any retry');
   error.cause = cause;
@@ -542,6 +662,7 @@ export async function invokeEphemeralWorker({
   readDescriptor = readMutationWorkerDescriptor,
   assertLocalOverrides = assertNoLocalDevOverrides,
   probePort = probePortFree,
+  verifyTree = verifyTreeUnchanged,
   healthDeadlineMs = HEALTH_DEADLINE_MS,
   intakeTimeoutMs = INTAKE_REQUEST_TIMEOUT_MS,
 }) {
@@ -559,6 +680,7 @@ export async function invokeEphemeralWorker({
       'wrangler', 'dev',
       '--config', descriptorPath,
       '--remote',
+      '--ip', '127.0.0.1',
       '--port', String(port),
     ],
     {
@@ -597,6 +719,10 @@ export async function invokeEphemeralWorker({
     } catch (error) {
       throw withOutput(state.spawnError ?? error);
     }
+
+    // wrangler dev rebuilds on file changes, so the tree proven at preflight
+    // must still be the tree serving the request.
+    verifyTree(candidate);
 
     // From here on the request may reach production: any failure without a
     // definitive Worker answer is post-dispatch ambiguity.
@@ -695,6 +821,8 @@ export async function main(
     ownerPublicKeyPem = null,
     verifyOwnerApproval = undefined,
     readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8')),
+    env = process.env,
+    d1TokenReadiness = (options) => collectD1TokenReadiness(options),
   } = {},
 ) {
   const options = parseArgs(argv);
@@ -720,7 +848,11 @@ export async function main(
       (options.sourceMode === 'automated' ? mutationWorkerOwnerPublicKey() : null),
     ...(verifyOwnerApproval ? { verifyOwnerApproval } : {}),
   });
-  const preflight = collectOperatorPreflight(run, checkPublisher);
+  const d1Token = await d1TokenReadiness({ run, env, descriptor: readMutationWorkerDescriptor() });
+  const preflight = collectOperatorPreflight(run, checkPublisher, {
+    plannedOperationId: planned.ok ? planned.operationId : null,
+    d1Token,
+  });
   const blockers = [...preflight.readiness.blockers];
   if (!planned.ok) {
     blockers.push({ id: planned.faultClass, detail: planned.error });
@@ -757,12 +889,20 @@ export async function main(
     return summary;
   }
 
-  const result = await invokeWorker({
-    candidate: preflight.candidate,
-    payload,
-    port: options.port,
-  });
-  assertObservedIdentity(planned, result?.planned);
+  let result;
+  try {
+    result = await invokeWorker({
+      candidate: preflight.candidate,
+      payload,
+      port: options.port,
+      env,
+    });
+    assertObservedIdentity(planned, result?.planned);
+  } catch (error) {
+    // Readback needs the planned identity, so it travels with every failure.
+    if (error && typeof error === 'object') error.planned = planned;
+    throw error;
+  }
 
   const output = {
     ...summary,
@@ -780,6 +920,15 @@ if (import.meta.url === new URL(process.argv[1], 'file:').href) {
     console.error(error instanceof Error ? error.message : String(error));
     if (error?.response?.requiresReadback === true) {
       console.error('readback_required=1');
+    }
+    if (error?.planned || error?.response || error?.cause) {
+      console.error(JSON.stringify({
+        planned: error.planned ?? null,
+        response: error.response ?? null,
+        cause: error.cause instanceof Error
+          ? { name: error.cause.name, message: error.cause.message }
+          : (error.cause ?? null),
+      }, null, 2));
     }
     process.exitCode = 1;
   });
