@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { normalizeIntakeInput } from '../src/continuous-queue-intake.mjs';
 import { candidateDigest } from '../src/authoring/contracts.mjs';
 import { MAX_PRODUCTION_INTAKE_ITEMS } from '../src/mutation-production-preflight.mjs';
+import { verifyCloudflareApiToken } from '../src/cloudflare-auth.mjs';
 import {
   createMutationProductionIntakeWorker,
   runProductionIntakeRequest,
@@ -30,7 +31,7 @@ function env(db = fakeDb()) {
     MUTATION_CONTROL_TOKEN: CONTROL_TOKEN,
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
-    CLOUDFLARE_API_TOKEN: CF_TOKEN,
+    MUTATION_D1_API_TOKEN: CF_TOKEN,
     OWNER_APPROVAL_PUBLIC_KEY_PEM: OWNER_PUBLIC_KEY_PEM,
   };
 }
@@ -472,6 +473,14 @@ function payload(overrides = {}) {
       headSha: '1'.repeat(40),
       originMainSha: '1'.repeat(40),
     },
+    // Matches the authority deps() serves from readPublicationSafety.
+    expectedPublicationAuthority: {
+      generation: 9,
+      candidate_sha: 'a'.repeat(40),
+      deployment_id:
+        'cloudflare-worker:xqueue-publisher-production:version:' +
+        '11111111-1111-4111-8111-111111111111',
+    },
     input: {
       content_id: 'I-PRODUCTION-TEST-1',
       pillar: 'A',
@@ -519,25 +528,208 @@ test('request replay is recovered before duplicate-content planning', async () =
 });
 
 test('request replay still requires exact-main production preflight', async () => {
-  const d = deps({ replayOperation: existingOperation() });
+  const dirty = payload({
+    candidate: {
+      branch: 'main',
+      clean: false,
+      headSha: '1'.repeat(40),
+      originMainSha: '1'.repeat(40),
+    },
+  });
+  // A never-dispatched operation is not resumable, which is reported first.
   await assert.rejects(
     () => runProductionIntakeRequest(
       env(fakeDb({ replay: true })),
-      payload({
-        candidate: {
-          branch: 'main',
-          clean: false,
-          headSha: '1'.repeat(40),
-          originMainSha: '1'.repeat(40),
-        },
-      }),
-      d,
+      dirty,
+      deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } }),
     ),
     (error) =>
-      error?.faultClass === 'PRE_DISPATCH_STATE_CONFLICT' &&
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
       error?.httpStatus === 409 &&
-      /candidate_dirty/.test(error.message),
+      error?.retryable !== true,
   );
+  // Blocked after the operation may have reached production: read back first.
+  // An applied operation reaches the preflight; every other past-dispatch
+  // state already stops at the resumability check.
+  for (const [effectState, reason] of [
+    ['applied', /candidate_dirty/],
+    ['dispatched', /not in an exact recoverable applied state/],
+    ['not_applied', /not in an exact recoverable applied state/],
+    ['ambiguous', /not in an exact recoverable applied state/],
+    ['unrecognized', /not in an exact recoverable applied state/],
+  ]) {
+    await assert.rejects(
+      () => runProductionIntakeRequest(
+        env(fakeDb({ replay: true })),
+        dirty,
+        deps({ replayOperation: { ...existingOperation(), effect_state: effectState } }),
+      ),
+      (error) =>
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.httpStatus === 409 &&
+        error?.requiresReadback === true &&
+        error?.retryable === false &&
+        reason.test(error.message),
+      effectState,
+    );
+  }
+});
+
+test('an unbound Worker credential never falls back to the launch credential', async () => {
+  const saved = process.env.CLOUDFLARE_API_TOKEN;
+  process.env.CLOUDFLARE_API_TOKEN = 'cfat_' + 'l'.repeat(40);
+  const fetched = [];
+  try {
+    const d = deps();
+    d.verifyAuth = verifyCloudflareApiToken;
+    d.fetchImpl = async (url) => {
+      fetched.push(String(url));
+      throw new Error('no network in tests');
+    };
+    const { MUTATION_D1_API_TOKEN: _unbound, ...withoutWorkerToken } = env();
+    await assert.rejects(
+      () => runProductionIntakeRequest(withoutWorkerToken, payload(), d),
+      (error) =>
+        error?.faultClass === 'PRODUCTION_AUTH_NOT_VERIFIED' &&
+        /MUTATION_D1_API_TOKEN is required/.test(error.message),
+    );
+    assert.deepEqual(fetched, [], 'the launch token was never sent anywhere');
+  } finally {
+    if (saved === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = saved;
+  }
+});
+
+test('production intake requires the operator-verified publication authority', async () => {
+  for (const expectedPublicationAuthority of [
+    undefined,
+    null,
+    { generation: 9, candidate_sha: 'not-a-sha', deployment_id: 'x' },
+    { generation: 0, candidate_sha: 'a'.repeat(40), deployment_id: 'x' },
+    { generation: 9, candidate_sha: 'a'.repeat(40) },
+  ]) {
+    const d = deps();
+    let ran = false;
+    d.runMutation = async () => { ran = true; };
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(), payload({ expectedPublicationAuthority }), d),
+      (error) =>
+        error?.faultClass === 'INVALID_PUBLICATION_AUTHORITY_EVIDENCE' && error?.httpStatus === 400,
+      JSON.stringify(expectedPublicationAuthority),
+    );
+    assert.equal(ran, false);
+  }
+});
+
+test('a fresh intake binds the operator-verified authority into the guarded runner', async () => {
+  const d = deps();
+  const seen = [];
+  const runMutation = d.runMutation;
+  d.runMutation = async (args) => {
+    seen.push(args.expectedPublicationAuthority);
+    return runMutation(args);
+  };
+  await runProductionIntakeRequest(env(), payload(), d);
+  assert.deepEqual(seen, [payload().expectedPublicationAuthority]);
+});
+
+test('a fresh-path authority change is retryable at the top level, like replay', async () => {
+  const d = deps();
+  d.runMutation = async () => ({
+    status: 'blocked',
+    phase: 'production_preflight',
+    fault_class: 'PRE_DISPATCH_REPLAN_REQUIRED',
+    retryable: true,
+    error: 'publication authority changed since the operator verified it',
+  });
+  const worker = createMutationProductionIntakeWorker(d);
+  const response = await worker.fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      body: JSON.stringify(payload()),
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + CONTROL_TOKEN },
+    }),
+    env(),
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'PRE_DISPATCH_REPLAN_REQUIRED');
+  assert.equal(body.retryable, true);
+  assert.equal(body.requiresReadback, false);
+});
+
+test('replay refuses when publication authority changed since the operator verified it', async () => {
+  for (const changed of [
+    { generation: 10 },
+    { candidate_sha: 'c'.repeat(40) },
+    { deployment_id: 'cloudflare-worker:xqueue-publisher-production:version:22222222-2222-4222-8222-222222222222' },
+  ]) {
+    const d = deps({ replayOperation: existingOperation() });
+    let resumed = false;
+    const resume = d.resumeMutation;
+    d.resumeMutation = async (args) => { resumed = true; return resume(args); };
+    // existingOperation() is applied: past dispatch, so the operator must read back.
+    await assert.rejects(
+      () => runProductionIntakeRequest(
+        env(fakeDb({ replay: true })),
+        payload({ expectedPublicationAuthority: { ...payload().expectedPublicationAuthority, ...changed } }),
+        d,
+      ),
+      (error) =>
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.requiresReadback === true &&
+        error?.httpStatus === 409 &&
+        /authority changed since the operator verified it/.test(error.message),
+      JSON.stringify(changed),
+    );
+    assert.equal(resumed, false);
+  }
+
+  const changedAuthority = payload({
+    expectedPublicationAuthority: { ...payload().expectedPublicationAuthority, generation: 10 },
+  });
+  for (const effectState of ['dispatched', 'not_applied', 'ambiguous', 'unrecognized']) {
+    await assert.rejects(
+      () => runProductionIntakeRequest(
+        env(fakeDb({ replay: true })),
+        changedAuthority,
+        deps({ replayOperation: { ...existingOperation(), effect_state: effectState } }),
+      ),
+      (error) =>
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.requiresReadback === true,
+      effectState,
+    );
+  }
+
+  // A never-dispatched operation is not resumable by replay, so it is never
+  // advertised as a retryable replan that could not succeed.
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      changedAuthority,
+      deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } }),
+    ),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.retryable !== true &&
+      error?.requiresReadback === false,
+  );
+});
+
+test('an unexpected runner exception on the fresh path always requires readback', async () => {
+  for (const message of ['completion evidence operation mismatch', 'network timeout']) {
+    const d = deps();
+    d.runMutation = async () => { throw new Error(message); };
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(), payload(), d),
+      (error) =>
+        error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+        error?.requiresReadback === true &&
+        error?.httpStatus === 409,
+      message,
+    );
+  }
 });
 
 test('applied replay resume failures are non-retryable post-dispatch ambiguity', async () => {
@@ -556,6 +748,131 @@ test('applied replay resume failures are non-retryable post-dispatch ambiguity',
       error?.httpStatus === 409 &&
       error?.retryable === false &&
       error?.requiresReadback === true,
+  );
+});
+
+test('a past-dispatch replay that does not complete exactly always requires readback', async () => {
+  // Only an applied operation is resumable; any other past-dispatch state stops
+  // at the exact-state check and must be read back.
+  for (const effectState of ['dispatched', 'ambiguous']) {
+    await assert.rejects(
+      () => runProductionIntakeRequest(
+        env(fakeDb({ replay: true })),
+        payload(),
+        deps({ replayOperation: { ...existingOperation(), effect_state: effectState } }),
+      ),
+      (error) => {
+        if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+        assert.equal(error.requiresReadback, true);
+        assert.equal(error.retryable, false);
+        assert.match(error.message, /not in an exact recoverable applied state/);
+        return true;
+      },
+      effectState,
+    );
+  }
+
+  // An applied operation whose resume reports a transient-looking pre-dispatch
+  // phase is still past dispatch, and the runner's answer is kept.
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      payload(),
+      deps({ replayOperation: existingOperation(), resumeMutationStatus: 'blocked' }),
+    ),
+    (error) => {
+      if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+      assert.equal(error.requiresReadback, true);
+      assert.equal(error.retryable, false);
+      assert.match(
+        error.message,
+        /applied-operation resume did not produce exact completion \(status blocked, phase initial_readback/,
+      );
+      return true;
+    },
+  );
+
+  // A never-dispatched operation is not resumable either. It reconciles, but
+  // it never reached production, so no production readback is asked for.
+  await assert.rejects(
+    () => runProductionIntakeRequest(
+      env(fakeDb({ replay: true })),
+      payload(),
+      deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } }),
+    ),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.requiresReadback === false,
+  );
+});
+
+test('every way a past-dispatch replay can stop requires readback, applied once', async () => {
+  const outage = (d) => {
+    const create = d.createTransport;
+    d.createTransport = (args) => ({
+      ...create(args),
+      async readPublicationSafety() { throw new Error('D1 temporarily unavailable'); },
+    });
+  };
+  // Each of these stops is raised as a pre-dispatch fault or a raw error inside
+  // the replay; the single wrapper turns it into readback.
+  const appliedStops = {
+    'safety read outage': (d) => outage(d),
+    'resume throws': (d) => { d.resumeMutation = async () => { throw new Error('socket hang up'); }; },
+    'resume reports a pre-dispatch-looking block': (d) => {
+      d.resumeMutation = async () => ({ status: 'blocked', phase: 'preflight_read', decision: { outcome: 'AUTO_RETRY' } });
+    },
+    'post-commit verification failure': (d) => {
+      const verify = d.verifyRuntime;
+      d.verifyRuntime = async (envValue, options) => {
+        if (options.includeSnapshot === false) throw new Error('network timeout after commit');
+        return verify(envValue, options);
+      };
+    },
+  };
+  for (const [name, breakIt] of Object.entries(appliedStops)) {
+    const d = deps({ replayOperation: existingOperation() });
+    breakIt(d);
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), d),
+      (error) => {
+        if (error?.faultClass !== 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+        assert.equal(error.requiresReadback, true);
+        assert.equal(error.retryable, false);
+        return true;
+      },
+      name,
+    );
+  }
+
+  // A dispatched operation stops at the resumability check, also as readback,
+  // even when the safety read would also have failed.
+  const dispatched = deps({ replayOperation: { ...existingOperation(), effect_state: 'dispatched' } });
+  outage(dispatched);
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), dispatched),
+    (error) =>
+      error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+      error?.requiresReadback === true &&
+      /not in an exact recoverable applied state/.test(error.message),
+  );
+
+  // A never-dispatched operation is never advertised as a retryable outage:
+  // it is not resumable, and that is decided before any further D1 read.
+  const none = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
+  outage(none);
+  const failingDb = fakeDb({ replay: true });
+  const prepare = failingDb.prepare.bind(failingDb);
+  failingDb.prepare = (sql) => {
+    if (sql.includes('queue_intake_operations')) throw new Error('D1_ERROR: Network connection lost');
+    return prepare(sql);
+  };
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(failingDb), payload(), none),
+    (error) =>
+      error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
+      error?.retryable !== true &&
+      error?.requiresReadback === false,
   );
 });
 
@@ -1209,9 +1526,9 @@ test('production mutation worker config contains D1 only and no embedded secrets
   // only these keys, so unrelated .env/process.env values never reach the Worker.
   const parsed = JSON.parse(config);
   assert.deepEqual(parsed.secrets, {
-    required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
+    required: ['MUTATION_D1_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
   });
-  for (const name of ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
+  for (const name of ['MUTATION_D1_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
     assert.equal(Object.hasOwn(parsed.vars ?? {}, name), false, name);
   }
 });
@@ -1227,9 +1544,34 @@ test('production worker health is non-mutating and unknown routes stay closed', 
   assert.equal(healthBody.publicationCapable, false);
   assert.equal(healthBody.schedulerAuthority, false);
 
+  assert.equal(healthBody.bindings, undefined, 'health never reports bindings');
+
   const missing = await worker.fetch(
     new Request('https://example.test/publish'),
     { DB: fakeDb() },
   );
   assert.equal(missing.status, 404);
+});
+
+test('an applied replay with no committed runtime revision is reconciled by readback', async () => {
+  const db = fakeDb({ replay: true });
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (sql.includes('FROM queue_runtime_revisions') && sql.includes('source_operation_id=?')) {
+      return { ...statement, bind() { return this; }, async first() { return null; } };
+    }
+    return statement;
+  };
+  let resumed = false;
+  const d = deps({ replayOperation: existingOperation() });
+  d.resumeMutation = async () => { resumed = true; throw new Error('must not resume'); };
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(db), payload(), d),
+    (error) =>
+      error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+      error?.requiresReadback === true &&
+      /has no committed runtime revision/.test(error.message),
+  );
+  assert.equal(resumed, false);
 });

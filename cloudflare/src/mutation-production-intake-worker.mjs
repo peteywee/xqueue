@@ -16,10 +16,15 @@ import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import {
   evaluateProductionMutationPreflight,
   MAX_PRODUCTION_INTAKE_ITEMS,
+  publicationAuthorityMismatch,
   runProductionIntakeMutation,
+  validPublicationAuthorityEvidence,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
-import { assertAuthenticatedOwnerApprovalForCandidate } from '../../src/authoring/owner-approval.mjs';
+import {
+  assertAuthenticatedOwnerApprovalForCandidate,
+  ownerPublicKeyFingerprint,
+} from '../../src/authoring/owner-approval.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -182,6 +187,15 @@ function authorizeAutomatedInput({
       throw new Error(`item ${index + 1} automated intake requires explicit source_ref`);
     }
 
+    if (
+      (item.owner_approval != null || item.approved_candidate != null) &&
+      (ownerApproval != null || approvedCandidate != null)
+    ) {
+      throw new Error(
+        `item ${index + 1} carries approval evidence; do not also supply top-level ` +
+        'ownerApproval or approvedCandidate',
+      );
+    }
     const approval = item.owner_approval ?? (source.length === 1 ? ownerApproval : null);
     if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
       throw new Error(`item ${index + 1} requires signed owner_approval evidence`);
@@ -275,6 +289,25 @@ function hex(bytes) {
 
 async function sha256(value) {
   return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+}
+
+// The operator CLI sends a fresh random challenge to /identity before any
+// credential-bearing request. Only the Worker it launched holds the per-launch
+// MUTATION_CONTROL_TOKEN, so a valid proof shows the listener is that Worker
+// without disclosing the token, and binds the reported bindings to it.
+const IDENTITY_CHALLENGE_RE = /^[0-9a-f]{64}$/;
+
+export async function identityProof(token, challenge, bindings) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const message = 'xqueue-mutation-production-intake/identity\n' + challenge + '\n' +
+    JSON.stringify(bindings);
+  return hex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message)));
 }
 
 async function authenticated(request, env) {
@@ -388,12 +421,20 @@ function preDispatchRuntimeFault(before) {
   );
 }
 
+// The Worker's Cloudflare credential is MUTATION_D1_API_TOKEN, deliberately not
+// CLOUDFLARE_API_TOKEN: wrangler authenticates the ephemeral launch with
+// CLOUDFLARE_API_TOKEN, which needs Workers script edit rights. Keeping the
+// names apart means the launch credential is never bound into the mutation
+// plane, which holds only a D1 + Time Travel scoped token.
 async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
   try {
     const verified = await verifyAuth({
-      token: env?.CLOUDFLARE_API_TOKEN,
+      // Never undefined: verifyCloudflareApiToken would default to
+      // process.env.CLOUDFLARE_API_TOKEN, the launch credential.
+      token: env?.MUTATION_D1_API_TOKEN ?? '',
       accountId: env?.CLOUDFLARE_ACCOUNT_ID,
       fetchImpl,
+      label: 'MUTATION_D1_API_TOKEN',
     });
     return Object.freeze({
       ok: true,
@@ -419,7 +460,7 @@ function productionTransport(env, db, createTransport, fetchImpl) {
     fetchImpl,
     accountId: env?.CLOUDFLARE_ACCOUNT_ID,
     databaseId: env?.XQUEUE_PRODUCTION_DATABASE_ID,
-    apiToken: env?.CLOUDFLARE_API_TOKEN,
+    apiToken: env?.MUTATION_D1_API_TOKEN,
   });
 }
 
@@ -430,6 +471,18 @@ async function loadReplayState(db, normalized, operation) {
       'IDEMPOTENCY_READBACK_CONFLICT',
       'existing mutation operation identity is missing',
       { httpStatus: 409, requiresReadback: true },
+    );
+  }
+  // Only an applied operation is resumable. This is decided from the row
+  // already read, before any further D1 read can fail and make a
+  // non-resumable operation look like a retryable outage. A never-dispatched
+  // operation ('none') never reached production, so it needs reconciliation
+  // but no production readback.
+  if (!['VERIFYING', 'COMPLETE'].includes(operation.state) || operation.effect_state !== 'applied') {
+    throw productionFault(
+      'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION',
+      'existing mutation operation is not in an exact recoverable applied state',
+      { httpStatus: 409, requiresReadback: operation.effect_state !== 'none' },
     );
   }
 
@@ -475,14 +528,10 @@ async function loadReplayState(db, normalized, operation) {
     }
   }
 
-  if (
-    !['VERIFYING', 'COMPLETE'].includes(operation.state) ||
-    operation.effect_state !== 'applied' ||
-    !runtimeRevision
-  ) {
+  if (!runtimeRevision) {
     throw productionFault(
       'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION',
-      'existing mutation operation is not in an exact recoverable applied state',
+      'existing applied mutation operation has no committed runtime revision',
       { httpStatus: 409, requiresReadback: true },
     );
   }
@@ -658,6 +707,133 @@ function json(value, init = {}) {
   return new Response(JSON.stringify(value, null, 2), { ...init, headers });
 }
 
+// The operation identity the CLI checks against its offline plan, built once
+// for both the fresh and the replay paths.
+function plannedIdentity(operationId, intakePlan) {
+  return Object.freeze({
+    operationId,
+    intakeOperationId: intakePlan.operation_id,
+    itemCount: intakePlan.items.length,
+    contentIds: Object.freeze(intakePlan.items.map((item) => item.content_id)),
+    contentDigests: Object.freeze(intakePlan.items.map((item) => item.content_digest)),
+  });
+}
+
+function committedEvidence(verified) {
+  return {
+    committedRuntimeRevision: Object.freeze({
+      generation: Number(verified.committedRuntime.generation),
+      revisionDigest: verified.committedRuntime.revision_digest,
+      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
+      sourceOperationId: verified.committedRuntime.source_operation_id,
+    }),
+    after: Object.freeze({
+      generation: verified.after.generation,
+      revisionDigest: verified.after.revisionDigest,
+    }),
+  };
+}
+
+// Replays an operation that already exists. Only an applied operation is
+// resumable, and that is checked first. Every stop is raised as a fault; the
+// caller turns each into readback when the operation is past dispatch.
+async function replayExistingOperation({
+  env,
+  db,
+  transport,
+  trustedAuth,
+  candidate,
+  expectedPublicationAuthority,
+  normalized,
+  operationId,
+  existingOperation,
+  recordedAt,
+  verifyRuntime,
+  resumeMutation,
+}) {
+  // Read-only. A non-resumable operation stops here, before any safety read or
+  // preflight could advertise it as retryable or fixable.
+  const replay = await loadReplayState(db, normalized, existingOperation);
+
+  let replaySafety;
+  try {
+    replaySafety = await transport.readPublicationSafety();
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+
+  const replayPreflight = evaluateProductionMutationPreflight({
+    environment: 'production',
+    auth: trustedAuth,
+    candidate,
+    safety: replaySafety,
+  });
+  if (!replayPreflight.ok) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_CONFLICT',
+      'production replay preflight blocked: ' +
+        replayPreflight.blockers.map((item) => item.id).join(','),
+      { httpStatus: 409 },
+    );
+  }
+
+  const replayAuthorityMismatch = publicationAuthorityMismatch(
+    replayPreflight.observed.publicationAuthority,
+    expectedPublicationAuthority,
+  );
+  if (replayAuthorityMismatch) {
+    throw productionFault(
+      'PRE_DISPATCH_REPLAN_REQUIRED',
+      replayAuthorityMismatch,
+      { httpStatus: 409, retryable: true },
+    );
+  }
+
+  const mutation = await resumeMutation({
+    intakePlan: replay.intakePlan,
+    controlPlan: replay.controlPlan,
+    runtimeRevision: replay.runtimeRevision,
+    transport,
+    recordedAt,
+  });
+
+  if (!['applied', 'already_applied'].includes(mutation?.status)) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'production applied-operation resume did not produce exact completion (status ' +
+        String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
+        String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
+
+  const verified = await verifyCommittedResult({
+    db,
+    verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
+    mutation,
+    controlPlan: replay.controlPlan,
+    runtimeRevision: replay.runtimeRevision,
+  });
+
+  return Object.freeze({
+    ok: true,
+    replay: true,
+    publicationCapable: false,
+    schedulerAuthority: false,
+    productionPreflight: replayPreflight,
+    recoveryCheckpointCaptured:
+      typeof existingOperation.checkpoint_bookmark === 'string' &&
+      existingOperation.checkpoint_bookmark.length >= 8,
+    planned: plannedIdentity(operationId, replay.intakePlan),
+    mutation,
+    ...committedEvidence(verified),
+  });
+}
+
 // Pure request authorization and identity: no D1, network, or clock. The
 // Worker and the operator CLI share it so observe mode reports the same
 // operation identity that apply will claim.
@@ -779,6 +955,15 @@ export async function runProductionIntakeRequest(
       { httpStatus: 400 },
     );
   }
+  const expectedPublicationAuthority = payload?.expectedPublicationAuthority;
+  if (!validPublicationAuthorityEvidence(expectedPublicationAuthority)) {
+    throw productionFault(
+      'INVALID_PUBLICATION_AUTHORITY_EVIDENCE',
+      'production intake requires the operator-verified publication authority ' +
+        '(generation, candidate_sha, deployment_id)',
+      { httpStatus: 400 },
+    );
+  }
   const { normalized, operationId } = authorizeProductionIntakeInput(payload, {
     ownerPublicKeyPem: env?.OWNER_APPROVAL_PUBLIC_KEY_PEM,
     verifyOwnerApproval,
@@ -802,130 +987,35 @@ export async function runProductionIntakeRequest(
   }
 
   if (existingOperation) {
-    let replaySafety;
+    // The runner's own rule (and the re-plan trigger's): any effect state but
+    // 'none' is past dispatch, and an unknown state fails closed. Past
+    // dispatch, every way the replay can stop requires readback, so the rule is
+    // applied once here rather than at each step.
+    const pastDispatch = existingOperation.effect_state !== 'none';
     try {
-      replaySafety = await transport.readPublicationSafety();
-    } catch (error) {
-      throw productionFault(
-        'PRE_DISPATCH_STATE_UNAVAILABLE',
-        error instanceof Error ? error.message : String(error),
-        { httpStatus: 503, retryable: true },
-      );
-    }
-
-    const replayPreflight = evaluateProductionMutationPreflight({
-      environment: 'production',
-      auth: trustedAuth,
-      candidate,
-      safety: replaySafety,
-    });
-    if (!replayPreflight.ok) {
-      throw productionFault(
-        'PRE_DISPATCH_STATE_CONFLICT',
-        'production replay preflight blocked: ' +
-          replayPreflight.blockers.map((item) => item.id).join(','),
-        { httpStatus: 409 },
-      );
-    }
-
-    const appliedReplay = existingOperation.effect_state === 'applied';
-    let replay;
-    try {
-      replay = await loadReplayState(db, normalized, existingOperation);
-    } catch (error) {
-      if (appliedReplay) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production replay state readback failed: ' +
-            (error instanceof Error ? error.message : String(error)),
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw error;
-    }
-
-    let mutation;
-    try {
-      mutation = await resumeMutation({
-        intakePlan: replay.intakePlan,
-        controlPlan: replay.controlPlan,
-        runtimeRevision: replay.runtimeRevision,
+      return await replayExistingOperation({
+        env,
+        db,
         transport,
+        trustedAuth,
+        candidate,
+        expectedPublicationAuthority,
+        normalized,
+        operationId,
+        existingOperation,
         recordedAt,
+        verifyRuntime,
+        resumeMutation,
       });
     } catch (error) {
-      if (appliedReplay) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production applied-operation resume readback failed: ' +
-            (error instanceof Error ? error.message : String(error)),
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      throw error;
+      if (!pastDispatch || error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS') throw error;
+      throw productionFault(
+        'POST_DISPATCH_READBACK_AMBIGUOUS',
+        'replay of ' + existingOperation.effect_state + ' operation stopped: ' +
+          (error instanceof Error ? error.message : String(error)),
+        { httpStatus: 409, requiresReadback: true },
+      );
     }
-
-    if (!['applied', 'already_applied'].includes(mutation?.status)) {
-      if (appliedReplay) {
-        throw productionFault(
-          'POST_DISPATCH_READBACK_AMBIGUOUS',
-          'production applied-operation resume did not produce exact completion',
-          { httpStatus: 409, requiresReadback: true },
-        );
-      }
-      return Object.freeze({
-        ok: false,
-        publicationCapable: false,
-        schedulerAuthority: false,
-        replay: true,
-        productionPreflight: replayPreflight,
-        planned: Object.freeze({
-          operationId,
-          intakeOperationId: replay.intakePlan.operation_id,
-          itemCount: replay.intakePlan.items.length,
-          contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
-          contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
-        }),
-        mutation,
-      });
-    }
-
-    const verified = await verifyCommittedResult({
-      db,
-      verifyRuntime: async (_unused, options) => verifyRuntime(env, options),
-      mutation,
-      controlPlan: replay.controlPlan,
-      runtimeRevision: replay.runtimeRevision,
-    });
-
-    return Object.freeze({
-      ok: true,
-      replay: true,
-      publicationCapable: false,
-      schedulerAuthority: false,
-      productionPreflight: replayPreflight,
-      recoveryCheckpointCaptured:
-        typeof existingOperation.checkpoint_bookmark === 'string' &&
-        existingOperation.checkpoint_bookmark.length >= 8,
-      planned: Object.freeze({
-        operationId,
-        intakeOperationId: replay.intakePlan.operation_id,
-        itemCount: replay.intakePlan.items.length,
-        contentIds: Object.freeze(replay.intakePlan.items.map((item) => item.content_id)),
-        contentDigests: Object.freeze(replay.intakePlan.items.map((item) => item.content_digest)),
-      }),
-      mutation,
-      committedRuntimeRevision: Object.freeze({
-        generation: Number(verified.committedRuntime.generation),
-        revisionDigest: verified.committedRuntime.revision_digest,
-        previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
-        sourceOperationId: verified.committedRuntime.source_operation_id,
-      }),
-      after: Object.freeze({
-        generation: verified.after.generation,
-        revisionDigest: verified.after.revisionDigest,
-      }),
-    });
   }
 
   let before;
@@ -1054,24 +1144,32 @@ export async function runProductionIntakeRequest(
     );
   }
 
-  const mutation = await runMutation({
-    environment: 'production',
-    auth: trustedAuth,
-    candidate,
-    transport,
-    intakePlan,
-    controlPlan,
-    runtimeRevision,
-    recordedAt,
-  });
+  // The guarded runner reports every known outcome as a result. An exception
+  // means an unexpected failure at an unknown point, possibly after the
+  // atomic apply committed, so it always requires readback.
+  let mutation;
+  try {
+    mutation = await runMutation({
+      environment: 'production',
+      auth: trustedAuth,
+      candidate,
+      transport,
+      expectedPublicationAuthority,
+      intakePlan,
+      controlPlan,
+      runtimeRevision,
+      recordedAt,
+    });
+  } catch (error) {
+    throw productionFault(
+      'POST_DISPATCH_READBACK_AMBIGUOUS',
+      'guarded mutation runner failed unexpectedly: ' +
+        (error instanceof Error ? error.message : String(error)),
+      { httpStatus: 409, requiresReadback: true },
+    );
+  }
 
-  const planned = Object.freeze({
-    operationId: controlPlan.operation_id,
-    intakeOperationId: intakePlan.operation_id,
-    itemCount: intakePlan.items.length,
-    contentIds: Object.freeze(intakePlan.items.map((item) => item.content_id)),
-    contentDigests: Object.freeze(intakePlan.items.map((item) => item.content_digest)),
-  });
+  const planned = plannedIdentity(controlPlan.operation_id, intakePlan);
 
   if (!['applied', 'already_applied'].includes(mutation?.status)) {
     return Object.freeze({
@@ -1101,21 +1199,64 @@ export async function runProductionIntakeRequest(
     planned,
     mutation,
     productionPreflight: mutation.production_preflight ?? null,
-    committedRuntimeRevision: Object.freeze({
-      generation: Number(verified.committedRuntime.generation),
-      revisionDigest: verified.committedRuntime.revision_digest,
-      previousRevisionDigest: verified.committedRuntime.previous_revision_digest,
-      sourceOperationId: verified.committedRuntime.source_operation_id,
-    }),
+    ...committedEvidence(verified),
     before: Object.freeze({
       generation: before.generation,
       revisionDigest: before.revisionDigest,
     }),
-    after: Object.freeze({
-      generation: verified.after.generation,
-      revisionDigest: verified.after.revisionDigest,
+  });
+}
+
+// The values wrangler actually bound, so the operator CLI can prove they equal
+// the committed descriptor before it sends any credential-bearing request.
+// wrangler dev lets same-named process.env or .env entries override vars.
+function boundTrustRoot(env) {
+  let ownerApprovalKeyFingerprint = null;
+  try {
+    if (typeof env?.OWNER_APPROVAL_PUBLIC_KEY_PEM === 'string') {
+      ownerApprovalKeyFingerprint = ownerPublicKeyFingerprint(env.OWNER_APPROVAL_PUBLIC_KEY_PEM);
+    }
+  } catch {
+    ownerApprovalKeyFingerprint = null;
+  }
+  return Object.freeze({
+    accountId: typeof env?.CLOUDFLARE_ACCOUNT_ID === 'string' ? env.CLOUDFLARE_ACCOUNT_ID : null,
+    productionDatabaseId:
+      typeof env?.XQUEUE_PRODUCTION_DATABASE_ID === 'string' ? env.XQUEUE_PRODUCTION_DATABASE_ID : null,
+    ownerApprovalKeyFingerprint,
+    // Names only, never values, so the operator can refuse a Worker that bound
+    // anything beyond its descriptor (for example X credentials).
+    bindingNames: Object.freeze(Object.keys(env ?? {}).sort()),
+    // Presence only, never values: a wrangler switch in the operator shell can
+    // stop secrets from loading while the vars still look correct.
+    secretsBound: Object.freeze({
+      MUTATION_D1_API_TOKEN:
+        typeof env?.MUTATION_D1_API_TOKEN === 'string' && env.MUTATION_D1_API_TOKEN.length > 0,
+      MUTATION_CONTROL_TOKEN:
+        typeof env?.MUTATION_CONTROL_TOKEN === 'string' && env.MUTATION_CONTROL_TOKEN.length > 0,
     }),
   });
+}
+
+const WORKER_IDENTITY = Object.freeze({
+  service: 'xqueue-mutation-production-intake',
+  role: 'production-mutation-intake',
+  environment: 'production',
+  publicationCapable: false,
+  schedulerAuthority: false,
+});
+
+// Refusals carry the Worker identity so the operator can tell a definitive
+// Worker answer, which never reached D1, from a failure outside the Worker.
+function refusal(httpStatus, faultClass) {
+  return json({
+    ...WORKER_IDENTITY,
+    status: 'error',
+    faultClass,
+    retryable: false,
+    requiresReadback: false,
+    error: faultClass.toLowerCase(),
+  }, { status: httpStatus });
 }
 
 export function createMutationProductionIntakeWorker(dependencies = {}) {
@@ -1124,22 +1265,33 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       const url = new URL(request.url);
 
       if (url.pathname === '/health') {
+        // Readiness only. Bindings are reported by /identity, bound to a proof
+        // that the responder holds this launch's control token.
+        return json({ ...WORKER_IDENTITY, status: 'ok' });
+      }
+
+      if (url.pathname === '/identity') {
+        if (request.method !== 'GET') return refusal(405, 'METHOD_NOT_ALLOWED');
+        const challenge = url.searchParams.get('challenge') ?? '';
+        if (!IDENTITY_CHALLENGE_RE.test(challenge)) return refusal(400, 'INVALID_CHALLENGE');
+        let token;
+        try {
+          token = requiredSecret(env?.MUTATION_CONTROL_TOKEN, 'MUTATION_CONTROL_TOKEN');
+        } catch {
+          return refusal(503, 'CONTROL_TOKEN_UNAVAILABLE');
+        }
+        const bindings = boundTrustRoot(env);
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'ok',
+          challenge,
+          bindings,
+          challengeResponse: await identityProof(token, challenge, bindings),
         });
       }
 
-      if (url.pathname !== '/production-intake') {
-        return json({ error: 'not_found' }, { status: 404 });
-      }
-      if (request.method !== 'POST') {
-        return json({ error: 'method_not_allowed' }, { status: 405 });
-      }
+      if (url.pathname !== '/production-intake') return refusal(404, 'NOT_FOUND');
+      if (request.method !== 'POST') return refusal(405, 'METHOD_NOT_ALLOWED');
 
       let isAuthenticated = false;
       try {
@@ -1147,16 +1299,14 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       } catch {
         isAuthenticated = false;
       }
-      if (!isAuthenticated) {
-        return json({ error: 'unauthorized' }, { status: 401 });
-      }
+      if (!isAuthenticated) return refusal(401, 'UNAUTHORIZED');
 
       let payload;
       try {
         payload = await request.json();
       } catch {
         return json({
-          service: 'xqueue-mutation-production-intake',
+          ...WORKER_IDENTITY,
           status: 'error',
           faultClass: 'INVALID_JSON',
           retryable: false,
@@ -1194,12 +1344,14 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
               ) ||
               retryableRunnerRead
             );
+          // An authority change since operator verification needs a fresh
+          // preflight and is retryable on every path, fresh or replay.
+          const replanRequired =
+            !postDispatch &&
+            result.mutation?.fault_class === 'PRE_DISPATCH_REPLAN_REQUIRED' &&
+            result.mutation?.retryable === true;
           return json({
-            service: 'xqueue-mutation-production-intake',
-            role: 'production-mutation-intake',
-            environment: 'production',
-            publicationCapable: false,
-            schedulerAuthority: false,
+            ...WORKER_IDENTITY,
             status: 'blocked',
             faultClass: postDispatch
               ? 'POST_DISPATCH_RECONCILIATION_REQUIRED'
@@ -1210,6 +1362,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
                 ),
             retryable:
               transientPreDispatch ||
+              replanRequired ||
               (!postDispatch && result.mutation?.decision?.outcome === 'AUTO_RETRY'),
             requiresReadback: postDispatch,
             ...result,
@@ -1217,11 +1370,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
         }
 
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'ok',
           retryable: false,
           requiresReadback: false,
@@ -1230,11 +1379,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
       } catch (error) {
         const fault = faultDescriptor(error);
         return json({
-          service: 'xqueue-mutation-production-intake',
-          role: 'production-mutation-intake',
-          environment: 'production',
-          publicationCapable: false,
-          schedulerAuthority: false,
+          ...WORKER_IDENTITY,
           status: 'error',
           faultClass: fault.faultClass,
           retryable: fault.retryable,

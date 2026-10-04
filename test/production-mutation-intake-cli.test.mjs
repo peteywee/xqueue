@@ -7,6 +7,8 @@ import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-produ
 import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
+  REQUIRED_MUTATION_TRIGGERS,
+  REQUIRED_MUTATION_TRIGGER_SQL,
   MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   SAFETY_SQL,
   assertMutationSchema,
@@ -16,9 +18,14 @@ import {
   planIntakeIdentity,
   evaluateOperatorReadiness,
   main,
+  writeAllSync,
   parseArgs,
   parseSafetyPayload,
 } from '../scripts/production-mutation-intake.mjs';
+
+// main() also proves the Worker's own D1 credential; these tests cover the rest
+// of readiness, so that step reports ready unless a test says otherwise.
+const READY_D1 = async () => ({ ok: true, blockers: [] });
 
 function auth(overrides = {}) {
   return {
@@ -93,15 +100,17 @@ test('production operator CLI requires explicit environment and apply confirmati
   assert.equal(parsed.ownerApprovalFile, null);
   assert.equal(parsed.apply, true);
 
-  assert.throws(
-    () => parseArgs([
+  // Evidence may be embedded in the item; the shared authorization step (run
+  // offline before anything launches) requires it from exactly one source.
+  assert.equal(
+    parseArgs([
       '--environment', 'production',
       '--file', 'item.json',
       '--automated',
       '--apply',
       '--confirm', PRODUCTION_INTAKE_CONFIRM,
-    ]),
-    /requires --approval-file/,
+    ]).ownerApprovalFile,
+    null,
   );
 
   const signed = parseArgs([
@@ -166,8 +175,23 @@ test('operator readiness consumes the existing production preflight and mutation
     migrations: REQUIRED_MUTATION_MIGRATIONS,
     safety: safety(),
     publisherMutex: { ok: true, reason: 'publisher_mutex_compatible' },
+    d1Token: { ok: true, blockers: [] },
   });
   assert.equal(ready.ok, true);
+
+  // Readiness never treats an unproven Worker credential as a pass.
+  for (const d1Token of [undefined, null, {}, { ok: false }, { ok: false, blockers: 'x' }]) {
+    const unproven = evaluateOperatorReadiness({
+      auth: auth(),
+      candidate: candidate(),
+      migrations: REQUIRED_MUTATION_MIGRATIONS,
+      safety: safety(),
+      publisherMutex: { ok: true, reason: 'publisher_mutex_compatible' },
+      d1Token,
+    });
+    assert.equal(unproven.ok, false, JSON.stringify(d1Token));
+    assert.ok(unproven.blockers.some((item) => item.id === 'mutation_d1_token_unverified'));
+  }
 
   const blocked = evaluateOperatorReadiness({
     auth: auth(),
@@ -251,12 +275,15 @@ test('apply refuses before launching the Worker when the publisher predates the 
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -289,6 +316,7 @@ test('apply refuses before launching the Worker when the publisher predates the 
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: (sha) => {
         checkedSha = sha;
@@ -322,12 +350,15 @@ function readyRun() {
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -367,6 +398,7 @@ test('invalid intake input blocks apply offline before the Worker is launched', 
     ],
     {
       run: readyRun(),
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async () => {
@@ -415,6 +447,7 @@ test('automated intake whose fields differ from the signed candidate is blocked 
     ],
     {
       run: readyRun(),
+      d1TokenReadiness: READY_D1,
       readJson: (path) => files.get(path),
       ownerPublicKeyPem: 'test-owner-public-key',
       verifyOwnerApproval: () => true,
@@ -442,6 +475,7 @@ test('a Worker identity that contradicts the offline plan requires readback, not
       ],
       {
         run: readyRun(),
+        d1TokenReadiness: READY_D1,
         readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
         checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
         invokeWorker: async () => ({
@@ -458,6 +492,9 @@ test('a Worker identity that contradicts the offline plan requires readback, not
     (error) => {
       assert.match(error.message, /contradicts the offline plan/);
       assert.equal(error.response.requiresReadback, true);
+      // Readback needs the planned identity, so the failure carries it.
+      assert.match(error.planned.operationId, /^mutation-intake-[0-9a-f]{24}$/);
+      assert.notEqual(error.planned.operationId, 'mutation-intake-' + 'f'.repeat(24));
       return true;
     },
   );
@@ -490,12 +527,15 @@ test('observe mode never invokes the mutation Worker', async () => {
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') {
       return JSON.stringify(auth());
     }
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -518,6 +558,7 @@ test('observe mode never invokes the mutation Worker', async () => {
     ['--environment', 'production', '--file', 'item.json'],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async () => {
@@ -550,10 +591,13 @@ test('automated single-item apply passes signed approval evidence, never a diges
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -631,6 +675,7 @@ test('automated single-item apply passes signed approval evidence, never a diges
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: (path) => files.get(path),
       ownerPublicKeyPem,
       verifyOwnerApproval,
@@ -676,10 +721,13 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     if (key === 'git status --porcelain --untracked-files=all') return '';
     if (key === 'git fetch origin main') return '';
     if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
-    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse FETCH_HEAD') return 'a'.repeat(40) + '\n';
     if (key === 'pnpm cf:auth:preflight --environment production') return JSON.stringify(auth());
     if (key.includes('SELECT name FROM d1_migrations')) {
-      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+      return JSON.stringify([
+        { results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) },
+        { results: REQUIRED_MUTATION_TRIGGERS.map((name) => ({ name, sql: REQUIRED_MUTATION_TRIGGER_SQL[name] })) },
+      ]);
     }
     if (key.includes('SELECT owner,generation,transition_state')) {
       return JSON.stringify([
@@ -698,6 +746,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   };
 
   let call;
+  const stderrWrites = [];
   const result = await main(
     [
       '--environment', 'production',
@@ -707,8 +756,10 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     ],
     {
       run,
+      d1TokenReadiness: READY_D1,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
       checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
+      writeStderr: (text) => stderrWrites.push(text),
       invokeWorker: async (args) => {
         call = args;
         const planned = planIntakeIdentity(args.payload);
@@ -730,4 +781,67 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   assert.equal(call.candidate.headSha, 'a'.repeat(40));
   assert.equal(call.payload.mode, 'single');
   assert.equal(call.payload.sourceMode, 'owner-manual');
+
+  // An interruption after dispatch tells the operator to read back, with the
+  // planned identity that readback needs.
+  call.onInterruptedAfterDispatch('SIGTERM');
+  // The readback line and operation id lead, in one short write.
+  assert.equal(stderrWrites.length, 2);
+  assert.match(stderrWrites[0], /^readback_required=1$/m);
+  assert.ok(stderrWrites[0].includes('operation_id=' + result.planned.operationId));
+  assert.ok(Buffer.byteLength(stderrWrites[0]) < 4096, 'atomic on a pipe');
+  const printed = stderrWrites.join('');
+  assert.match(printed, /INTERRUPTED AFTER DISPATCH \(SIGTERM\)/);
+  assert.match(printed, /^readback_required=1$/m);
+  assert.ok(printed.includes(result.planned.operationId), 'planned operation id is printed');
+
+  // With a definitive answer in hand, the answer is reported and readback is
+  // asked for only when the answer needs it.
+  const report = (answer) => {
+    stderrWrites.length = 0;
+    call.onInterruptedAfterDispatch('SIGINT', answer);
+    assert.equal(stderrWrites.length, 2);
+    return stderrWrites.join('');
+  };
+  const matching = { operationId: result.planned.operationId, contentIds: result.planned.contentIds, contentDigests: result.planned.contentDigests };
+  const clean = report({ httpStatus: 200, ok: true, body: { status: 'ok', requiresReadback: false, planned: matching } });
+  assert.match(clean, /INTERRUPTED DURING TEARDOWN \(SIGINT\); the Worker answered HTTP 200/);
+  assert.doesNotMatch(clean, /readback_required/);
+  assert.match(clean, /"response"/);
+  assert.match(clean, /operation_id=/);
+  assert.match(
+    report({ httpStatus: 409, ok: false, body: { status: 'blocked', requiresReadback: true } }),
+    /^readback_required=1$/m,
+  );
+  assert.match(
+    report({ httpStatus: 200, ok: true, body: { status: 'ok', planned: { ...matching, operationId: 'mutation-intake-' + 'f'.repeat(24) } } }),
+    /^readback_required=1$/m,
+  );
+  assert.doesNotMatch(
+    report({ httpStatus: 409, ok: false, body: { status: 'error', requiresReadback: false, faultClass: 'PRE_DISPATCH_STATE_CONFLICT' } }),
+    /readback_required/,
+  );
+});
+
+test('the interrupt report writes every byte through partial writes and EAGAIN', () => {
+  const chunks = [];
+  let calls = 0;
+  const write = (fd, buffer, offset, length) => {
+    calls += 1;
+    if (calls === 2) throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' });
+    const n = Math.min(length, 5);
+    chunks.push(buffer.subarray(offset, offset + n).toString('utf8'));
+    return n;
+  };
+  const text = 'readback_required=1\noperation_id=x\n';
+  assert.equal(writeAllSync(2, text, { write }), Buffer.byteLength(text));
+  assert.equal(chunks.join(''), text);
+  assert.throws(
+    () => writeAllSync(2, 'x', { write: () => { throw Object.assign(new Error('EPIPE'), { code: 'EPIPE' }); } }),
+    /EPIPE/,
+  );
+  assert.throws(
+    () => writeAllSync(2, 'x', { waitMs: 20, write: () => { throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }); } }),
+    /EAGAIN/,
+  );
 });
