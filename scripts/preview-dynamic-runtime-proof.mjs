@@ -3,11 +3,13 @@
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { MEDIA_MANIFEST } from '../cloudflare/generated/media-manifest.mjs';
 import {
@@ -22,8 +24,22 @@ import {
   renderMediaInsertSql,
   renderRuntimeRevisionInsertSql,
 } from '../src/continuous-queue-runtime-write.mjs';
+import {
+  assertPreviewMigrationLane,
+  assertPreviewRevisionChain,
+  PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS,
+  PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
+  PREVIEW_REVISION_HISTORY_SQL,
+  PREVIEW_REVISION_SOURCE_OPERATIONS_SQL,
+} from '../src/preview-runtime-proof-checks.mjs';
 
 const PREVIEW_DB = 'xqueue-preview';
+const PREVIEW_MIGRATIONS_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'cloudflare',
+  'migrations',
+);
 const PREVIEW_CONFIG = 'wrangler.preview.jsonc';
 const PROOF_URL =
   process.env.XQUEUE_PREVIEW_PROOF_URL ??
@@ -199,15 +215,6 @@ function readRuntimeState() {
   return query(RUNTIME_STATE_SQL)[0] ?? null;
 }
 
-function readRevisionHead() {
-  return query(
-    'SELECT generation,revision_digest,active_assignment_count,' +
-    'approved_unscheduled_count,media_required_count,media_ready_count,' +
-    'previous_revision_digest,source_operation_id,created_at ' +
-    'FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 2;',
-  );
-}
-
 async function verifyR2Bytes(mediaRows) {
   let response;
   try {
@@ -306,22 +313,10 @@ async function verifyR2Bytes(mediaRows) {
 
 async function main() {
   const migrations = query('SELECT id,name,applied_at FROM d1_migrations ORDER BY id;');
-  const names = migrations.map((row) => row.name);
-  const expectedTail = [
-    '0006_continuous_queue_shadow.sql',
-    '0007_continuous_queue_intake.sql',
-    '0008_dynamic_runtime_integrity.sql',
-    '0009_deferred_lifecycle.sql',
-    '0010_publication_fence_identity.sql',
-    '0011_global_publication_halt.sql',
-    '0012_reconciliation_determinations.sql',
-  ];
-
-  if (JSON.stringify(names.slice(-7)) !== JSON.stringify(expectedTail)) {
-    throw new Error(
-      `preview migration tail is not exact 0006-0012: ${JSON.stringify(names)}`,
-    );
-  }
+  const names = assertPreviewMigrationLane(
+    migrations.map((row) => row.name),
+    readdirSync(PREVIEW_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql')).sort(),
+  );
 
   const reconciliationSchema = query(
     "SELECT name FROM sqlite_master WHERE type='table' " +
@@ -369,11 +364,6 @@ async function main() {
   assertMediaReadback(mediaExpected, mediaActual);
 
   const computed = await snapshot();
-  if (computed.active_assignment_count !== 180) {
-    throw new Error(
-      `preview dynamic runtime expected 180 active assignments, got ${computed.active_assignment_count}`,
-    );
-  }
   if (
     computed.media_required_count !== 4 ||
     computed.media_ready_count !== 4
@@ -387,6 +377,11 @@ async function main() {
   let revisionAction = 'already_complete';
 
   if (!state) {
+    if (computed.active_assignment_count !== PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS) {
+      throw new Error(
+        `preview dynamic runtime bootstrap expected ${PREVIEW_BOOTSTRAP_ACTIVE_ASSIGNMENTS} active assignments, got ${computed.active_assignment_count}`,
+      );
+    }
     const revision = nextRuntimeRevision({
       currentState: null,
       snapshot: computed,
@@ -401,7 +396,6 @@ async function main() {
 
   if (
     !state ||
-    Number(state.generation) !== 1 ||
     state.revision_digest !== computed.revision_digest ||
     Number(state.active_assignment_count) !== computed.active_assignment_count ||
     Number(state.approved_unscheduled_count) !== computed.approved_unscheduled_count ||
@@ -411,15 +405,12 @@ async function main() {
     throw new Error('preview runtime revision state does not match recomputed durable truth');
   }
 
-  const head = readRevisionHead();
-  if (
-    head.length !== 1 ||
-    Number(head[0].generation) !== 1 ||
-    head[0].revision_digest !== state.revision_digest ||
-    head[0].previous_revision_digest !== null
-  ) {
-    throw new Error('preview runtime revision history is not exact generation 1');
-  }
+  const revisions = query(PREVIEW_REVISION_HISTORY_SQL);
+  const revisionChain = assertPreviewRevisionChain({
+    revisions,
+    operations: revisions.length > 1 ? query(PREVIEW_REVISION_SOURCE_OPERATIONS_SQL) : [],
+    state,
+  });
 
   const r2 = await verifyR2Bytes(mediaActual);
 
@@ -429,7 +420,9 @@ async function main() {
     database: PREVIEW_DB,
     config: PREVIEW_CONFIG,
     mainCandidate: process.env.GITHUB_SHA ?? null,
-    migrationTail: expectedTail,
+    migrations: names,
+    migrationTail: PREVIEW_DYNAMIC_RUNTIME_MIGRATIONS,
+    revisionChain,
     publicationHalt: {
       halted: Number(halt.halted) === 1,
       generation: Number(halt.generation),
@@ -469,6 +462,7 @@ async function main() {
   console.log('XQUEUE PREVIEW DYNAMIC RUNTIME PROOF: PASS');
   console.log(`  revision generation  ${state.generation}`);
   console.log(`  revision digest      ${state.revision_digest}`);
+  console.log(`  mutation revisions   ${revisionChain.mutationRevisions}`);
   console.log(`  active assignments   ${state.active_assignment_count}`);
   console.log(`  media ready           ${state.media_ready_count}/${state.media_required_count}`);
   console.log(`  media action          ${mediaAction}`);

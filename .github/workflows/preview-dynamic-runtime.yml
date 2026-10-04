@@ -35,6 +35,8 @@ on:
       - 'src/continuous-queue-intake.mjs'
       - 'scripts/continuous-queue-intake.mjs'
       - 'scripts/preview-dynamic-runtime-proof.mjs'
+      - 'src/preview-runtime-proof-checks.mjs'
+      - 'test/preview-runtime-proof-checks.test.mjs'
       - 'test/dynamic-runtime-integrity.test.mjs'
       - 'test/deferred-lifecycle.test.mjs'
       - 'package.json'
