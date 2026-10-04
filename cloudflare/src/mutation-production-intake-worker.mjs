@@ -19,7 +19,10 @@ import {
   runProductionIntakeMutation,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
-import { assertAuthenticatedOwnerApprovalForCandidate } from '../../src/authoring/owner-approval.mjs';
+import {
+  assertAuthenticatedOwnerApprovalForCandidate,
+  ownerPublicKeyFingerprint,
+} from '../../src/authoring/owner-approval.mjs';
 import { verifyDynamicRuntime } from './dynamic-runtime-integrity.mjs';
 
 const FRONTIER_SQL = `
@@ -182,6 +185,15 @@ function authorizeAutomatedInput({
       throw new Error(`item ${index + 1} automated intake requires explicit source_ref`);
     }
 
+    if (
+      (item.owner_approval != null || item.approved_candidate != null) &&
+      (ownerApproval != null || approvedCandidate != null)
+    ) {
+      throw new Error(
+        `item ${index + 1} carries approval evidence; do not also supply top-level ` +
+        'ownerApproval or approvedCandidate',
+      );
+    }
     const approval = item.owner_approval ?? (source.length === 1 ? ownerApproval : null);
     if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
       throw new Error(`item ${index + 1} requires signed owner_approval evidence`);
@@ -388,10 +400,15 @@ function preDispatchRuntimeFault(before) {
   );
 }
 
+// The Worker's Cloudflare credential is MUTATION_D1_API_TOKEN, deliberately not
+// CLOUDFLARE_API_TOKEN: wrangler authenticates the ephemeral launch with
+// CLOUDFLARE_API_TOKEN, which needs Workers script edit rights. Keeping the
+// names apart means the launch credential is never bound into the mutation
+// plane, which holds only a D1 + Time Travel scoped token.
 async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
   try {
     const verified = await verifyAuth({
-      token: env?.CLOUDFLARE_API_TOKEN,
+      token: env?.MUTATION_D1_API_TOKEN,
       accountId: env?.CLOUDFLARE_ACCOUNT_ID,
       fetchImpl,
     });
@@ -419,7 +436,7 @@ function productionTransport(env, db, createTransport, fetchImpl) {
     fetchImpl,
     accountId: env?.CLOUDFLARE_ACCOUNT_ID,
     databaseId: env?.XQUEUE_PRODUCTION_DATABASE_ID,
-    apiToken: env?.CLOUDFLARE_API_TOKEN,
+    apiToken: env?.MUTATION_D1_API_TOKEN,
   });
 }
 
@@ -1118,6 +1135,26 @@ export async function runProductionIntakeRequest(
   });
 }
 
+// The values wrangler actually bound, so the operator CLI can prove they equal
+// the committed descriptor before it sends any credential-bearing request.
+// wrangler dev lets same-named process.env or .env entries override vars.
+function boundTrustRoot(env) {
+  let ownerApprovalKeyFingerprint = null;
+  try {
+    if (typeof env?.OWNER_APPROVAL_PUBLIC_KEY_PEM === 'string') {
+      ownerApprovalKeyFingerprint = ownerPublicKeyFingerprint(env.OWNER_APPROVAL_PUBLIC_KEY_PEM);
+    }
+  } catch {
+    ownerApprovalKeyFingerprint = null;
+  }
+  return Object.freeze({
+    accountId: typeof env?.CLOUDFLARE_ACCOUNT_ID === 'string' ? env.CLOUDFLARE_ACCOUNT_ID : null,
+    productionDatabaseId:
+      typeof env?.XQUEUE_PRODUCTION_DATABASE_ID === 'string' ? env.XQUEUE_PRODUCTION_DATABASE_ID : null,
+    ownerApprovalKeyFingerprint,
+  });
+}
+
 export function createMutationProductionIntakeWorker(dependencies = {}) {
   return {
     async fetch(request, env) {
@@ -1131,6 +1168,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
           publicationCapable: false,
           schedulerAuthority: false,
           status: 'ok',
+          bindings: boundTrustRoot(env),
         });
       }
 

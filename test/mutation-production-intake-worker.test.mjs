@@ -30,7 +30,7 @@ function env(db = fakeDb()) {
     MUTATION_CONTROL_TOKEN: CONTROL_TOKEN,
     CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID,
     XQUEUE_PRODUCTION_DATABASE_ID: DB_ID,
-    CLOUDFLARE_API_TOKEN: CF_TOKEN,
+    MUTATION_D1_API_TOKEN: CF_TOKEN,
     OWNER_APPROVAL_PUBLIC_KEY_PEM: OWNER_PUBLIC_KEY_PEM,
   };
 }
@@ -1209,9 +1209,9 @@ test('production mutation worker config contains D1 only and no embedded secrets
   // only these keys, so unrelated .env/process.env values never reach the Worker.
   const parsed = JSON.parse(config);
   assert.deepEqual(parsed.secrets, {
-    required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
+    required: ['MUTATION_D1_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
   });
-  for (const name of ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
+  for (const name of ['MUTATION_D1_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
     assert.equal(Object.hasOwn(parsed.vars ?? {}, name), false, name);
   }
 });

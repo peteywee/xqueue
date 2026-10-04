@@ -93,15 +93,17 @@ test('production operator CLI requires explicit environment and apply confirmati
   assert.equal(parsed.ownerApprovalFile, null);
   assert.equal(parsed.apply, true);
 
-  assert.throws(
-    () => parseArgs([
+  // Evidence may be embedded in the item; the shared authorization step (run
+  // offline before anything launches) requires it from exactly one source.
+  assert.equal(
+    parseArgs([
       '--environment', 'production',
       '--file', 'item.json',
       '--automated',
       '--apply',
       '--confirm', PRODUCTION_INTAKE_CONFIRM,
-    ]),
-    /requires --approval-file/,
+    ]).ownerApprovalFile,
+    null,
   );
 
   const signed = parseArgs([

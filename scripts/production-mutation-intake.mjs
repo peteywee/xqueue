@@ -2,11 +2,13 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { connect } from 'node:net';
+import { dirname, join, resolve } from 'node:path';
 
 import { authorizeProductionIntakeInput } from '../cloudflare/src/mutation-production-intake-worker.mjs';
 import { evaluateProductionMutationPreflight } from '../src/mutation-production-preflight.mjs';
+import { ownerPublicKeyFingerprint } from '../src/authoring/owner-approval.mjs';
 
 export const PRODUCTION_INTAKE_CONFIRM = 'xqueue-production-intake';
 export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
@@ -15,13 +17,20 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
   '0017_publication_mutation_mutex.sql',
 ]);
 
-// Final #168 head. From here on, the publisher holds its lease across missed-slot
-// deferral and runtime promotion, and reports mutation-lane exclusion as a
-// lease block. An older deployed publisher can still defer without the lease
-// while an intake holds the mutation lane.
+// The #168 commit that completes the publisher's deferral mutex. From here on,
+// the publisher holds its lease across missed-slot deferral and runtime
+// promotion, and reports mutation-lane exclusion as a lease block. An older
+// deployed publisher can still defer without the lease while an intake holds
+// the mutation lane. Later #168 commits change no publisher code.
 export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = '35eb0eb6f0f278e846f2b28daf034ef2ea6e4fb7';
 
 const DEFAULT_PORT = 8789;
+export const MUTATION_WORKER_DESCRIPTOR = 'wrangler.mutation-production-intake.jsonc';
+export const MUTATION_WORKER_SERVICE = 'xqueue-mutation-production-intake';
+const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
+const HEALTH_DEADLINE_MS = 60_000;
+const INTAKE_REQUEST_TIMEOUT_MS = 120_000;
+const CHILD_OUTPUT_TAIL_BYTES = 4_096;
 
 export function checkPublisherMutexCompatibility(candidateSha, spawnImpl = spawnSync) {
   const sha = String(candidateSha ?? '').toLowerCase();
@@ -105,17 +114,6 @@ export function parseArgs(argv = []) {
   }
   if (Boolean(options.ownerApprovalFile) !== Boolean(options.approvedCandidateFile)) {
     fail('--approval-file and --approved-candidate-file must be supplied together');
-  }
-  if (
-    options.apply &&
-    options.sourceMode === 'automated' &&
-    options.mode === 'single' &&
-    !options.ownerApprovalFile
-  ) {
-    fail(
-      'automated single-item apply requires --approval-file <signed-approval.json> ' +
-      'and --approved-candidate-file <approved-candidate.json>',
-    );
   }
   if (options.apply && options.confirm !== PRODUCTION_INTAKE_CONFIRM) {
     fail('--apply requires --confirm ' + PRODUCTION_INTAKE_CONFIRM);
@@ -253,13 +251,23 @@ export function evaluateOperatorReadiness({
     });
   }
 
-  if (Number(safety?.mutationHalt?.halted) !== 0) {
+  if (!safety?.mutationHalt) {
+    blockers.push({
+      id: 'mutation_lane_halt_unreadable',
+      detail: 'The mutation lane halt state row is missing or unreadable.',
+    });
+  } else if (Number(safety.mutationHalt.halted) !== 0) {
     blockers.push({
       id: 'mutation_lane_halted',
       detail: 'The dedicated mutation lane is halted.',
     });
   }
-  if (safety?.mutationLane?.active_operation_id != null) {
+  if (!safety?.mutationLane) {
+    blockers.push({
+      id: 'mutation_lane_unreadable',
+      detail: 'The mutation lane state row is missing or unreadable.',
+    });
+  } else if (safety.mutationLane.active_operation_id != null) {
     blockers.push({
       id: 'mutation_lane_contended',
       detail: 'Another mutation operation owns the mutation lane.',
@@ -313,7 +321,32 @@ export function collectOperatorPreflight(
     run('pnpm', ['cf:auth:preflight', '--environment', 'production']),
   );
   const migrations = readMigrations(run);
-  assertMutationSchema(migrations);
+  const schemaActive = REQUIRED_MUTATION_MIGRATIONS.every((name) => migrations.includes(name));
+  if (!schemaActive) {
+    // The safety read needs the mutation tables, so report the schema blocker
+    // as structured evidence instead of querying tables that do not exist.
+    const readiness = evaluateOperatorReadiness({
+      auth,
+      candidate,
+      migrations,
+      safety: null,
+      publisherMutex: null,
+    });
+    return Object.freeze({
+      candidate,
+      auth,
+      migrations,
+      safety: null,
+      publisherMutex: null,
+      readiness: Object.freeze({
+        ok: false,
+        blockers: Object.freeze(
+          readiness.blockers.filter((item) => item.id === 'production_mutation_schema_not_active'),
+        ),
+        productionPreflight: null,
+      }),
+    });
+  }
   const safety = readSafety(run);
   const publisherMutex = checkPublisher(safety.authority?.candidate_sha);
   const readiness = evaluateOperatorReadiness({
@@ -330,23 +363,172 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
-async function waitForHealth(url, fetchImpl, child, timeoutMs = 20_000) {
-  const deadline = Date.now() + timeoutMs;
+export function readMutationWorkerDescriptor(path = MUTATION_WORKER_DESCRIPTOR) {
+  // The repository's wrangler descriptors use whole-line comments only; the
+  // credential-separation suite parses this file the same way.
+  return JSON.parse(readFileSync(resolve(path), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+}
+
+export function mutationWorkerOwnerPublicKey(path = MUTATION_WORKER_DESCRIPTOR) {
+  return readMutationWorkerDescriptor(path)?.vars?.OWNER_APPROVAL_PUBLIC_KEY_PEM ?? null;
+}
+
+export function expectedTrustRoot(descriptor) {
+  const vars = descriptor?.vars ?? {};
+  return Object.freeze({
+    accountId: vars.CLOUDFLARE_ACCOUNT_ID ?? null,
+    productionDatabaseId: vars.XQUEUE_PRODUCTION_DATABASE_ID ?? null,
+    ownerApprovalKeyFingerprint:
+      typeof vars.OWNER_APPROVAL_PUBLIC_KEY_PEM === 'string'
+        ? ownerPublicKeyFingerprint(vars.OWNER_APPROVAL_PUBLIC_KEY_PEM)
+        : null,
+  });
+}
+
+// wrangler dev lets same-named process.env and .env entries override committed
+// vars (observed with wrangler 4.131), so the child must not see them. The
+// Worker's Cloudflare credential is MUTATION_D1_API_TOKEN; CLOUDFLARE_API_TOKEN
+// is wrangler's own launch credential and is never bound into the Worker.
+export function childEnvironment({ env = process.env, descriptor, controlToken }) {
+  const vars = descriptor?.vars ?? {};
+  const secrets = descriptor?.secrets?.required ?? [];
+  if (
+    !secrets.includes('MUTATION_D1_API_TOKEN') ||
+    !secrets.includes('MUTATION_CONTROL_TOKEN') ||
+    secrets.includes('CLOUDFLARE_API_TOKEN')
+  ) {
+    fail('mutation Worker descriptor must require exactly its own D1 and control secrets');
+  }
+  const d1Token = env.MUTATION_D1_API_TOKEN;
+  if (typeof d1Token !== 'string' || d1Token.trim() === '') {
+    fail('apply requires MUTATION_D1_API_TOKEN, a D1 + Time Travel scoped token for the Worker');
+  }
+  if (d1Token === env.CLOUDFLARE_API_TOKEN) {
+    fail(
+      'MUTATION_D1_API_TOKEN must differ from CLOUDFLARE_API_TOKEN; the launch credential ' +
+      'must never be bound into the mutation plane',
+    );
+  }
+  if (env.CLOUDFLARE_ACCOUNT_ID !== vars.CLOUDFLARE_ACCOUNT_ID) {
+    fail('CLOUDFLARE_ACCOUNT_ID must equal the mutation Worker descriptor account id');
+  }
+  const child = { ...env };
+  for (const name of Object.keys(vars)) {
+    if (name !== 'CLOUDFLARE_ACCOUNT_ID') delete child[name];
+  }
+  child.MUTATION_CONTROL_TOKEN = controlToken;
+  return child;
+}
+
+export function assertNoLocalDevOverrides({ dir, descriptor, readDir = readdirSync, readText = readFileSync }) {
+  const guarded = new Set([
+    ...Object.keys(descriptor?.vars ?? {}),
+    ...(descriptor?.secrets?.required ?? []),
+  ]);
+  for (const name of readDir(dir)) {
+    if (/^\.dev\.vars(\..+)?$/.test(name)) {
+      fail(name + ' exists beside the mutation Worker descriptor; remove it before apply');
+    }
+    if (!/^\.env(\..+)?$/.test(name)) continue;
+    const text = String(readText(join(dir, name), 'utf8'));
+    for (const line of text.split(/\r?\n/)) {
+      const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+      if (match && guarded.has(match[1])) {
+        fail(name + ' defines ' + match[1] + ', which would override the mutation Worker binding');
+      }
+    }
+  }
+  return true;
+}
+
+export function probePortFree(port, connectImpl = connect) {
+  return new Promise((resolveProbe, rejectProbe) => {
+    const socket = connectImpl({ host: '127.0.0.1', port });
+    socket.once('connect', () => {
+      socket.destroy();
+      rejectProbe(new Error('port ' + port + ' already has a listener; refusing to launch'));
+    });
+    socket.once('error', (error) => {
+      socket.destroy();
+      if (error?.code === 'ECONNREFUSED') resolveProbe(true);
+      else rejectProbe(error);
+    });
+  });
+}
+
+function tailBuffer(limit = CHILD_OUTPUT_TAIL_BYTES) {
+  let text = '';
+  return {
+    push(chunk) {
+      text = (text + String(chunk)).slice(-limit);
+    },
+    value() {
+      return text;
+    },
+  };
+}
+
+function redact(text, secrets) {
+  let out = String(text ?? '');
+  for (const secret of secrets) {
+    if (typeof secret === 'string' && secret.length >= 8) out = out.split(secret).join('[redacted]');
+  }
+  return out;
+}
+
+export function assertHealthIdentity(body, expected) {
+  if (
+    body?.service !== MUTATION_WORKER_SERVICE ||
+    body?.role !== 'production-mutation-intake' ||
+    body?.publicationCapable !== false
+  ) {
+    fail('the listener on the intake port is not the ephemeral production mutation Worker');
+  }
+  const bound = body?.bindings ?? {};
+  for (const key of ['accountId', 'productionDatabaseId', 'ownerApprovalKeyFingerprint']) {
+    if (typeof expected?.[key] !== 'string' || bound[key] !== expected[key]) {
+      fail(
+        'the ephemeral Worker bound ' + key + ' that does not match the committed descriptor; ' +
+        'a local override is present',
+      );
+    }
+  }
+  return true;
+}
+
+async function waitForHealth(url, fetchImpl, state, expected, deadlineMs = HEALTH_DEADLINE_MS) {
+  const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
-    if (child.exitCode != null) {
+    if (state.exited) {
       throw new Error('ephemeral production mutation Worker exited before health became ready');
     }
+    let body = null;
     try {
       const response = await fetchImpl(url + '/health', {
         headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
       });
-      if (response.ok) return;
+      if (response.ok) body = await response.json();
     } catch {
-      // Bounded readiness polling only; no mutation request has been sent.
+      // Bounded readiness polling only; no credential-bearing request has been sent.
+    }
+    if (body) {
+      assertHealthIdentity(body, expected);
+      return body;
     }
     await sleep(250);
   }
   throw new Error('ephemeral production mutation Worker did not become healthy');
+}
+
+function postDispatchAmbiguity(message, cause) {
+  const error = new Error(message + '; production may have changed, reconcile by readback before any retry');
+  error.cause = cause;
+  error.response = {
+    requiresReadback: true,
+    faultClass: 'POST_DISPATCH_TRANSPORT_AMBIGUOUS',
+  };
+  return error;
 }
 
 export async function invokeEphemeralWorker({
@@ -355,52 +537,97 @@ export async function invokeEphemeralWorker({
   port = DEFAULT_PORT,
   spawnImpl = spawn,
   fetchImpl = globalThis.fetch,
+  env = process.env,
+  descriptorPath = MUTATION_WORKER_DESCRIPTOR,
+  readDescriptor = readMutationWorkerDescriptor,
+  assertLocalOverrides = assertNoLocalDevOverrides,
+  probePort = probePortFree,
+  healthDeadlineMs = HEALTH_DEADLINE_MS,
+  intakeTimeoutMs = INTAKE_REQUEST_TIMEOUT_MS,
 }) {
   if (typeof fetchImpl !== 'function') fail('fetch support is required');
+  const descriptor = readDescriptor(descriptorPath);
+  const expected = expectedTrustRoot(descriptor);
+  assertLocalOverrides({ dir: dirname(resolve(descriptorPath)), descriptor });
   const controlToken = randomBytes(32).toString('hex');
+  const childEnv = childEnvironment({ env, descriptor, controlToken });
+  await probePort(port);
+
   const child = spawnImpl(
     'pnpm',
     [
       'wrangler', 'dev',
-      '--config', 'wrangler.mutation-production-intake.jsonc',
+      '--config', descriptorPath,
       '--remote',
       '--port', String(port),
     ],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        MUTATION_CONTROL_TOKEN: controlToken,
-      },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
 
-  const stderr = [];
-  child.stderr?.on('data', (chunk) => stderr.push(String(chunk)));
+  const state = { exited: false, spawnError: null };
+  const stdout = tailBuffer();
+  const stderr = tailBuffer();
+  // Drain both pipes so wrangler never blocks on a full buffer.
+  child.stdout?.on('data', (chunk) => stdout.push(chunk));
+  child.stderr?.on('data', (chunk) => stderr.push(chunk));
+  child.on?.('error', (error) => {
+    state.exited = true;
+    state.spawnError = error;
+  });
+  child.on?.('exit', () => {
+    state.exited = true;
+  });
+  const secrets = [controlToken, env.MUTATION_D1_API_TOKEN, env.CLOUDFLARE_API_TOKEN];
+  const withOutput = (error) => {
+    const detail = redact(stderr.value().trim(), secrets);
+    if (detail && error instanceof Error && !error.response) {
+      error.message += '\nwrangler stderr (tail):\n' + detail;
+    }
+    return error;
+  };
 
   const baseUrl = 'http://127.0.0.1:' + port;
   try {
-    await waitForHealth(baseUrl, fetchImpl, child);
-    const response = await fetchImpl(baseUrl + '/production-intake', {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer ' + controlToken,
-        'content-type': 'application/json',
-        accept: 'application/json',
-      },
-      body: JSON.stringify({
-        environment: 'production',
-        candidate,
-        ...payload,
-      }),
-    });
+    try {
+      await waitForHealth(baseUrl, fetchImpl, state, expected, healthDeadlineMs);
+    } catch (error) {
+      throw withOutput(state.spawnError ?? error);
+    }
+
+    // From here on the request may reach production: any failure without a
+    // definitive Worker answer is post-dispatch ambiguity.
+    let response;
+    try {
+      response = await fetchImpl(baseUrl + '/production-intake', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + controlToken,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body: JSON.stringify({
+          environment: 'production',
+          candidate,
+          ...payload,
+        }),
+        signal: AbortSignal.timeout(intakeTimeoutMs),
+      });
+    } catch (error) {
+      throw postDispatchAmbiguity('production intake request failed after dispatch', error);
+    }
 
     let body;
     try {
       body = await response.json();
-    } catch {
-      throw new Error('production mutation Worker returned non-JSON');
+    } catch (error) {
+      throw postDispatchAmbiguity(
+        'production mutation Worker returned non-JSON (HTTP ' + response.status + ')',
+        error,
+      );
     }
 
     if (!response.ok) {
@@ -414,17 +641,8 @@ export async function invokeEphemeralWorker({
     }
     return body;
   } finally {
-    if (child.exitCode == null) child.kill('SIGTERM');
+    if (!state.exited) child.kill('SIGTERM');
   }
-}
-
-export function mutationWorkerOwnerPublicKey(
-  path = 'wrangler.mutation-production-intake.jsonc',
-) {
-  const descriptor = JSON.parse(
-    readFileSync(resolve(path), 'utf8').replace(/^\s*\/\/.*$/gm, ''),
-  );
-  return descriptor?.vars?.OWNER_APPROVAL_PUBLIC_KEY_PEM ?? null;
 }
 
 // Runs the Worker's own authorization and identity derivation offline, so
@@ -495,7 +713,11 @@ export async function main(
     input,
   };
   const planned = planIntakeIdentity(payload, {
-    ownerPublicKeyPem: ownerPublicKeyPem ?? mutationWorkerOwnerPublicKey(),
+    // Only automated intake verifies an owner signature, so owner-manual runs
+    // never depend on parsing the descriptor's key.
+    ownerPublicKeyPem:
+      ownerPublicKeyPem ??
+      (options.sourceMode === 'automated' ? mutationWorkerOwnerPublicKey() : null),
     ...(verifyOwnerApproval ? { verifyOwnerApproval } : {}),
   });
   const preflight = collectOperatorPreflight(run, checkPublisher);
