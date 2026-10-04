@@ -1183,7 +1183,7 @@ export function createMutationProductionIntakeWorker(dependencies = {}) {
           ].includes(phase);
           const retryableRunnerRead =
             !postDispatch &&
-            ['initial_readback', 'preflight_read'].includes(phase) &&
+            ['initial_readback', 'preflight_read', 'checkpoint'].includes(phase) &&
             result.mutation?.decision?.outcome === 'AUTO_RETRY';
           const transientPreDispatch =
             !postDispatch &&
