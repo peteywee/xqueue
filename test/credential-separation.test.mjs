@@ -132,6 +132,9 @@ test('production intake mutation role is D1-only and has no publication surface'
   assert.equal(config.queues, undefined);
   assert.equal(config.d1_databases?.length, 1);
   assert.equal(config.vars?.XQUEUE_PUBLISH_AUTHORITY, undefined);
+  // wrangler dev binds every .env key unless secrets are declared; the
+  // repository .env.example is where operators keep X credentials.
+  assert.deepEqual(config.secrets?.required, ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN']);
 });
 
 test('no tracked Wrangler topology descriptor embeds X write credentials', () => {

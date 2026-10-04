@@ -999,10 +999,18 @@ test('production mutation worker config contains D1 only and no embedded secrets
   assert.match(config, /"XQUEUE_PRODUCTION_DATABASE_ID"/);
   assert.match(config, /"OWNER_APPROVAL_PUBLIC_KEY_PEM"/);
   assert.match(config, /BEGIN PUBLIC KEY/);
-  assert.doesNotMatch(config, /CLOUDFLARE_API_TOKEN/);
-  assert.doesNotMatch(config, /MUTATION_CONTROL_TOKEN/);
   assert.doesNotMatch(config, /MUTATION_CHECKPOINT_HMAC_KEY/);
   assert.doesNotMatch(config, /r2_buckets|queues|triggers|MEDIA|X_BEARER|X_API|TWITTER|scheduler/i);
+
+  // Secret values stay external. Declaring the names makes wrangler dev bind
+  // only these keys, so unrelated .env/process.env values never reach the Worker.
+  const parsed = JSON.parse(config);
+  assert.deepEqual(parsed.secrets, {
+    required: ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN'],
+  });
+  for (const name of ['CLOUDFLARE_API_TOKEN', 'MUTATION_CONTROL_TOKEN']) {
+    assert.equal(Object.hasOwn(parsed.vars ?? {}, name), false, name);
+  }
 });
 
 test('production worker health is non-mutating and unknown routes stay closed', async () => {
