@@ -783,6 +783,118 @@ test('automated intake derives durable approval digest only from verified full-c
   assert.equal(seen[0].publicKeyPem, OWNER_PUBLIC_KEY_PEM);
 });
 
+test('automated intake accepts a genuinely signed reviewable candidate through the default verifier', async () => {
+  const { generateKeyPairSync, sign } = await import('node:crypto');
+  const {
+    createAuthenticatedOwnerApproval,
+    createOwnerApprovalPayload,
+    serializeOwnerApprovalPayload,
+  } = await import('../src/authoring/owner-approval.mjs');
+
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+  const approvedCandidate = {
+    candidate_id: 'I-PRODUCTION-SIGNED-1',
+    artifact_kind: 'post',
+    status: 'reviewable',
+    title: 'Signed production intake',
+    body: 'Signed production intake body.',
+    pillar: 'A',
+    figure: null,
+    knowledge_unit_refs: ['knowledge:test'],
+    source_refs: ['source:test'],
+    created_at: '2026-10-03T06:58:00.000Z',
+    generator: null,
+    validation: { result: 'pass', findings: [] },
+  };
+  approvedCandidate.content_digest = candidateDigest(approvedCandidate);
+  const signedPayload = createOwnerApprovalPayload({
+    candidate: approvedCandidate,
+    decision: 'approve',
+    decidedAt: '2026-10-03T06:59:00.000Z',
+  });
+  const signatureBase64 = sign(
+    null,
+    Buffer.from(serializeOwnerApprovalPayload(signedPayload), 'utf8'),
+    privateKey,
+  ).toString('base64');
+  const approval = createAuthenticatedOwnerApproval({
+    candidate: approvedCandidate,
+    payload: signedPayload,
+    signatureBase64,
+    publicKeyPem,
+  });
+  const input = {
+    content_id: approvedCandidate.candidate_id,
+    pillar: approvedCandidate.pillar,
+    title: approvedCandidate.title,
+    body: approvedCandidate.body,
+    source_ref: approvedCandidate.source_refs[0],
+  };
+  const signedEnv = { ...env(), OWNER_APPROVAL_PUBLIC_KEY_PEM: publicKeyPem };
+  const request = (overrides = {}) => payload({
+    sourceMode: 'automated',
+    ownerApproval: approval,
+    approvedCandidate,
+    input,
+    ...overrides,
+  });
+
+  // No verifyOwnerApproval override: the default Ed25519 path runs. The real
+  // normalizer is used so a rejection can only come from approval evidence.
+  const realDeps = () => ({ ...deps(), normalizeInput: normalizeIntakeInput });
+  const d = realDeps();
+  const seenDigests = [];
+  d.normalizeInput = (raw, options) => {
+    seenDigests.push(raw[0].owner_approval_digest);
+    return normalizeIntakeInput(raw, options);
+  };
+  const result = await runProductionIntakeRequest(signedEnv, request(), d);
+  assert.equal(result.ok, true);
+  assert.deepEqual(seenDigests, [approval.owner_proof.payload_digest]);
+
+  const tampered = {
+    ...approval,
+    owner_proof: {
+      ...approval.owner_proof,
+      signature_base64: Buffer.from(
+        Buffer.from(signatureBase64, 'base64').map((byte, index) => (index === 0 ? byte ^ 1 : byte)),
+      ).toString('base64'),
+    },
+  };
+  await assert.rejects(
+    runProductionIntakeRequest(signedEnv, request({ ownerApproval: tampered }), realDeps()),
+    (error) =>
+      error.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      /detached owner signature does not verify/.test(error.message),
+  );
+
+  // A different owner key cannot authorize the same evidence.
+  const other = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
+  await assert.rejects(
+    runProductionIntakeRequest(
+      { ...signedEnv, OWNER_APPROVAL_PUBLIC_KEY_PEM: other },
+      request(),
+      realDeps(),
+    ),
+    (error) =>
+      error.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      /not signed under the configured owner authority key/.test(error.message),
+  );
+
+  // Approval binds to a reviewable candidate; the same digest in another state is refused.
+  await assert.rejects(
+    runProductionIntakeRequest(
+      signedEnv,
+      request({ approvedCandidate: { ...approvedCandidate, status: 'approved' } }),
+      realDeps(),
+    ),
+    (error) =>
+      error.faultClass === 'INVALID_OWNER_APPROVAL' &&
+      /only a reviewable candidate may receive authoritative approval/.test(error.message),
+  );
+});
+
 test('automated intake rejects metadata that differs from the signed approved candidate', async () => {
   const approvedCandidate = {
     candidate_id: 'I-PRODUCTION-TEST-1',
