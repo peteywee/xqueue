@@ -35,6 +35,8 @@ on:
       - 'src/continuous-queue-intake.mjs'
       - 'scripts/continuous-queue-intake.mjs'
       - 'scripts/preview-dynamic-runtime-proof.mjs'
+      - 'src/preview-runtime-proof-checks.mjs'
+      - 'test/preview-runtime-proof-checks.test.mjs'
       - 'test/dynamic-runtime-integrity.test.mjs'
       - 'test/deferred-lifecycle.test.mjs'
       - 'package.json'
@@ -85,7 +87,8 @@ jobs:
             test/d1-preview-shadow-proof.test.mjs \
             test/global-publication-halt.test.mjs \
             test/d1-publication-reconciliation.test.mjs \
-            test/d1-logical-backup.test.mjs
+            test/d1-logical-backup.test.mjs \
+            test/preview-runtime-proof-checks.test.mjs
 
       - name: Assert publication authority boundary remains intact
         run: pnpm audit:authority
