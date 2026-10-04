@@ -14,7 +14,32 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
   '0017_publication_mutation_mutex.sql',
 ]);
 
+// Final #168 head. From here on, the publisher holds its lease across missed-slot
+// deferral and runtime promotion, and reports mutation-lane exclusion as a
+// lease block. An older deployed publisher can still defer without the lease
+// while an intake holds the mutation lane.
+export const MUTEX_COMPATIBLE_PUBLISHER_COMMIT = 'cc820367f6d30977fe5ae6321062ca33de6cf47b';
+
 const DEFAULT_PORT = 8789;
+
+export function checkPublisherMutexCompatibility(candidateSha, spawnImpl = spawnSync) {
+  const sha = String(candidateSha ?? '').toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    return Object.freeze({ ok: false, reason: 'publisher_candidate_invalid', candidateSha: sha });
+  }
+  const result = spawnImpl(
+    'git',
+    ['merge-base', '--is-ancestor', MUTEX_COMPATIBLE_PUBLISHER_COMMIT, sha],
+    { cwd: process.cwd(), encoding: 'utf8' },
+  );
+  if (result?.status === 0) {
+    return Object.freeze({ ok: true, reason: 'publisher_mutex_compatible', candidateSha: sha });
+  }
+  if (result?.status === 1) {
+    return Object.freeze({ ok: false, reason: 'publisher_predates_mutation_mutex', candidateSha: sha });
+  }
+  return Object.freeze({ ok: false, reason: 'publisher_candidate_unverifiable', candidateSha: sha });
+}
 
 function fail(message) {
   throw new Error(message);
@@ -178,7 +203,13 @@ export const SAFETY_SQL = [
   "SELECT generation,revision_digest,source_operation_id,created_at FROM queue_runtime_revisions ORDER BY generation DESC LIMIT 1;",
 ].join(' ');
 
-export function evaluateOperatorReadiness({ auth, candidate, migrations, safety }) {
+export function evaluateOperatorReadiness({
+  auth,
+  candidate,
+  migrations,
+  safety,
+  publisherMutex = null,
+}) {
   const blockers = [];
   try {
     assertMutationSchema(migrations);
@@ -196,6 +227,16 @@ export function evaluateOperatorReadiness({ auth, candidate, migrations, safety 
     safety,
   });
   blockers.push(...production.blockers);
+
+  if (publisherMutex?.ok !== true) {
+    blockers.push({
+      id: publisherMutex?.reason ?? 'publisher_mutex_compatibility_unknown',
+      detail:
+        'The authority-bound publisher candidate must descend from ' +
+        MUTEX_COMPATIBLE_PUBLISHER_COMMIT +
+        ' so publication cannot defer missed slots outside the lease while the mutation lane is held.',
+    });
+  }
 
   if (Number(safety?.mutationHalt?.halted) !== 0) {
     blockers.push({
@@ -248,7 +289,10 @@ function readSafety(run) {
   return parseSafetyPayload(parseJsonOutput(raw));
 }
 
-export function collectOperatorPreflight(run = runSync) {
+export function collectOperatorPreflight(
+  run = runSync,
+  checkPublisher = checkPublisherMutexCompatibility,
+) {
   const candidate = collectExactMainCandidate(run);
   const auth = parseJsonOutput(
     run('pnpm', ['cf:auth:preflight', '--environment', 'production']),
@@ -256,13 +300,15 @@ export function collectOperatorPreflight(run = runSync) {
   const migrations = readMigrations(run);
   assertMutationSchema(migrations);
   const safety = readSafety(run);
+  const publisherMutex = checkPublisher(safety.authority?.candidate_sha);
   const readiness = evaluateOperatorReadiness({
     auth,
     candidate,
     migrations,
     safety,
+    publisherMutex,
   });
-  return Object.freeze({ candidate, auth, migrations, safety, readiness });
+  return Object.freeze({ candidate, auth, migrations, safety, publisherMutex, readiness });
 }
 
 function sleep(ms) {
@@ -362,6 +408,7 @@ export async function main(
   {
     run = runSync,
     invokeWorker = invokeEphemeralWorker,
+    checkPublisher = checkPublisherMutexCompatibility,
     readJson = (path) => JSON.parse(readFileSync(resolve(path), 'utf8')),
   } = {},
 ) {
@@ -370,7 +417,7 @@ export async function main(
   const ownerApproval = options.ownerApprovalFile
     ? readJson(options.ownerApprovalFile)
     : null;
-  const preflight = collectOperatorPreflight(run);
+  const preflight = collectOperatorPreflight(run, checkPublisher);
 
   const summary = {
     status: preflight.readiness.ok ? 'ready' : 'blocked',
@@ -382,6 +429,7 @@ export async function main(
       active: REQUIRED_MUTATION_MIGRATIONS.filter((name) =>
         preflight.migrations.includes(name)),
     },
+    publisherMutex: preflight.publisherMutex,
     readiness: preflight.readiness,
   };
 

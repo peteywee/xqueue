@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import {
   PRODUCTION_INTAKE_CONFIRM,
   REQUIRED_MUTATION_MIGRATIONS,
+  MUTEX_COMPATIBLE_PUBLISHER_COMMIT,
   SAFETY_SQL,
   assertMutationSchema,
+  checkPublisherMutexCompatibility,
   evaluateOperatorReadiness,
   main,
   parseArgs,
@@ -135,6 +137,7 @@ test('operator readiness consumes the existing production preflight and mutation
     candidate: candidate(),
     migrations: REQUIRED_MUTATION_MIGRATIONS,
     safety: safety(),
+    publisherMutex: { ok: true, reason: 'publisher_mutex_compatible' },
   });
   assert.equal(ready.ok, true);
 
@@ -153,6 +156,8 @@ test('operator readiness consumes the existing production preflight and mutation
   assert.ok(ids.includes('production_mutation_schema_not_active'));
   assert.ok(ids.includes('mutation_lane_halted'));
   assert.ok(ids.includes('mutation_lane_contended'));
+  // Absent publisher compatibility evidence is a blocker, never a pass.
+  assert.ok(ids.includes('publisher_mutex_compatibility_unknown'));
 });
 
 test('safety parser keeps publication and mutation-lane facts distinct', () => {
@@ -183,6 +188,103 @@ test('operator lease read uses the same held-lease exclusion as the mutation Wor
   assert.match(SAFETY_SQL, /FROM publication_leases WHERE owner_token IS NOT NULL;/);
   // An expired-but-held lease still blocks; no TTL or clock predicate may relax it.
   assert.doesNotMatch(SAFETY_SQL, /expires_at_ms|strftime|julianday/);
+});
+
+test('publisher mutex compatibility is proven by commit ancestry and fails closed', () => {
+  const sha = 'd'.repeat(40);
+  const calls = [];
+  const spawnWith = (status) => (command, argv) => {
+    calls.push([command, ...argv]);
+    return { status };
+  };
+
+  assert.equal(checkPublisherMutexCompatibility(sha, spawnWith(0)).ok, true);
+  assert.deepEqual(calls[0], [
+    'git', 'merge-base', '--is-ancestor', MUTEX_COMPATIBLE_PUBLISHER_COMMIT, sha,
+  ]);
+  assert.equal(
+    checkPublisherMutexCompatibility(sha, spawnWith(1)).reason,
+    'publisher_predates_mutation_mutex',
+  );
+  assert.equal(
+    checkPublisherMutexCompatibility(sha, spawnWith(128)).reason,
+    'publisher_candidate_unverifiable',
+  );
+  assert.equal(
+    checkPublisherMutexCompatibility('not-a-sha', spawnWith(0)).reason,
+    'publisher_candidate_invalid',
+  );
+});
+
+test('apply refuses before launching the Worker when the publisher predates the mutex', async () => {
+  const run = (command, argv) => {
+    const key = [command, ...argv].join(' ');
+    if (key === 'git branch --show-current') return 'main\n';
+    if (key === 'git status --porcelain --untracked-files=all') return '';
+    if (key === 'git fetch origin main') return '';
+    if (key === 'git rev-parse HEAD') return 'a'.repeat(40) + '\n';
+    if (key === 'git rev-parse origin/main') return 'a'.repeat(40) + '\n';
+    if (key === 'pnpm cf:auth:preflight --environment production') {
+      return JSON.stringify(auth());
+    }
+    if (key.includes('SELECT name FROM d1_migrations')) {
+      return JSON.stringify([{ results: REQUIRED_MUTATION_MIGRATIONS.map((name) => ({ name })) }]);
+    }
+    if (key.includes('SELECT owner,generation,transition_state')) {
+      return JSON.stringify([
+        { results: [safety().authority] },
+        { results: [{ unresolved: 0 }] },
+        { results: [{ active_leases: 0 }] },
+        { results: [{ inflight: null }] },
+        { results: [{ publication_lease_generation: 5 }] },
+        { results: [{ publication_event_cursor: 17 }] },
+        { results: [safety().mutationHalt] },
+        { results: [safety().mutationLane] },
+        { results: [safety().runtimeState] },
+      ]);
+    }
+    throw new Error('unexpected command: ' + key);
+  };
+
+  let invoked = false;
+  let checkedSha = null;
+  const previousExitCode = process.exitCode;
+  let blockedExitCode;
+  let result;
+  try {
+    result = await main(
+    [
+      '--environment', 'production',
+      '--file', 'item.json',
+      '--apply',
+      '--confirm', PRODUCTION_INTAKE_CONFIRM,
+    ],
+    {
+      run,
+      readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
+      checkPublisher: (sha) => {
+        checkedSha = sha;
+        return { ok: false, reason: 'publisher_predates_mutation_mutex', candidateSha: sha };
+      },
+      invokeWorker: async () => {
+        invoked = true;
+        throw new Error('must not invoke');
+      },
+    },
+    );
+    blockedExitCode = process.exitCode;
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+
+  assert.equal(blockedExitCode, 1);
+  assert.equal(checkedSha, safety().authority.candidate_sha);
+  assert.equal(result.status, 'blocked');
+  assert.equal(invoked, false);
+  assert.ok(
+    result.readiness.blockers.some((item) => item.id === 'publisher_predates_mutation_mutex'),
+  );
+  assert.equal(result.publisherMutex.reason, 'publisher_predates_mutation_mutex');
 });
 
 test('observe mode never invokes the mutation Worker', async () => {
@@ -223,6 +325,7 @@ test('observe mode never invokes the mutation Worker', async () => {
     {
       run,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
+      checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async () => {
         invoked = true;
         throw new Error('must not invoke');
@@ -296,6 +399,7 @@ test('automated single-item apply passes signed approval evidence, never a diges
     {
       run,
       readJson: (path) => files.get(path),
+      checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async (args) => {
         call = args;
         return { status: 'ok', mutation: { status: 'applied' } };
@@ -347,6 +451,7 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
     {
       run,
       readJson: () => ({ content_id: 'I-1', pillar: 'A', body: 'approved' }),
+      checkPublisher: () => ({ ok: true, reason: 'publisher_mutex_compatible' }),
       invokeWorker: async (args) => {
         call = args;
         return { status: 'ok', mutation: { status: 'applied' } };
