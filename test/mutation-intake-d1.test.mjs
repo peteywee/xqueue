@@ -344,6 +344,20 @@ test('completion reader distinguishes canonical contradiction from read unavaila
       /mutation operation readback is not exact applied state/.test(error.message),
   );
 
+  await assert.rejects(
+    () => readIntakeMutationCompletion({
+      db: d1,
+      controlPlan: {
+        ...controlPlan,
+        plan_context: { ...controlPlan.plan_context, intake_plan_digest: 'e'.repeat(64) },
+      },
+      intakePlan,
+    }),
+    (error) =>
+      error?.readback === 'contradictory' &&
+      /intake plan digest does not match mutation plan/.test(error.message),
+  );
+
   const unavailableDb = {
     prepare() {
       throw new Error('network timeout reading D1');
