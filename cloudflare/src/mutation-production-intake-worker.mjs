@@ -15,6 +15,7 @@ import { createD1MutationTransport } from '../../src/mutation-control-transport.
 import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import {
   evaluateProductionMutationPreflight,
+  MAX_PRODUCTION_INTAKE_ITEMS,
   runProductionIntakeMutation,
 } from '../../src/mutation-production-preflight.mjs';
 import { verifyCloudflareApiToken } from '../../src/cloudflare-auth.mjs';
@@ -52,8 +53,6 @@ FROM queue_runtime_revisions
 WHERE source_operation_id=?
 LIMIT 1
 `;
-
-export const MAX_PRODUCTION_INTAKE_ITEMS = 5;
 
 const EXISTING_INTAKE_SQL =
   "SELECT operation_id,plan_digest,batch_digest,item_count,expected_frontier_generation," +

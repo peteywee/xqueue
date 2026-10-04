@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 
 import { normalizeIntakeInput } from '../src/continuous-queue-intake.mjs';
 import { candidateDigest } from '../src/authoring/contracts.mjs';
+import { MAX_PRODUCTION_INTAKE_ITEMS } from '../src/mutation-production-preflight.mjs';
 import {
-  MAX_PRODUCTION_INTAKE_ITEMS,
   createMutationProductionIntakeWorker,
   runProductionIntakeRequest,
 } from '../cloudflare/src/mutation-production-intake-worker.mjs';
