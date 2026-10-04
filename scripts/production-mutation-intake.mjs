@@ -65,10 +65,10 @@ const REQUIRED_TRIGGERS_LOWER = new Set(Object.keys(REQUIRED_MUTATION_TRIGGER_SQ
 // mutation-owned table.
 export function mutationTriggerDrift(applied) {
   const rows = Array.isArray(applied) ? applied : [];
-  const bodies = new Map(rows.map((row) => [row?.name, row?.sql]));
+  const bodies = new Map(rows.map((row) => [String(row?.name ?? '').toLowerCase(), row?.sql]));
   const drifted = REQUIRED_MUTATION_TRIGGERS.filter((name) =>
-    !bodies.has(name) ||
-    normalizeTriggerSql(bodies.get(name)) !== REQUIRED_MUTATION_TRIGGER_SQL[name]);
+    !bodies.has(name.toLowerCase()) ||
+    normalizeTriggerSql(bodies.get(name.toLowerCase())) !== REQUIRED_MUTATION_TRIGGER_SQL[name]);
   const extra = rows
     .filter((row) =>
       !REQUIRED_TRIGGERS_LOWER.has(String(row?.name ?? '').toLowerCase()) && (
@@ -886,10 +886,13 @@ export async function verifyWorkerIdentity(
     if (response) {
       let body = null;
       let parseProblem = null;
+      let bodyTimedOut = false;
       try {
         body = await response.json();
       } catch (error) {
         parseProblem = error instanceof Error ? error.message : String(error);
+        // The request's own timeout firing mid-body is a transport failure.
+        bodyTimedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
       }
       if (!response.ok && body?.service === MUTATION_WORKER_SERVICE) {
         fail(
@@ -898,7 +901,7 @@ export async function verifyWorkerIdentity(
           (body.faultClass === 'CONTROL_TOKEN_UNAVAILABLE' ? ' (wrangler did not bind MUTATION_CONTROL_TOKEN)' : ''),
         );
       }
-      if (response.ok) {
+      if (response.ok && !bodyTimedOut) {
         if (!body || typeof body !== 'object') {
           fail(
             'the listener on the intake port answered the identity challenge without JSON (HTTP ' +
@@ -1188,6 +1191,26 @@ export function assertObservedIdentity(planned, observed) {
   return true;
 }
 
+// stderr may be a non-blocking pipe: a single writeSync can be partial or fail
+// with EAGAIN. Write every byte, waiting briefly (at most about 2s) for the
+// reader to drain.
+export function writeAllSync(fd, text, { write = writeSync, waitMs = 2_000 } = {}) {
+  const bytes = Buffer.from(String(text), 'utf8');
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  let offset = 0;
+  let waited = 0;
+  while (offset < bytes.length) {
+    try {
+      offset += write(fd, bytes, offset, bytes.length - offset);
+    } catch (error) {
+      if (error?.code !== 'EAGAIN' || waited >= waitMs) throw error;
+      Atomics.wait(pause, 0, 0, 10);
+      waited += 10;
+    }
+  }
+  return offset;
+}
+
 export async function main(
   argv = process.argv.slice(2),
   {
@@ -1201,7 +1224,7 @@ export async function main(
     d1TokenReadiness = collectD1TokenReadiness,
     // The interrupt report runs just before the process re-raises the signal,
     // so it is written synchronously; console output to a pipe can be async.
-    writeStderr = (text) => writeSync(2, text),
+    writeStderr = (text) => writeAllSync(2, text),
   } = {},
 ) {
   const options = parseArgs(argv);
@@ -1307,7 +1330,11 @@ export async function main(
           }
           lines.push(JSON.stringify({ planned, response: answer.body }, null, 2));
         }
-        writeStderr(lines.join('\n') + '\n');
+        // The readback line and identity first, as one short write (atomic on
+        // a pipe), then the detail.
+        writeStderr(lines.slice(0, -1).join('\n') + '\n' +
+          'operation_id=' + String(planned.operationId) + '\n');
+        writeStderr(lines[lines.length - 1] + '\n');
       },
     });
     assertObservedIdentity(planned, result?.planned);

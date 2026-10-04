@@ -713,7 +713,7 @@ test('replay refuses when publication authority changed since the operator verif
     (error) =>
       error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
       error?.retryable !== true &&
-      error?.requiresReadback === true,
+      error?.requiresReadback === false,
   );
 });
 
@@ -792,7 +792,8 @@ test('a past-dispatch replay that does not complete exactly always requires read
     },
   );
 
-  // A never-dispatched operation is not resumable either, and also reconciles.
+  // A never-dispatched operation is not resumable either. It reconciles, but
+  // it never reached production, so no production readback is asked for.
   await assert.rejects(
     () => runProductionIntakeRequest(
       env(fakeDb({ replay: true })),
@@ -801,7 +802,7 @@ test('a past-dispatch replay that does not complete exactly always requires read
     ),
     (error) =>
       error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
-      error?.requiresReadback === true,
+      error?.requiresReadback === false,
   );
 });
 
@@ -820,6 +821,13 @@ test('every way a past-dispatch replay can stop requires readback, applied once'
     'resume throws': (d) => { d.resumeMutation = async () => { throw new Error('socket hang up'); }; },
     'resume reports a pre-dispatch-looking block': (d) => {
       d.resumeMutation = async () => ({ status: 'blocked', phase: 'preflight_read', decision: { outcome: 'AUTO_RETRY' } });
+    },
+    'post-commit verification failure': (d) => {
+      const verify = d.verifyRuntime;
+      d.verifyRuntime = async (envValue, options) => {
+        if (options.includeSnapshot === false) throw new Error('network timeout after commit');
+        return verify(envValue, options);
+      };
     },
   };
   for (const [name, breakIt] of Object.entries(appliedStops)) {
@@ -850,14 +858,21 @@ test('every way a past-dispatch replay can stop requires readback, applied once'
   );
 
   // A never-dispatched operation is never advertised as a retryable outage:
-  // it is not resumable, and that is reported first.
+  // it is not resumable, and that is decided before any further D1 read.
   const none = deps({ replayOperation: { ...existingOperation(), effect_state: 'none' } });
   outage(none);
+  const failingDb = fakeDb({ replay: true });
+  const prepare = failingDb.prepare.bind(failingDb);
+  failingDb.prepare = (sql) => {
+    if (sql.includes('queue_intake_operations')) throw new Error('D1_ERROR: Network connection lost');
+    return prepare(sql);
+  };
   await assert.rejects(
-    () => runProductionIntakeRequest(env(fakeDb({ replay: true })), payload(), none),
+    () => runProductionIntakeRequest(env(failingDb), payload(), none),
     (error) =>
       error?.faultClass === 'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION' &&
-      error?.retryable !== true,
+      error?.retryable !== true &&
+      error?.requiresReadback === false,
   );
 });
 
@@ -1536,4 +1551,27 @@ test('production worker health is non-mutating and unknown routes stay closed', 
     { DB: fakeDb() },
   );
   assert.equal(missing.status, 404);
+});
+
+test('an applied replay with no committed runtime revision is reconciled by readback', async () => {
+  const db = fakeDb({ replay: true });
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (sql.includes('FROM queue_runtime_revisions') && sql.includes('source_operation_id=?')) {
+      return { ...statement, bind() { return this; }, async first() { return null; } };
+    }
+    return statement;
+  };
+  let resumed = false;
+  const d = deps({ replayOperation: existingOperation() });
+  d.resumeMutation = async () => { resumed = true; throw new Error('must not resume'); };
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(db), payload(), d),
+    (error) =>
+      error?.faultClass === 'POST_DISPATCH_READBACK_AMBIGUOUS' &&
+      error?.requiresReadback === true &&
+      /has no committed runtime revision/.test(error.message),
+  );
+  assert.equal(resumed, false);
 });

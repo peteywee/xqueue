@@ -473,6 +473,18 @@ async function loadReplayState(db, normalized, operation) {
       { httpStatus: 409, requiresReadback: true },
     );
   }
+  // Only an applied operation is resumable. This is decided from the row
+  // already read, before any further D1 read can fail and make a
+  // non-resumable operation look like a retryable outage. A never-dispatched
+  // operation ('none') never reached production, so it needs reconciliation
+  // but no production readback.
+  if (!['VERIFYING', 'COMPLETE'].includes(operation.state) || operation.effect_state !== 'applied') {
+    throw productionFault(
+      'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION',
+      'existing mutation operation is not in an exact recoverable applied state',
+      { httpStatus: 409, requiresReadback: operation.effect_state !== 'none' },
+    );
+  }
 
   const intakeOperation = await first(
     db,
@@ -516,14 +528,10 @@ async function loadReplayState(db, normalized, operation) {
     }
   }
 
-  if (
-    !['VERIFYING', 'COMPLETE'].includes(operation.state) ||
-    operation.effect_state !== 'applied' ||
-    !runtimeRevision
-  ) {
+  if (!runtimeRevision) {
     throw productionFault(
       'IDEMPOTENCY_STATE_REQUIRES_RECONCILIATION',
-      'existing mutation operation is not in an exact recoverable applied state',
+      'existing applied mutation operation has no committed runtime revision',
       { httpStatus: 409, requiresReadback: true },
     );
   }
@@ -796,8 +804,7 @@ async function replayExistingOperation({
   if (!['applied', 'already_applied'].includes(mutation?.status)) {
     throw productionFault(
       'POST_DISPATCH_READBACK_AMBIGUOUS',
-      'production ' + existingOperation.effect_state +
-        '-operation resume did not produce exact completion (status ' +
+      'production applied-operation resume did not produce exact completion (status ' +
         String(mutation?.status) + ', phase ' + String(mutation?.phase) + ', class ' +
         String(mutation?.fault_class ?? mutation?.error_class ?? 'unknown') + ')',
       { httpStatus: 409, requiresReadback: true },

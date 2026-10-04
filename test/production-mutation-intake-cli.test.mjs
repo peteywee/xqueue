@@ -18,6 +18,7 @@ import {
   planIntakeIdentity,
   evaluateOperatorReadiness,
   main,
+  writeAllSync,
   parseArgs,
   parseSafetyPayload,
 } from '../scripts/production-mutation-intake.mjs';
@@ -784,8 +785,12 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   // An interruption after dispatch tells the operator to read back, with the
   // planned identity that readback needs.
   call.onInterruptedAfterDispatch('SIGTERM');
-  assert.equal(stderrWrites.length, 1, 'the report is one synchronous write');
-  const printed = stderrWrites[0];
+  // The readback line and operation id lead, in one short write.
+  assert.equal(stderrWrites.length, 2);
+  assert.match(stderrWrites[0], /^readback_required=1$/m);
+  assert.ok(stderrWrites[0].includes('operation_id=' + result.planned.operationId));
+  assert.ok(Buffer.byteLength(stderrWrites[0]) < 4096, 'atomic on a pipe');
+  const printed = stderrWrites.join('');
   assert.match(printed, /INTERRUPTED AFTER DISPATCH \(SIGTERM\)/);
   assert.match(printed, /^readback_required=1$/m);
   assert.ok(printed.includes(result.planned.operationId), 'planned operation id is printed');
@@ -795,14 +800,15 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   const report = (answer) => {
     stderrWrites.length = 0;
     call.onInterruptedAfterDispatch('SIGINT', answer);
-    assert.equal(stderrWrites.length, 1);
-    return stderrWrites[0];
+    assert.equal(stderrWrites.length, 2);
+    return stderrWrites.join('');
   };
   const matching = { operationId: result.planned.operationId, contentIds: result.planned.contentIds, contentDigests: result.planned.contentDigests };
   const clean = report({ httpStatus: 200, ok: true, body: { status: 'ok', requiresReadback: false, planned: matching } });
   assert.match(clean, /INTERRUPTED DURING TEARDOWN \(SIGINT\); the Worker answered HTTP 200/);
   assert.doesNotMatch(clean, /readback_required/);
   assert.match(clean, /"response"/);
+  assert.match(clean, /operation_id=/);
   assert.match(
     report({ httpStatus: 409, ok: false, body: { status: 'blocked', requiresReadback: true } }),
     /^readback_required=1$/m,
@@ -814,5 +820,28 @@ test('apply mode invokes the ephemeral Worker only after readiness and exact con
   assert.doesNotMatch(
     report({ httpStatus: 409, ok: false, body: { status: 'error', requiresReadback: false, faultClass: 'PRE_DISPATCH_STATE_CONFLICT' } }),
     /readback_required/,
+  );
+});
+
+test('the interrupt report writes every byte through partial writes and EAGAIN', () => {
+  const chunks = [];
+  let calls = 0;
+  const write = (fd, buffer, offset, length) => {
+    calls += 1;
+    if (calls === 2) throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' });
+    const n = Math.min(length, 5);
+    chunks.push(buffer.subarray(offset, offset + n).toString('utf8'));
+    return n;
+  };
+  const text = 'readback_required=1\noperation_id=x\n';
+  assert.equal(writeAllSync(2, text, { write }), Buffer.byteLength(text));
+  assert.equal(chunks.join(''), text);
+  assert.throws(
+    () => writeAllSync(2, 'x', { write: () => { throw Object.assign(new Error('EPIPE'), { code: 'EPIPE' }); } }),
+    /EPIPE/,
+  );
+  assert.throws(
+    () => writeAllSync(2, 'x', { waitMs: 20, write: () => { throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }); } }),
+    /EAGAIN/,
   );
 });

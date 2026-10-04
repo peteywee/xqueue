@@ -1292,3 +1292,21 @@ test('no other production migration redefines a required trigger or adds one to 
     }
   }
 });
+
+test('an identity body that times out mid-read is retried, not treated as non-JSON', async () => {
+  const { spawnImpl, calls } = fakeChild();
+  let identityCalls = 0;
+  const real = serveWorker(calls);
+  const fetchImpl = async (url, init) => {
+    if (url.includes('/identity?')) {
+      identityCalls += 1;
+      if (identityCalls === 1) {
+        return { ok: true, status: 200, async json() { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); } };
+      }
+    }
+    return real(url, init);
+  };
+  const result = await launch({ spawnImpl, fetchImpl });
+  assert.equal(result.ok, true);
+  assert.equal(identityCalls, 2);
+});
