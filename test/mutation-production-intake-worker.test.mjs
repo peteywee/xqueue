@@ -971,6 +971,53 @@ test('worker returns stable non-retryable 400 for malformed JSON', async () => {
   assert.equal(body.requiresReadback, false);
 });
 
+test('pre-dispatch runtime read results map to retryable, replan, or conflict without mutating', async () => {
+  const cases = [
+    ['dynamic_d1_unavailable', 'PRE_DISPATCH_STATE_UNAVAILABLE', 503, true],
+    ['dynamic_snapshot_unavailable', 'PRE_DISPATCH_STATE_UNAVAILABLE', 503, true],
+    ['dynamic_snapshot_changed_during_read', 'PRE_DISPATCH_REPLAN_REQUIRED', 409, true],
+    ['runtime_revision_digest_mismatch', 'PRE_DISPATCH_STATE_CONFLICT', 409, false],
+    ['stale_runtime_revision', 'PRE_DISPATCH_STATE_CONFLICT', 409, false],
+  ];
+  for (const [reason, faultClass, httpStatus, retryable] of cases) {
+    const d = deps();
+    let mutationStarted = false;
+    d.verifyRuntime = async () => ({ ok: false, reason });
+    d.runMutation = async () => {
+      mutationStarted = true;
+      throw new Error('must not start a mutation');
+    };
+    await assert.rejects(
+      runProductionIntakeRequest(env(), payload(), d),
+      (error) =>
+        error.faultClass === faultClass &&
+        error.httpStatus === httpStatus &&
+        error.retryable === retryable &&
+        error.requiresReadback !== true &&
+        error.message.includes(reason),
+      reason,
+    );
+    assert.equal(mutationStarted, false, reason);
+    assert.equal(d.events.includes('capture-checkpoint'), false, reason);
+  }
+
+  const d = deps();
+  d.verifyRuntime = async () => ({ ok: false, reason: 'dynamic_snapshot_unavailable' });
+  const response = await createMutationProductionIntakeWorker(d).fetch(
+    new Request('https://example.test/production-intake', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + CONTROL_TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify(payload()),
+    }),
+    env(),
+  );
+  assert.equal(response.status, 503);
+  const body = await response.json();
+  assert.equal(body.faultClass, 'PRE_DISPATCH_STATE_UNAVAILABLE');
+  assert.equal(body.retryable, true);
+  assert.equal(body.requiresReadback, false);
+});
+
 test('retryable pre-dispatch runner read failures are 503, not conflict 409', async () => {
   for (const mutationStatus of ['runner-read-unavailable', 'preflight-read-unavailable']) {
     const worker = createMutationProductionIntakeWorker(deps({ mutationStatus }));

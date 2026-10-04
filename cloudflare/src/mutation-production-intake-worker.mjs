@@ -356,6 +356,38 @@ function faultDescriptor(error) {
   };
 }
 
+// verifyDynamicRuntime reports read failures and read races as results, not
+// exceptions. Nothing has been dispatched yet, so transient reads are
+// retryable, a race is a replan, and only integrity failures are conflicts.
+const TRANSIENT_RUNTIME_READ_REASONS = new Set([
+  'dynamic_d1_unavailable',
+  'dynamic_snapshot_unavailable',
+]);
+const RACED_RUNTIME_READ_REASONS = new Set(['dynamic_snapshot_changed_during_read']);
+
+function preDispatchRuntimeFault(before) {
+  const reason = typeof before?.reason === 'string' ? before.reason : 'dynamic_snapshot_missing';
+  if (TRANSIENT_RUNTIME_READ_REASONS.has(reason)) {
+    return productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      'production runtime read unavailable before mutation: ' + reason,
+      { httpStatus: 503, retryable: true },
+    );
+  }
+  if (RACED_RUNTIME_READ_REASONS.has(reason)) {
+    return productionFault(
+      'PRE_DISPATCH_REPLAN_REQUIRED',
+      'production runtime changed during the pre-mutation read: ' + reason,
+      { httpStatus: 409, retryable: true },
+    );
+  }
+  return productionFault(
+    'PRE_DISPATCH_STATE_CONFLICT',
+    'production runtime is not healthy before mutation: ' + reason,
+    { httpStatus: 409 },
+  );
+}
+
 async function trustedProductionAuth(env, verifyAuth, fetchImpl) {
   try {
     const verified = await verifyAuth({
@@ -910,11 +942,7 @@ export async function runProductionIntakeRequest(
     );
   }
   if (!before?.ok || !before.snapshot) {
-    throw productionFault(
-      'PRE_DISPATCH_STATE_CONFLICT',
-      'production runtime is not healthy before mutation',
-      { httpStatus: 409 },
-    );
+    throw preDispatchRuntimeFault(before);
   }
 
   let frontier;
