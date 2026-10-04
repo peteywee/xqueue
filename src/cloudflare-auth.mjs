@@ -8,12 +8,12 @@ function requireNonEmpty(value, name) {
   return value;
 }
 
-export function classifyCloudflareApiToken(token) {
-  requireNonEmpty(token, 'CLOUDFLARE_API_TOKEN');
+export function classifyCloudflareApiToken(token, label = 'CLOUDFLARE_API_TOKEN') {
+  requireNonEmpty(token, label);
 
   if (token !== token.trim() || /\s/.test(token)) {
     throw new Error(
-      'CLOUDFLARE_API_TOKEN contains whitespace; paste only the raw token secret',
+      label + ' contains whitespace; paste only the raw token secret',
     );
   }
 
@@ -21,12 +21,12 @@ export function classifyCloudflareApiToken(token) {
   if (token.startsWith(USER_TOKEN_PREFIX)) return 'user';
 
   throw new Error(
-    'unsupported Cloudflare API token format; expected a prefixed cfat_ account token or cfut_ user token',
+    label + ' has an unsupported Cloudflare API token format; expected a prefixed cfat_ account token or cfut_ user token',
   );
 }
 
-export function cloudflareTokenVerifyUrl({ token, accountId }) {
-  const tokenType = classifyCloudflareApiToken(token);
+export function cloudflareTokenVerifyUrl({ token, accountId, label = 'CLOUDFLARE_API_TOKEN' }) {
+  const tokenType = classifyCloudflareApiToken(token, label);
 
   if (tokenType === 'account') {
     if (typeof accountId !== 'string' || !/^[0-9a-f]{32}$/i.test(accountId)) {
@@ -62,12 +62,13 @@ export async function verifyCloudflareApiToken({
   token = process.env.CLOUDFLARE_API_TOKEN,
   accountId = process.env.CLOUDFLARE_ACCOUNT_ID,
   fetchImpl = globalThis.fetch,
+  label = 'CLOUDFLARE_API_TOKEN',
 } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Cloudflare token verification requires fetch support');
   }
 
-  const { tokenType, url } = cloudflareTokenVerifyUrl({ token, accountId });
+  const { tokenType, url } = cloudflareTokenVerifyUrl({ token, accountId, label });
 
   let response;
   try {

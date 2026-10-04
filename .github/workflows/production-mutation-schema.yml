@@ -1,0 +1,148 @@
+name: Production Mutation Schema
+
+# Governed path for #145 stage B. Observe is read-only. Apply changes the
+# production D1 schema (0015-0017 only), so it runs only on main, only when
+# dispatched with the exact confirmation, only in the protected
+# production-mutation-schema environment, and only after the script's gates,
+# recovery checkpoint, and fresh re-read pass.
+#
+# The credential is MUTATION_D1_API_TOKEN (D1 + Time Travel, no Workers
+# scripts access; the script refuses a token that can reach Workers scripts).
+# It must be an environment secret of production-mutation-schema, never a
+# repository secret, so only jobs admitted to that environment can read it.
+# The environment must exist with required reviewers and a main-only
+# deployment branch policy before first use; GitHub creates a missing
+# environment with no protection. Only the script step receives the token.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'observe (read-only) or apply'
+        required: true
+        default: observe
+        type: choice
+        options:
+          - observe
+          - apply
+      confirm:
+        description: 'Required for apply: the schema confirmation phrase'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xqueue-production-mutation
+  cancel-in-progress: false
+
+env:
+  EVIDENCE_DIR: /tmp/xqueue-production-mutation-schema
+
+jobs:
+  observe:
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'observe'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Read-only, but the D1 credential lives only in this environment.
+    environment: production-mutation-schema
+
+    steps:
+      - name: Checkout exact main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require the dispatched commit to still be main
+        env:
+          DISPATCHED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove the schema path and migration lanes locally
+        run: |
+          node --test \
+            test/production-mutation-schema.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/publication-mutation-mutex.test.mjs
+
+      - name: Observe production mutation schema (read-only)
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MUTATION_D1_API_TOKEN }}
+        run: pnpm production:mutation-schema --environment production --output "$EVIDENCE_DIR"
+
+      - name: Upload schema evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: xqueue-production-mutation-schema-observe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}/*.json
+          if-no-files-found: warn
+
+  apply:
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'apply'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Required reviewers on this environment are the owner approval gate.
+    environment: production-mutation-schema
+
+    steps:
+      - name: Checkout exact main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Require the dispatched commit to still be main
+        env:
+          DISPATCHED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$DISPATCHED_SHA"
+
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Prove the schema path and migration lanes locally
+        run: |
+          node --test \
+            test/production-mutation-schema.test.mjs \
+            test/cloudflare-migration-lanes.test.mjs \
+            test/publication-mutation-mutex.test.mjs
+
+      - name: Apply production mutation schema
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.MUTATION_D1_API_TOKEN }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          pnpm production:mutation-schema --environment production \
+            --apply --confirm "$CONFIRM" --output "$EVIDENCE_DIR"
+
+      - name: Upload schema evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: xqueue-production-mutation-schema-apply-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}/*.json
+          if-no-files-found: warn
