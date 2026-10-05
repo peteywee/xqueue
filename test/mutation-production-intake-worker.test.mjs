@@ -40,6 +40,8 @@ function fakeDb({
   committedGeneration = 12,
   committedDigest = RUNTIME_B,
   replay = false,
+  publicationRows = [],
+  publicationReadError = null,
 } = {}) {
   return {
     prepare(sql) {
@@ -87,6 +89,11 @@ function fakeDb({
                 readback_digest: '9'.repeat(64),
               }],
             };
+          }
+          if (sql.includes('FROM publication_state WHERE post_id=? OR scheduled_at=?')) {
+            assert.equal(state.args.length, 2, 'occupancy lookup must bind post id and slot');
+            if (publicationReadError) throw publicationReadError;
+            return { results: publicationRows };
           }
           if (sql.includes('FROM queue_assignments')) return { results: [] };
           if (sql.includes('FROM queue_content c')) {
@@ -887,6 +894,43 @@ test('pre-dispatch runtime planning races return stable replan-required conflict
       error?.httpStatus === 409 &&
       error?.retryable === true,
   );
+});
+
+test('a planned slot or post that already has a publication_state row is refused before dispatch', async () => {
+  for (const row of [
+    { post_id: 'C-CANCELLED', scheduled_at: '2026-10-04T19:30:00.000Z', status: 'skipped' },
+    { post_id: 'I-PRODUCTION-TEST-1', scheduled_at: '2027-02-01T00:00:00.000Z', status: 'scheduled' },
+  ]) {
+    const d = deps();
+    let dispatched = false;
+    d.runMutation = async () => {
+      dispatched = true;
+      throw new Error('must not dispatch');
+    };
+    await assert.rejects(
+      () => runProductionIntakeRequest(env(fakeDb({ publicationRows: [row] })), payload(), d),
+      (error) =>
+        error?.faultClass === 'PRE_DISPATCH_STATE_CONFLICT' &&
+        error?.httpStatus === 409 &&
+        error?.retryable !== true &&
+        error.message.includes(row.post_id + '@' + row.scheduled_at),
+    );
+    assert.equal(dispatched, false, row.post_id);
+  }
+});
+
+test('an unreadable publication_state occupancy check is retryable and dispatches nothing', async () => {
+  const d = deps();
+  let dispatched = false;
+  d.runMutation = async () => {
+    dispatched = true;
+    throw new Error('must not dispatch');
+  };
+  await assert.rejects(
+    () => runProductionIntakeRequest(env(fakeDb({ publicationReadError: new Error('D1 read timed out') })), payload(), d),
+    (error) => error?.faultClass === 'PRE_DISPATCH_STATE_UNAVAILABLE' && error?.httpStatus === 503 && error?.retryable === true,
+  );
+  assert.equal(dispatched, false);
 });
 
 test('post-commit verification accepts a later healthy runtime head', async () => {

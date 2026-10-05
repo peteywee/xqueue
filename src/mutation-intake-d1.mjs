@@ -105,11 +105,12 @@ function assertStmt(db, predicateSql, predicateArgs, operationId, recordedAt) {
   );
 }
 
-// Intake creates each publication_state row as 'scheduled'. After that only
-// the publisher moves it (publishing, posted, reconciliation), always under an
-// attempt and never changing the schedule. So an applied intake stays applied
-// while its post publishes, and the readback and the finalize assertion use
-// the same rule.
+// Intake creates each publication_state row as 'scheduled'. The publisher
+// then moves it through publishing, posted and reconciliation under an
+// attempt without touching the schedule, so an applied intake stays applied
+// while its post publishes. Deferral, replacement and owner operations change
+// the assignment or the schedule, so a replay after them is a contradiction
+// here. The readback and the finalize assertion evaluate this same SQL.
 const PUBLICATION_ROW_SQL =
   'p.post_id=c.content_id AND p.scheduled_at=? AND p.scheduled_date=? AND p.scheduled_time=? ' +
   'AND p.timezone=? AND p.slot IS ? AND (' +
@@ -126,17 +127,33 @@ function publicationRowArgs(intakeItem) {
   ];
 }
 
-function publicationRowMatches(row, intakeItem) {
-  const progressed = row.publication_status === 'scheduled'
-    ? row.publication_attempt_id == null
-    : ['publishing', 'posted', 'needs_reconciliation'].includes(row.publication_status) &&
-      row.publication_attempt_id != null;
-  return progressed &&
-    row.publication_scheduled_at === intakeItem.resolved_at &&
-    row.publication_scheduled_date === intakeItem.scheduled_date &&
-    row.publication_scheduled_time === intakeItem.scheduled_time &&
-    row.publication_timezone === intakeItem.timezone &&
-    (row.publication_slot ?? null) === (intakeItem.slot_label ?? null);
+// The apply batch inserts each item's publication_state row, which is unique
+// on post_id and on scheduled_at across every status (a cancelled post keeps
+// its skipped row). A collision would abort the batch only after dispatch, so
+// a fresh plan is checked against publication_state before anything is
+// claimed. A replay never runs this: its rows already exist.
+export async function readPublicationOccupancy({ db, intakePlan }) {
+  const d1 = ensureDb(db);
+  if (!Array.isArray(intakePlan?.items) || intakePlan.items.length === 0) {
+    throw new Error('intake plan items are required');
+  }
+  const groups = await Promise.all(intakePlan.items.map(async (item) => {
+    const result = await stmt(
+      d1,
+      'SELECT post_id,scheduled_at,status FROM publication_state WHERE post_id=? OR scheduled_at=?',
+      item.content_id,
+      item.resolved_at,
+    ).all();
+    return Array.isArray(result) ? result : (result?.results ?? []);
+  }));
+  const seen = new Set();
+  const occupied = [];
+  for (const row of groups.flat()) {
+    if (seen.has(row.post_id)) continue;
+    seen.add(row.post_id);
+    occupied.push(Object.freeze({ post_id: row.post_id, scheduled_at: row.scheduled_at, status: row.status }));
+  }
+  return Object.freeze(occupied);
 }
 
 function validatePair(controlPlan, intakePlan) {
@@ -296,14 +313,12 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
         'r.content_digest AS revision_digest,a.assignment_version,' +
         'a.content_revision AS assignment_content_revision,a.content_digest AS assignment_digest,' +
         'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state,' +
-        'p.status AS publication_status,p.scheduled_at AS publication_scheduled_at,' +
-        'p.scheduled_date AS publication_scheduled_date,p.scheduled_time AS publication_scheduled_time,' +
-        'p.timezone AS publication_timezone,p.slot AS publication_slot,p.attempt_id AS publication_attempt_id ' +
+        'EXISTS (SELECT 1 FROM publication_state p WHERE ' + PUBLICATION_ROW_SQL + ') AS publication_exact ' +
         'FROM queue_content c ' +
         'JOIN queue_content_revisions r ON r.content_id=c.content_id AND r.revision=c.current_revision ' +
         'JOIN queue_assignments a ON a.content_id=c.content_id AND a.assignment_id=? ' +
-        'LEFT JOIN publication_state p ON p.post_id=c.content_id ' +
         'WHERE c.content_id=? ORDER BY a.assignment_version DESC LIMIT 1',
+      ...publicationRowArgs(intakeItem),
       intakeItem.assignment_id,
       intakeItem.content_id,
     );
@@ -321,7 +336,7 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       row.resolved_at === intakeItem.resolved_at &&
       row.status === 'active' &&
       row.lifecycle_state === 'scheduled' &&
-      publicationRowMatches(row, intakeItem)
+      Number(row.publication_exact) === 1
     );
 
     items.push(Object.freeze({

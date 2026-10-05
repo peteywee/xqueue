@@ -866,10 +866,8 @@ test('the apply seeds a missing intake frontier, and observe reports it absent f
   const observe = await runMain(['--environment', 'production'], { run: sim.run });
   assert.equal(observe.evidence.status, 'ready');
   assert.deepEqual({ ...observe.evidence.intakeFrontierBefore }, {
-    activeAssignments: 1,
-    lastActiveSlot: '2027-01-07T20:30:00.000Z',
-    publicationRows: 1,
-    lastPublicationSlot: '2027-01-07T20:30:00.000Z',
+    usedSlots: 2,
+    lastUsedSlot: '2027-01-07T20:30:00.000Z',
     frontierRows: 0,
     frontierResolvedAt: null,
     frontierPending: null,
@@ -884,21 +882,16 @@ test('the apply seeds a missing intake frontier, and observe reports it absent f
 
 test('frontier readiness counts every used slot, not only active assignments', () => {
   const facts = (overrides) => ({
-    activeAssignments: 0, lastActiveSlot: null, publicationRows: 0, lastPublicationSlot: null,
-    frontierRows: 0, frontierResolvedAt: null, frontierPending: null, ...overrides,
+    usedSlots: 0, lastUsedSlot: null, frontierRows: 0, frontierResolvedAt: null, frontierPending: null, ...overrides,
   });
   assert.equal(intakeFrontierReady(facts({})), true, 'an empty queue needs no frontier');
-  assert.equal(intakeFrontierReady(facts({ publicationRows: 2, lastPublicationSlot: '2027-01-08T15:00:00.000Z' })), false,
-    'skipped publication rows alone still need a frontier');
-  assert.equal(intakeFrontierSeedable(facts({ publicationRows: 2, lastPublicationSlot: '2027-01-08T15:00:00.000Z' })), true,
-    '0018 seeds a missing one');
-  assert.equal(intakeFrontierReady(facts({
-    activeAssignments: 1, lastActiveSlot: '2027-01-07T20:30:00.000Z', publicationRows: 1,
-    lastPublicationSlot: '2027-01-07T20:30:00.000Z', frontierRows: 1, frontierResolvedAt: '2027-01-07T20:30:00.000Z',
-  })), true);
-  assert.equal(intakeFrontierSeedable(facts({
-    activeAssignments: 1, lastActiveSlot: '2027-01-07T20:30:00.000Z', frontierRows: 1, frontierResolvedAt: '2026-01-01T00:00:00.000Z',
-  })), false, 'a stale frontier is never seeded over');
+  const used = { usedSlots: 3, lastUsedSlot: '2027-01-08T15:00:00.000Z' };
+  assert.equal(intakeFrontierReady(facts(used)), false, 'used slots need a frontier');
+  assert.equal(intakeFrontierSeedable(facts(used)), true, '0018 seeds a missing one');
+  assert.equal(intakeFrontierReady(facts({ ...used, frontierRows: 1, frontierResolvedAt: '2027-01-08T15:00:00.000Z' })), true);
+  assert.equal(intakeFrontierReady(facts({ ...used, frontierRows: 1, frontierResolvedAt: '2027-01-08T15:00:00.000Z', frontierPending: 'intake-x' })), false);
+  assert.equal(intakeFrontierSeedable(facts({ ...used, frontierRows: 1, frontierResolvedAt: '2026-01-01T00:00:00.000Z' })), false,
+    'a stale frontier is never seeded over');
   assert.equal(intakeFrontierReady(null), false);
 });
 
@@ -924,7 +917,7 @@ test('a cancelled post holding a later slot keeps an older frontier from countin
   const { evidence } = await runMain(['--environment', 'production'], { run: sim.run });
   assert.equal(evidence.status, 'blocked');
   assert.deepEqual(evidence.blockers.map((item) => item.id), ['intake_frontier_not_ready']);
-  assert.equal(evidence.intakeFrontierBefore.lastPublicationSlot, '2027-01-08T15:00:00.000Z');
+  assert.equal(evidence.intakeFrontierBefore.lastUsedSlot, '2027-01-08T15:00:00.000Z');
 });
 
 test('already-active schema still requires a ready intake frontier', async () => {
@@ -938,7 +931,7 @@ test('already-active schema still requires a ready intake frontier', async () =>
 test('an unreadable intake frontier is a named blocker with evidence, not a crash', async () => {
   const sim = simulatedProduction({ drift: ACTIVE_ASSIGNMENT_SQL });
   const run = (command, argv) => {
-    if (argv.some((arg) => String(arg).includes('last_publication_slot'))) {
+    if (argv.some((arg) => String(arg).startsWith('SELECT (SELECT COUNT(*) FROM (SELECT resolved_at'))) {
       throw new Error('wrangler d1 execute timed out');
     }
     return sim.run(command, argv);
@@ -949,6 +942,23 @@ test('an unreadable intake frontier is a named blocker with evidence, not a cras
   assert.equal(exitCode, 1);
   assert.equal(evidence.intakeFrontierBefore, null);
   assert.deepEqual(evidence.blockers.map((item) => item.id), ['intake_frontier_unreadable']);
+  assert.equal(sim.calls.some((key) => key.includes('migrations apply')), false);
+});
+
+test('a frontier that moves after the checkpoint blocks the apply', async () => {
+  const sim = simulatedProduction({ drift: ACTIVE_ASSIGNMENT_SQL });
+  const run = (command, argv) => {
+    const sql = argv[argv.indexOf('--command') + 1] ?? '';
+    if (sql.startsWith(PUBLICATION_SAFETY_SQL) && sql.includes('used_slots')) {
+      sim.db.exec("INSERT INTO queue_intake_frontier VALUES (1, 1, '2027-01-07T20:30:00.000Z', NULL, NULL, '2026-10-05T00:00:00.000Z')");
+    }
+    return sim.run(command, argv);
+  };
+  const { evidence, exitCode } = await runMain(APPLY, { run, captureBookmark: async () => BOOKMARK_1 });
+  assert.equal(evidence.status, 'blocked');
+  assert.equal(exitCode, 1);
+  assert.deepEqual(evidence.blockers.map((item) => item.id), ['intake_frontier_changed_before_apply']);
+  assert.equal(evidence.intakeFrontierFresh.frontierRows, 1);
   assert.equal(sim.calls.some((key) => key.includes('migrations apply')), false);
 });
 

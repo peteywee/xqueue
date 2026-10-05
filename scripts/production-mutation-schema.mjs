@@ -351,8 +351,56 @@ const PUBLICATION_SAFETY_STATEMENTS = PUBLICATION_SAFETY_SQL.split(';').filter((
 // The post-checkpoint re-read is one batch, so publication, migration and
 // schema facts come from one snapshot and the checkpoint-to-apply gap stays
 // one process long.
+// Guarded intake appends after the intake frontier. 0018 seeds it where 0007
+// could not (assignments loaded after 0007 ran), so whenever any slot is in
+// use the frontier must exist at or after the last one. "Used" is 0018's own
+// definition: active assignments and every publication_state row, since
+// scheduled_at is unique across every publication status.
+const USED_SLOTS_SQL =
+  "SELECT resolved_at AS slot FROM queue_assignments WHERE status = 'active' " +
+  'UNION ALL SELECT scheduled_at AS slot FROM publication_state';
+export const INTAKE_FRONTIER_SQL =
+  'SELECT (SELECT COUNT(*) FROM (' + USED_SLOTS_SQL + ')) AS used_slots, ' +
+  '(SELECT MAX(slot) FROM (' + USED_SLOTS_SQL + ')) AS last_used_slot, ' +
+  '(SELECT COUNT(*) FROM queue_intake_frontier) AS frontier_rows, ' +
+  '(SELECT resolved_at FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_resolved_at, ' +
+  '(SELECT pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_pending;';
+
+function parseIntakeFrontier(payload) {
+  const row = payload?.results?.[0] ?? null;
+  if (!row) throw new Error('intake frontier facts could not be read');
+  return Object.freeze({
+    usedSlots: Number(row.used_slots),
+    lastUsedSlot: row.last_used_slot ?? null,
+    frontierRows: Number(row.frontier_rows),
+    frontierResolvedAt: row.frontier_resolved_at ?? null,
+    frontierPending: row.frontier_pending ?? null,
+  });
+}
+
+export function readIntakeFrontier(run) {
+  return parseIntakeFrontier(d1Query(run, INTAKE_FRONTIER_SQL)?.[0]);
+}
+
+export function intakeFrontierReady(facts) {
+  if (!facts) return false;
+  if (facts.usedSlots === 0) return true;
+  return facts.frontierRows === 1 &&
+    typeof facts.frontierResolvedAt === 'string' &&
+    typeof facts.lastUsedSlot === 'string' &&
+    facts.frontierResolvedAt >= facts.lastUsedSlot &&
+    facts.frontierPending === null;
+}
+
+// Before the apply: 0018 seeds only a missing frontier, so an existing row
+// that is stale or pending can never become ready through this path.
+export function intakeFrontierSeedable(facts) {
+  return intakeFrontierReady(facts) || facts?.frontierRows === 0;
+}
+
 export const FRESH_STATE_SQL =
-  PUBLICATION_SAFETY_SQL + ' SELECT name FROM d1_migrations ORDER BY id; ' + REMOTE_SCHEMA_SQL;
+  PUBLICATION_SAFETY_SQL + ' SELECT name FROM d1_migrations ORDER BY id; ' + REMOTE_SCHEMA_SQL + ' ' +
+  INTAKE_FRONTIER_SQL;
 
 export function readFreshState(run) {
   const payload = d1Query(run, FRESH_STATE_SQL);
@@ -365,6 +413,7 @@ export function readFreshState(run) {
       tbl_name: row.tbl_name,
       sql: row.sql,
     })),
+    intakeFrontier: parseIntakeFrontier(payload?.[PUBLICATION_SAFETY_STATEMENTS + 2]),
   });
 }
 
@@ -453,58 +502,6 @@ export function replaySchema(local, names) {
   } finally {
     db.close();
   }
-}
-
-// Guarded intake appends after the intake frontier. 0018 seeds it where 0007
-// could not (assignments loaded after 0007 ran), so whenever any slot is in
-// use the frontier must exist at or after the last one: the latest active
-// assignment or publication_state row (scheduled_at is unique across every
-// publication status).
-export const INTAKE_FRONTIER_SQL =
-  "SELECT (SELECT COUNT(*) FROM queue_assignments WHERE status='active') AS active_assignments, " +
-  "(SELECT MAX(resolved_at) FROM queue_assignments WHERE status='active') AS last_active_slot, " +
-  '(SELECT COUNT(*) FROM publication_state) AS publication_rows, ' +
-  '(SELECT MAX(scheduled_at) FROM publication_state) AS last_publication_slot, ' +
-  '(SELECT COUNT(*) FROM queue_intake_frontier) AS frontier_rows, ' +
-  '(SELECT resolved_at FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_resolved_at, ' +
-  '(SELECT pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_pending;';
-
-export function readIntakeFrontier(run) {
-  const row = d1Query(run, INTAKE_FRONTIER_SQL)?.[0]?.results?.[0] ?? null;
-  if (!row) throw new Error('intake frontier facts could not be read');
-  return Object.freeze({
-    activeAssignments: Number(row.active_assignments),
-    lastActiveSlot: row.last_active_slot ?? null,
-    publicationRows: Number(row.publication_rows),
-    lastPublicationSlot: row.last_publication_slot ?? null,
-    frontierRows: Number(row.frontier_rows),
-    frontierResolvedAt: row.frontier_resolved_at ?? null,
-    frontierPending: row.frontier_pending ?? null,
-  });
-}
-
-function lastUsedSlot(facts) {
-  return [facts.lastActiveSlot, facts.lastPublicationSlot]
-    .filter((slot) => typeof slot === 'string')
-    .sort()
-    .at(-1) ?? null;
-}
-
-export function intakeFrontierReady(facts) {
-  if (!facts) return false;
-  if (facts.activeAssignments === 0 && facts.publicationRows === 0) return true;
-  const lastSlot = lastUsedSlot(facts);
-  return facts.frontierRows === 1 &&
-    typeof facts.frontierResolvedAt === 'string' &&
-    lastSlot !== null &&
-    facts.frontierResolvedAt >= lastSlot &&
-    facts.frontierPending === null;
-}
-
-// Before the apply: 0018 seeds only a missing frontier, so an existing row
-// that is stale or pending can never become ready through this path.
-export function intakeFrontierSeedable(facts) {
-  return intakeFrontierReady(facts) || facts?.frontierRows === 0;
 }
 
 function readSingletons(run) {
@@ -755,6 +752,12 @@ export async function main(
       detail: 'd1_migrations changed after the checkpoint; nothing was applied. Re-run observe first.',
     });
   }
+  if (JSON.stringify(fresh.intakeFrontier) !== JSON.stringify(intakeFrontierBefore)) {
+    freshBlockers.push({
+      id: 'intake_frontier_changed_before_apply',
+      detail: 'The intake frontier or the used slots changed after the checkpoint; nothing was applied. Re-run observe first.',
+    });
+  }
   if (!compareSchema(replaySchema(local, appliedBefore), fresh.schema).identical) {
     freshBlockers.push({
       id: 'production_schema_drift',
@@ -767,6 +770,7 @@ export async function main(
       checkpoint,
       publicationFresh: epochs(fresh.safety),
       appliedFresh: fresh.applied,
+      intakeFrontierFresh: fresh.intakeFrontier,
     });
   }
 
@@ -866,7 +870,8 @@ export async function main(
   if (intakeFrontier !== null && !readback.intakeFrontierReady) {
     failures.push({
       id: 'intake_frontier_not_ready',
-      detail: 'Active assignments exist but the intake frontier is missing, pending, or before the last active slot.',
+      detail: 'Slots are in use but the intake frontier is missing, pending, or before the last used slot ' +
+        '(active assignment or publication_state row).',
     });
   }
   if (publicationAfter !== null && !readback.authorityUnchanged) {

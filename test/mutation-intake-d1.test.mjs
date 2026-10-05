@@ -16,6 +16,7 @@ import {
   prepareIntakeAtomicFinalize,
   projectIntakeRuntimeRevision,
   readIntakeMutationCompletion,
+  readPublicationOccupancy,
 } from '../src/mutation-intake-d1.mjs';
 
 function sha256(value) {
@@ -41,6 +42,10 @@ class D1Statement {
 
   async first() {
     return this.db.prepare(this.sql).get(...this.args) ?? null;
+  }
+
+  async all() {
+    return { results: this.db.prepare(this.sql).all(...this.args).map((row) => ({ ...row })) };
   }
 }
 
@@ -519,5 +524,23 @@ test('finalize still commits when the publisher claims the post between readback
     db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
   }).statements);
   assert.equal(raw.prepare('SELECT state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id).state, 'COMPLETE');
+  raw.close();
+});
+
+test('publication occupancy finds a planned slot or post already in publication_state, in any status', async () => {
+  const { raw, d1 } = fixture();
+  const { intakePlan } = plans();
+  assert.deepEqual(await readPublicationOccupancy({ db: d1, intakePlan }), []);
+
+  // A cancelled post keeps its skipped row, and scheduled_at is unique across
+  // every status, so its slot is still taken.
+  raw.exec(
+    "INSERT INTO publication_state (post_id,status,scheduled_at,updated_at,generation,skipped_at,skip_reason) " +
+    "VALUES ('C-CANCELLED','skipped','2026-09-30T10:00:00.000Z','2026-09-29T09:00:00.000Z',2,'2026-09-29T09:00:00.000Z','owner')",
+  );
+  assert.deepEqual(
+    (await readPublicationOccupancy({ db: d1, intakePlan })).map((row) => ({ ...row })),
+    [{ post_id: 'C-CANCELLED', scheduled_at: '2026-09-30T10:00:00.000Z', status: 'skipped' }],
+  );
   raw.close();
 });
