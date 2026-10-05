@@ -105,6 +105,40 @@ function assertStmt(db, predicateSql, predicateArgs, operationId, recordedAt) {
   );
 }
 
+// Intake creates each publication_state row as 'scheduled'. After that only
+// the publisher moves it (publishing, posted, reconciliation), always under an
+// attempt and never changing the schedule. So an applied intake stays applied
+// while its post publishes, and the readback and the finalize assertion use
+// the same rule.
+const PUBLICATION_ROW_SQL =
+  'p.post_id=c.content_id AND p.scheduled_at=? AND p.scheduled_date=? AND p.scheduled_time=? ' +
+  'AND p.timezone=? AND p.slot IS ? AND (' +
+  "(p.status='scheduled' AND p.attempt_id IS NULL) OR " +
+  "(p.status IN ('publishing','posted','needs_reconciliation') AND p.attempt_id IS NOT NULL))";
+
+function publicationRowArgs(intakeItem) {
+  return [
+    intakeItem.resolved_at,
+    intakeItem.scheduled_date,
+    intakeItem.scheduled_time,
+    intakeItem.timezone,
+    intakeItem.slot_label ?? null,
+  ];
+}
+
+function publicationRowMatches(row, intakeItem) {
+  const progressed = row.publication_status === 'scheduled'
+    ? row.publication_attempt_id == null
+    : ['publishing', 'posted', 'needs_reconciliation'].includes(row.publication_status) &&
+      row.publication_attempt_id != null;
+  return progressed &&
+    row.publication_scheduled_at === intakeItem.resolved_at &&
+    row.publication_scheduled_date === intakeItem.scheduled_date &&
+    row.publication_scheduled_time === intakeItem.scheduled_time &&
+    row.publication_timezone === intakeItem.timezone &&
+    (row.publication_slot ?? null) === (intakeItem.slot_label ?? null);
+}
+
 function validatePair(controlPlan, intakePlan) {
   requiredString(controlPlan?.operation_id, 'mutation operation id');
   requiredString(intakePlan?.operation_id, 'intake operation id');
@@ -287,13 +321,7 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       row.resolved_at === intakeItem.resolved_at &&
       row.status === 'active' &&
       row.lifecycle_state === 'scheduled' &&
-      row.publication_status === 'scheduled' &&
-      row.publication_scheduled_at === intakeItem.resolved_at &&
-      row.publication_scheduled_date === intakeItem.scheduled_date &&
-      row.publication_scheduled_time === intakeItem.scheduled_time &&
-      row.publication_timezone === intakeItem.timezone &&
-      (row.publication_slot ?? null) === (intakeItem.slot_label ?? null) &&
-      row.publication_attempt_id == null
+      publicationRowMatches(row, intakeItem)
     );
 
     items.push(Object.freeze({
@@ -752,9 +780,8 @@ export function prepareIntakeAtomicFinalize({
         "WHERE c.content_id=? AND c.current_revision=? AND c.intake_state='scheduled' " +
         'AND r.content_digest=? AND a.assignment_version=? AND a.content_revision=? AND a.content_digest=? ' +
         "AND a.target_account=? AND a.policy_version=? AND a.resolved_at=? AND a.status='active' " +
-        "AND a.lifecycle_state='scheduled' AND EXISTS (SELECT 1 FROM publication_state p " +
-        "WHERE p.post_id=c.content_id AND p.status='scheduled' AND p.scheduled_at=a.resolved_at " +
-        'AND p.attempt_id IS NULL))',
+        "AND a.lifecycle_state='scheduled' AND EXISTS (SELECT 1 FROM publication_state p WHERE " +
+        PUBLICATION_ROW_SQL + '))',
       [
         intakeItem.assignment_id,
         intakeItem.content_id,
@@ -766,6 +793,7 @@ export function prepareIntakeAtomicFinalize({
         intakeItem.target_account,
         intakeItem.policy_version,
         intakeItem.resolved_at,
+        ...publicationRowArgs(intakeItem),
       ],
       controlPlan.operation_id,
       recordedAt,

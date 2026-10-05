@@ -9,6 +9,8 @@ function database() {
   const db = new DatabaseSync(':memory:');
   db.exec(`
     CREATE TABLE queue_assignments (content_id TEXT, status TEXT NOT NULL, resolved_at TEXT NOT NULL);
+    CREATE TABLE publication_state (post_id TEXT PRIMARY KEY, status TEXT NOT NULL, scheduled_at TEXT NOT NULL);
+    CREATE UNIQUE INDEX publication_state_scheduled_at_uq ON publication_state(scheduled_at);
     CREATE TABLE queue_intake_frontier (
       singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
       generation INTEGER NOT NULL CHECK (generation >= 1),
@@ -39,6 +41,19 @@ test('0018 seeds a missing frontier at the last active slot (assignments loaded 
   // Applying it again changes nothing.
   db.exec(SEED);
   assert.deepEqual(frontier(db), [row]);
+});
+
+test('0018 seeds past a cancelled post whose skipped publication row holds a later slot', () => {
+  const db = database();
+  db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('A1', 'active', '2027-01-07T20:30:00.000Z');
+  db.prepare('INSERT INTO queue_assignments VALUES (?,?,?)').run('C2', 'cancelled', '2027-01-08T15:00:00.000Z');
+  const publication = db.prepare('INSERT INTO publication_state VALUES (?,?,?)');
+  publication.run('A1', 'scheduled', '2027-01-07T20:30:00.000Z');
+  publication.run('C2', 'skipped', '2027-01-08T15:00:00.000Z');
+  db.exec(SEED);
+  // publication_state.scheduled_at is unique across every status, so the
+  // next intake slot must come after the skipped row, not reuse it.
+  assert.equal(frontier(db)[0].resolved_at, '2027-01-08T15:00:00.000Z');
 });
 
 test('0018 never touches an existing frontier and seeds nothing for an empty queue', () => {

@@ -31,6 +31,10 @@ const READ_TIMEOUT_MS = 120_000;
 // The publisher wakes every 15 minutes and publishes within a 20-minute grace.
 // Refusing to change schema near a due slot keeps the apply out of that window.
 export const DUE_SLOT_EXCLUSION_MINUTES = 30;
+export const INTAKE_FRONTIER_SEED_MIGRATION = '0018_intake_frontier_seed.sql';
+if (!REQUIRED_MUTATION_MIGRATIONS.includes(INTAKE_FRONTIER_SEED_MIGRATION)) {
+  throw new Error('the intake frontier seed must be a required mutation migration');
+}
 
 function fail(message) {
   throw new Error(message);
@@ -452,11 +456,15 @@ export function replaySchema(local, names) {
 }
 
 // Guarded intake appends after the intake frontier. 0018 seeds it where 0007
-// could not (assignments loaded after 0007 ran), so the frontier must exist at
-// or after the last active slot whenever there are active assignments.
+// could not (assignments loaded after 0007 ran), so whenever any slot is in
+// use the frontier must exist at or after the last one: the latest active
+// assignment or publication_state row (scheduled_at is unique across every
+// publication status).
 export const INTAKE_FRONTIER_SQL =
   "SELECT (SELECT COUNT(*) FROM queue_assignments WHERE status='active') AS active_assignments, " +
   "(SELECT MAX(resolved_at) FROM queue_assignments WHERE status='active') AS last_active_slot, " +
+  '(SELECT COUNT(*) FROM publication_state) AS publication_rows, ' +
+  '(SELECT MAX(scheduled_at) FROM publication_state) AS last_publication_slot, ' +
   '(SELECT COUNT(*) FROM queue_intake_frontier) AS frontier_rows, ' +
   '(SELECT resolved_at FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_resolved_at, ' +
   '(SELECT pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_pending;';
@@ -467,19 +475,36 @@ export function readIntakeFrontier(run) {
   return Object.freeze({
     activeAssignments: Number(row.active_assignments),
     lastActiveSlot: row.last_active_slot ?? null,
+    publicationRows: Number(row.publication_rows),
+    lastPublicationSlot: row.last_publication_slot ?? null,
     frontierRows: Number(row.frontier_rows),
     frontierResolvedAt: row.frontier_resolved_at ?? null,
     frontierPending: row.frontier_pending ?? null,
   });
 }
 
+function lastUsedSlot(facts) {
+  return [facts.lastActiveSlot, facts.lastPublicationSlot]
+    .filter((slot) => typeof slot === 'string')
+    .sort()
+    .at(-1) ?? null;
+}
+
 export function intakeFrontierReady(facts) {
   if (!facts) return false;
-  if (facts.activeAssignments === 0) return true;
+  if (facts.activeAssignments === 0 && facts.publicationRows === 0) return true;
+  const lastSlot = lastUsedSlot(facts);
   return facts.frontierRows === 1 &&
     typeof facts.frontierResolvedAt === 'string' &&
-    facts.frontierResolvedAt >= facts.lastActiveSlot &&
+    lastSlot !== null &&
+    facts.frontierResolvedAt >= lastSlot &&
     facts.frontierPending === null;
+}
+
+// Before the apply: 0018 seeds only a missing frontier, so an existing row
+// that is stale or pending can never become ready through this path.
+export function intakeFrontierSeedable(facts) {
+  return intakeFrontierReady(facts) || facts?.frontierRows === 0;
 }
 
 function readSingletons(run) {
@@ -623,6 +648,29 @@ export async function main(
     });
   }
 
+  // A frontier 0018 cannot make ready blocks before production changes; once
+  // 0018 is applied, only a ready frontier counts as active.
+  let intakeFrontierBefore = null;
+  try {
+    intakeFrontierBefore = readIntakeFrontier(run);
+  } catch (error) {
+    blockers.push({ id: 'intake_frontier_unreadable', detail: message(error) });
+  }
+  if (intakeFrontierBefore !== null) {
+    const seedPending = plan.pending.includes(INTAKE_FRONTIER_SEED_MIGRATION);
+    const frontierOk = seedPending
+      ? intakeFrontierSeedable(intakeFrontierBefore)
+      : intakeFrontierReady(intakeFrontierBefore);
+    if (!frontierOk) {
+      blockers.push({
+        id: 'intake_frontier_not_ready',
+        detail: seedPending
+          ? 'An intake frontier exists but is stale or pending; 0018 seeds only a missing frontier.'
+          : 'The intake frontier must exist at or after the last used slot with no pending operation.',
+      });
+    }
+  }
+
   const identities = local
     .filter((item) => plan.pending.includes(item.name) || plan.required.includes(item.name))
     .map(({ name, sha256: digest, gitBlob }) => ({ name, sha256: digest, gitBlob }));
@@ -643,7 +691,7 @@ export async function main(
     },
     publicationBefore: epochs(safetyBefore),
     // Observe evidence: 0018 seeds a missing frontier during the apply.
-    intakeFrontierBefore: readIntakeFrontier(run),
+    intakeFrontierBefore,
     nextDue: safetyBefore.nextDue,
     compatibility,
     // Activation evidence only: the schema is safe under either publisher.

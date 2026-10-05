@@ -324,7 +324,7 @@ const ALLOWED_TABLES = new Set([
 ]);
 
 const WRITE_STATEMENT_RE =
-  /\b(?:INSERT\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+  /\b(?:INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
 
 const writeTargets = [];
 for (const { path, text } of workerFiles) {
@@ -386,6 +386,86 @@ gate(
   unknownWrites
     .map((write) => write.where + '(' + write.table + ')')
     .join(' ') || 'declared tables only',
+);
+
+// Worker entry modules also import shared modules from src/, which run with
+// the same D1 binding, so publication-plane tables are checked across the
+// whole imported graph. The one writer outside the publisher is guarded
+// intake creating a new post's 'scheduled' publication_state row together
+// with its assignment; it may never update, delete or replace one.
+const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"](\.{1,2}\/[^'"]+\.m?js)['"]/g;
+function importedGraph(entries) {
+  const seen = new Set();
+  const pending = [...entries];
+  while (pending.length > 0) {
+    const path = pending.pop();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const text = readFileSync(join(ROOT, path), 'utf8');
+    for (const match of text.matchAll(IMPORT_RE)) {
+      pending.push(relative(ROOT, resolve(ROOT, dirname(path), match[1])));
+    }
+  }
+  return [...seen].sort();
+}
+
+const PUBLICATION_PLANE_TABLES = new Set([
+  ...LEDGER_TABLES,
+  ...FENCE_TABLES,
+  ...HALT_TABLES,
+  ...LEASE_TABLES,
+]);
+const INTAKE_PUBLICATION_WRITER = 'src/mutation-intake-d1.mjs';
+const importedSharedFiles = readAll(
+  importedGraph(workerFiles.filter(({ path }) => /\.m?js$/.test(path)).map(({ path }) => path))
+    .filter((path) => !path.startsWith('cloudflare/src/'))
+    .map((path) => join(ROOT, path)),
+);
+// d1-mirror-sync-sql.mjs is reachable only for its SQL literal helper; its
+// runtime_metadata compare-and-set compiler belongs to the operator mirror
+// sync. That holds only while every Worker-graph importer takes nothing else.
+const HELPER_ONLY_MODULES = new Map([['src/d1-mirror-sync-sql.mjs', new Set(['sqlTextLiteral'])]]);
+const IMPORT_STATEMENT_RE = /\b(?:import|export)\b[^;'"]*?\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]|\bimport\s*\(\s*['"](\.{1,2}\/[^'"]+)['"]/g;
+function helperOnly(modulePath) {
+  const allowed = HELPER_ONLY_MODULES.get(modulePath);
+  if (!allowed) return false;
+  for (const { path, text } of [...workerFiles, ...importedSharedFiles]) {
+    for (const match of text.matchAll(IMPORT_STATEMENT_RE)) {
+      const spec = match[1] ?? match[2];
+      if (relative(ROOT, resolve(ROOT, dirname(path), spec)) !== modulePath) continue;
+      const names = /^import\s*\{([^}]*)\}\s*from\s*['"]/.exec(match[0])?.[1];
+      if (names === undefined) return false;
+      const imported = names.split(',').map((name) => name.trim()).filter(Boolean);
+      if (imported.some((name) => !allowed.has(name))) return false;
+    }
+  }
+  return true;
+}
+
+const sharedPublicationWrites = [];
+for (const { path, text } of importedSharedFiles) {
+  if (helperOnly(path)) continue;
+  for (const match of text.matchAll(WRITE_STATEMENT_RE)) {
+    const table = match[1].toLowerCase();
+    if (!PUBLICATION_PLANE_TABLES.has(table)) continue;
+    const line = text.slice(0, match.index).split('\n').length;
+    const verb = match[0].slice(0, match[0].length - match[1].length).trim().replace(/\s+/g, ' ').toUpperCase();
+    const sanctioned = path === INTAKE_PUBLICATION_WRITER &&
+      table === 'publication_state' &&
+      verb === 'INSERT INTO' &&
+      /^[^;]*?\)\s*['"]?\s*\+?\s*["']?\s*VALUES \(\?,'scheduled',/.test(text.slice(match.index, match.index + 400));
+    sharedPublicationWrites.push({ where: path + ':' + line, table, verb, sanctioned });
+  }
+}
+const unsanctionedSharedWrites = sharedPublicationWrites.filter((write) => !write.sanctioned);
+gate(
+  'Worker-imported src writes no publication-plane table except intake scheduling',
+  importedSharedFiles.some(({ path }) => path === INTAKE_PUBLICATION_WRITER) &&
+    unsanctionedSharedWrites.length === 0 &&
+    sharedPublicationWrites.filter((write) => write.sanctioned).length <= 1,
+  unsanctionedSharedWrites.map((write) => write.where + '(' + write.verb + ' ' + write.table + ')').join(' ') ||
+    importedSharedFiles.length + ' imported src modules; ' +
+      sharedPublicationWrites.filter((write) => write.sanctioned).length + ' scheduled-row insert',
 );
 
 const runtimeOwnerClearHits = findMatches(

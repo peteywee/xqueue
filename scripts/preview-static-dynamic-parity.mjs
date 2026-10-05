@@ -240,6 +240,7 @@ function main() {
     assignmentCount: boundary.assignmentCount,
     staticBaselineCount: trace.staticCount,
     guardedIntakeCount: trace.guardedIntakeCount,
+    guardedNotAppliedCount: trace.guardedNotAppliedCount,
     guardedIntakeOperations: trace.guardedOperations,
     canonicalRowsHash: boundary.canonicalRowsHash,
     boundaryObservationCount: boundary.observationCount,

@@ -239,6 +239,8 @@ export const GUARDED_INTAKE_EVIDENCE_SQL = [
   '  mo.effect_state,',
   '  io.operation_id AS intake_operation_id,',
   '  io.status AS intake_status,',
+  '  io.target_account AS intake_target_account,',
+  '  io.policy_version AS intake_policy_version,',
   '  ii.content_digest AS intake_content_digest,',
   '  ii.resolved_at AS intake_resolved_at,',
   '  ii.scheduled_date AS intake_scheduled_date,',
@@ -256,8 +258,11 @@ export const GUARDED_INTAKE_EVIDENCE_SQL = [
   'ORDER BY mi.item_key;',
 ].join('\n');
 
+// Only an operation proven to have changed nothing can be set aside. Anything
+// dispatched, ambiguous or applied must trace exactly, so unknown never passes.
+const PROVEN_NOT_APPLIED = new Set(['none', 'not_applied']);
+
 function guardedItemProblem(item) {
-  if (item.operation_kind !== 'intake') return 'is not an intake operation';
   if (item.operation_state !== 'COMPLETE' || item.effect_state !== 'applied') {
     return 'operation ' + item.operation_id + ' is not COMPLETE/applied';
   }
@@ -275,18 +280,15 @@ export function traceGuardedIntakeRows({ staticRows, dynamicRows, guardedItems }
   if (!Array.isArray(dynamicRows)) throw new Error('dynamic rows are required');
   if (!Array.isArray(guardedItems)) throw new Error('guarded intake evidence is required');
 
-  const policies = new Set(staticRows.map((row) => row.policy_version));
-  const accounts = new Set(staticRows.map((row) => row.target_account));
-  if (policies.size !== 1 || accounts.size !== 1) {
-    throw new Error('static baseline must have one policy version and one target account');
-  }
-  const [policyVersion] = policies;
-  const [targetAccount] = accounts;
-
   const staticIds = new Set(staticRows.map((row) => row.content_id));
   const items = new Map();
+  let notApplied = 0;
   for (const item of guardedItems) {
     const key = requiredString(item?.item_key, 'guarded intake item_key');
+    if (PROVEN_NOT_APPLIED.has(item.effect_state)) {
+      notApplied += 1;
+      continue;
+    }
     if (items.has(key)) throw new Error('duplicate guarded intake item: ' + key);
     if (staticIds.has(key)) throw new Error('guarded intake item shadows a static assignment: ' + key);
     items.set(key, item);
@@ -297,33 +299,9 @@ export function traceGuardedIntakeRows({ staticRows, dynamicRows, guardedItems }
   if (missing.length > 0) {
     throw new Error('static assignments missing from the dynamic runtime: ' + missing.slice(0, 8).join(','));
   }
-  const traced = [];
-  for (const row of dynamicRows) {
-    if (staticIds.has(row.content_id)) continue;
-    const item = items.get(row.content_id);
-    if (!item) {
-      throw new Error('active assignment outside the static baseline has no guarded intake evidence: ' + row.content_id);
-    }
-    const problem = guardedItemProblem(item);
-    if (problem) throw new Error('guarded intake assignment ' + row.content_id + ' ' + problem);
-    traced.push(canonicalRow({
-      assignment_id: item.item_key,
-      assignment_version: item.resulting_assignment_version,
-      content_id: item.item_key,
-      content_revision: item.resulting_content_revision,
-      content_digest: item.intake_content_digest,
-      target_account: targetAccount,
-      policy_version: policyVersion,
-      resolved_at: item.intake_resolved_at,
-      scheduled_date: item.intake_scheduled_date,
-      scheduled_time: item.intake_scheduled_time,
-      timezone: item.intake_timezone,
-      slot_label: item.intake_slot_label,
-      lifecycle_state: row.lifecycle_state,
-    }));
-  }
 
-  // Every applied guarded intake item must still be an active assignment.
+  // Every guarded intake item that may have changed the runtime must be
+  // COMPLETE/applied and still an active assignment.
   for (const [key, item] of items) {
     const problem = guardedItemProblem(item);
     if (problem) throw new Error('guarded intake item ' + key + ' ' + problem);
@@ -332,11 +310,37 @@ export function traceGuardedIntakeRows({ staticRows, dynamicRows, guardedItems }
     }
   }
 
+  const traced = [];
+  for (const row of dynamicRows) {
+    if (staticIds.has(row.content_id)) continue;
+    const item = items.get(row.content_id);
+    if (!item) {
+      throw new Error('active assignment outside the static baseline has no guarded intake evidence: ' + row.content_id);
+    }
+    traced.push(canonicalRow({
+      assignment_id: item.item_key,
+      assignment_version: item.resulting_assignment_version,
+      content_id: item.item_key,
+      content_revision: item.resulting_content_revision,
+      content_digest: item.intake_content_digest,
+      target_account: item.intake_target_account,
+      policy_version: item.intake_policy_version,
+      resolved_at: item.intake_resolved_at,
+      scheduled_date: item.intake_scheduled_date,
+      scheduled_time: item.intake_scheduled_time,
+      timezone: item.intake_timezone,
+      slot_label: item.intake_slot_label,
+      // Like static rows, expected rows carry the lifecycle intake created.
+      lifecycle_state: 'scheduled',
+    }));
+  }
+
   const expectedRows = [...staticRows, ...traced].sort(rowOrder);
   return Object.freeze({
     expectedRows: Object.freeze(expectedRows),
     staticCount: staticRows.length,
     guardedIntakeCount: traced.length,
+    guardedNotAppliedCount: notApplied,
     guardedOperations: Object.freeze([...new Set(traced.map((row) => items.get(row.content_id).operation_id))].sort()),
   });
 }

@@ -468,8 +468,13 @@ test('completion readback refuses a missing or inexact publication_state row', a
     ['missing', "DELETE FROM publication_state WHERE post_id='I-ATOMIC-1'"],
     ['wrong time', "UPDATE publication_state SET scheduled_at='2026-09-30T11:00:00.000Z' WHERE post_id='I-ATOMIC-1'"],
     ['wrong slot', "UPDATE publication_state SET slot='rush' WHERE post_id='I-ATOMIC-1'"],
-    ['not scheduled', "UPDATE publication_state SET status='skipped',skipped_at='2026-09-29T10:05:30.000Z',skip_reason='x' WHERE post_id='I-ATOMIC-1'"],
-    ['claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong date', "UPDATE publication_state SET scheduled_date='2026-10-01' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong wall time', "UPDATE publication_state SET scheduled_time='06:00' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong zone', "UPDATE publication_state SET timezone='UTC' WHERE post_id='I-ATOMIC-1'"],
+    ['skipped', "UPDATE publication_state SET status='skipped',skipped_at='2026-09-29T10:05:30.000Z',skip_reason='x' WHERE post_id='I-ATOMIC-1'"],
+    ['scheduled but claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+    ['publishing without an attempt', "UPDATE publication_state SET status='publishing' WHERE post_id='I-ATOMIC-1'"],
+    ['posted without an attempt', "UPDATE publication_state SET status='posted',tweet_id='1999' WHERE post_id='I-ATOMIC-1'"],
   ]) {
     const { raw, d1, intakePlan, controlPlan } = await appliedIntake();
     raw.exec(corrupt);
@@ -481,17 +486,38 @@ test('completion readback refuses a missing or inexact publication_state row', a
 });
 
 test('finalize aborts atomically if the publication_state row changed after readback', async () => {
+  for (const [name, corrupt] of [
+    ['scheduled but claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+    ['slot changed', "UPDATE publication_state SET slot='rush' WHERE post_id='I-ATOMIC-1'"],
+    ['date changed', "UPDATE publication_state SET scheduled_date='2026-10-01' WHERE post_id='I-ATOMIC-1'"],
+    ['wall time changed', "UPDATE publication_state SET scheduled_time='06:00' WHERE post_id='I-ATOMIC-1'"],
+    ['zone changed', "UPDATE publication_state SET timezone='UTC' WHERE post_id='I-ATOMIC-1'"],
+  ]) {
+    const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+    const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+    const completion = intakeCompletionEvidence(controlPlan, observed);
+    raw.exec(corrupt);
+    await assert.rejects(d1.batch(prepareIntakeAtomicFinalize({
+      db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+    }).statements), undefined, name);
+    assert.deepEqual(
+      { ...raw.prepare('SELECT state,effect_state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id) },
+      { state: 'VERIFYING', effect_state: 'applied' },
+      name,
+    );
+    assert.equal(raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id, controlPlan.operation_id, name);
+    raw.close();
+  }
+});
+
+test('finalize still commits when the publisher claims the post between readback and finalize', async () => {
   const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
   const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
   const completion = intakeCompletionEvidence(controlPlan, observed);
-  raw.exec("UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'");
-  await assert.rejects(d1.batch(prepareIntakeAtomicFinalize({
+  raw.exec("UPDATE publication_state SET status='publishing',attempt_id='attempt-1234',generation=generation+1 WHERE post_id='I-ATOMIC-1'");
+  await d1.batch(prepareIntakeAtomicFinalize({
     db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
-  }).statements));
-  assert.deepEqual(
-    { ...raw.prepare('SELECT state,effect_state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id) },
-    { state: 'VERIFYING', effect_state: 'applied' },
-  );
-  assert.equal(raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id, controlPlan.operation_id);
+  }).statements);
+  assert.equal(raw.prepare('SELECT state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id).state, 'COMPLETE');
   raw.close();
 });

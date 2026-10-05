@@ -318,6 +318,7 @@ function guardedExtra(index, at) {
       readback_digest: 'e'.repeat(64), operation_id: 'mutation-intake-' + String(index).repeat(24).slice(0, 24),
       operation_kind: 'intake', operation_state: 'COMPLETE', effect_state: 'applied',
       intake_operation_id: 'intake-' + index, intake_status: 'complete', intake_content_digest: digest,
+      intake_target_account: 'x-primary', intake_policy_version: 1,
       intake_resolved_at: at.resolved_at, intake_scheduled_date: at.scheduled_date, intake_scheduled_time: at.scheduled_time,
       intake_timezone: at.timezone, intake_slot_label: at.slot_label,
     },
@@ -341,7 +342,10 @@ function guardedScenario() {
   });
   const extras = slots.map((at, index) => {
     const { row, item } = guardedExtra(index + 1, at);
-    return { row: { ...row, policy_version: policy, target_account: account }, item };
+    return {
+      row: { ...row, policy_version: policy, target_account: account },
+      item: { ...item, intake_policy_version: policy, intake_target_account: account },
+    };
   });
   const dynamicRows = dynamicFromStatic([...baseline, ...extras.map((extra) => extra.row)]);
   return { baseline, dynamicRows, items: extras.map((extra) => extra.item) };
@@ -371,12 +375,12 @@ test('an extra assignment without exact applied guarded intake evidence fails th
   const cases = [
     ['no evidence', (items) => items.slice(1), /has no guarded intake evidence/],
     ['not COMPLETE', (items) => [{ ...items[0], operation_state: 'VERIFYING' }, items[1]], /is not COMPLETE\/applied/],
-    ['not applied effect', (items) => [{ ...items[0], effect_state: 'ambiguous' }, items[1]], /is not COMPLETE\/applied/],
+    ['ambiguous effect', (items) => [{ ...items[0], effect_state: 'ambiguous' }, items[1]], /is not COMPLETE\/applied/],
+    ['dispatched effect', (items) => [{ ...items[0], effect_state: 'dispatched' }, items[1]], /is not COMPLETE\/applied/],
     ['readback not applied', (items) => [{ ...items[0], readback_status: 'conflict' }, items[1]], /readback is not applied/],
     ['readback digest missing', (items) => [{ ...items[0], readback_digest: null }, items[1]], /readback is not applied/],
     ['intake incomplete', (items) => [{ ...items[0], intake_status: 'claimed' }, items[1]], /complete intake operation/],
     ['intake item missing', (items) => [{ ...items[0], intake_content_digest: null }, items[1]], /complete intake operation/],
-    ['not an intake', (items) => [{ ...items[0], operation_kind: 'revise' }, items[1]], /not an intake operation/],
     ['duplicate evidence', (items) => [...items, items[0]], /duplicate guarded intake item/],
   ];
   for (const [name, mutate, pattern] of cases) {
@@ -396,13 +400,31 @@ test('reconstructed rows must match the runtime exactly, field by field', () => 
     ['intake_content_digest', 'f'.repeat(64)],
     ['resulting_assignment_version', 2],
     ['resulting_content_revision', 2],
+    ['intake_target_account', 'x-secondary'],
+    ['intake_policy_version', (item) => item.intake_policy_version + 1],
   ]) {
     const { baseline, dynamicRows, items } = guardedScenario();
+    const changed = typeof value === 'function' ? value(items[0]) : value;
     const trace = traceGuardedIntakeRows({
-      staticRows: baseline, dynamicRows, guardedItems: [{ ...items[0], [field]: value }, items[1]],
+      staticRows: baseline, dynamicRows, guardedItems: [{ ...items[0], [field]: changed }, items[1]],
     });
     assert.throws(() => assertExactStaticDynamicRows(trace.expectedRows, dynamicRows), /exact row parity failed/, field);
   }
+});
+
+test('only an operation proven to have changed nothing is set aside', () => {
+  const { baseline, dynamicRows, items } = guardedScenario();
+  const discarded = { ...items[0], item_key: 'I-NEVER-APPLIED', operation_id: 'mutation-intake-discarded', operation_state: 'DISCARDED', effect_state: 'not_applied', intake_status: null, intake_content_digest: null };
+  const retried = { ...items[0], operation_id: 'mutation-intake-first-try', operation_state: 'DEFERRED', effect_state: 'none', readback_status: 'pending', readback_digest: null };
+  const trace = traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: [discarded, retried, ...items] });
+  assert.equal(trace.guardedIntakeCount, 2);
+  assert.equal(trace.guardedNotAppliedCount, 2);
+  assert.equal(assertExactStaticDynamicRows(trace.expectedRows, dynamicRows).count, 182);
+  // Setting aside never stands in for evidence of an active assignment.
+  assert.throws(
+    () => traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: [{ ...items[0], effect_state: 'not_applied' }, items[1]] }),
+    /has no guarded intake evidence/,
+  );
 });
 
 test('the static baseline must be present unchanged and guarded intake cannot replace it', () => {
