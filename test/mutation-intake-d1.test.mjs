@@ -16,6 +16,7 @@ import {
   prepareIntakeAtomicFinalize,
   projectIntakeRuntimeRevision,
   readIntakeMutationCompletion,
+  readPublicationOccupancy,
 } from '../src/mutation-intake-d1.mjs';
 
 function sha256(value) {
@@ -41,6 +42,10 @@ class D1Statement {
 
   async first() {
     return this.db.prepare(this.sql).get(...this.args) ?? null;
+  }
+
+  async all() {
+    return { results: this.db.prepare(this.sql).all(...this.args).map((row) => ({ ...row })) };
   }
 }
 
@@ -408,5 +413,134 @@ test('exact completion readback refuses corrupted canonical item state', async (
     /completion readback is not exact/,
   );
 
+  raw.close();
+});
+
+// The publisher fences every post on its publication_state row and treats a
+// missing row as protected, so guarded intake must keep active assignments and
+// publication_state in exact set parity.
+async function appliedIntake() {
+  const { raw, d1 } = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const checkpoint = intakeMutationCheckpointEvidence(controlPlan, 'bookmark_12345', '2026-09-29T10:04:00.000Z');
+  const apply = prepareIntakeAtomicApply({
+    db: d1, controlPlan, intakePlan, runtimeRevision, checkpointEvidence: checkpoint, recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+  await d1.batch(apply.statements);
+  return { raw, d1, intakePlan, controlPlan, runtimeRevision };
+}
+
+test('guarded intake writes a scheduled publication_state row with every assignment', async () => {
+  const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+  assert.deepEqual(
+    { ...raw.prepare(
+      'SELECT status,scheduled_at,scheduled_date,scheduled_time,timezone,slot,title,attempt_id,tweet_id,generation ' +
+        'FROM publication_state WHERE post_id=?',
+    ).get('I-ATOMIC-1') },
+    {
+      status: 'scheduled',
+      scheduled_at: '2026-09-30T10:00:00.000Z',
+      scheduled_date: '2026-09-30',
+      scheduled_time: '05:00',
+      timezone: 'America/Chicago',
+      slot: 'lull',
+      title: 'Atomic test',
+      attempt_id: null,
+      tweet_id: null,
+      generation: 1,
+    },
+  );
+  const parity = (sql) => raw.prepare(sql).get().n;
+  assert.equal(parity(
+    "SELECT COUNT(*) n FROM queue_assignments a LEFT JOIN publication_state p ON p.post_id=a.content_id WHERE a.status='active' AND p.post_id IS NULL",
+  ), 0);
+  assert.equal(parity(
+    "SELECT COUNT(*) n FROM publication_state p LEFT JOIN queue_assignments a ON a.content_id=p.post_id AND a.status='active' WHERE a.content_id IS NULL",
+  ), 0);
+
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  const completion = intakeCompletionEvidence(controlPlan, observed);
+  await d1.batch(prepareIntakeAtomicFinalize({
+    db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+  }).statements);
+  assert.equal(raw.prepare('SELECT state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id).state, 'COMPLETE');
+  raw.close();
+});
+
+test('completion readback refuses a missing or inexact publication_state row', async () => {
+  for (const [name, corrupt] of [
+    ['missing', "DELETE FROM publication_state WHERE post_id='I-ATOMIC-1'"],
+    ['wrong time', "UPDATE publication_state SET scheduled_at='2026-09-30T11:00:00.000Z' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong slot', "UPDATE publication_state SET slot='rush' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong date', "UPDATE publication_state SET scheduled_date='2026-10-01' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong wall time', "UPDATE publication_state SET scheduled_time='06:00' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong zone', "UPDATE publication_state SET timezone='UTC' WHERE post_id='I-ATOMIC-1'"],
+    ['skipped', "UPDATE publication_state SET status='skipped',skipped_at='2026-09-29T10:05:30.000Z',skip_reason='x' WHERE post_id='I-ATOMIC-1'"],
+    ['scheduled but claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+    ['publishing without an attempt', "UPDATE publication_state SET status='publishing' WHERE post_id='I-ATOMIC-1'"],
+    ['posted without an attempt', "UPDATE publication_state SET status='posted',tweet_id='1999' WHERE post_id='I-ATOMIC-1'"],
+  ]) {
+    const { raw, d1, intakePlan, controlPlan } = await appliedIntake();
+    raw.exec(corrupt);
+    const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+    assert.notEqual(observed.items[0].readback_status, 'applied', name);
+    assert.throws(() => intakeCompletionEvidence(controlPlan, observed), /completion readback is not exact/, name);
+    raw.close();
+  }
+});
+
+test('finalize aborts atomically if the publication_state row changed after readback', async () => {
+  for (const [name, corrupt] of [
+    ['scheduled but claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+    ['slot changed', "UPDATE publication_state SET slot='rush' WHERE post_id='I-ATOMIC-1'"],
+    ['date changed', "UPDATE publication_state SET scheduled_date='2026-10-01' WHERE post_id='I-ATOMIC-1'"],
+    ['wall time changed', "UPDATE publication_state SET scheduled_time='06:00' WHERE post_id='I-ATOMIC-1'"],
+    ['zone changed', "UPDATE publication_state SET timezone='UTC' WHERE post_id='I-ATOMIC-1'"],
+  ]) {
+    const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+    const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+    const completion = intakeCompletionEvidence(controlPlan, observed);
+    raw.exec(corrupt);
+    await assert.rejects(d1.batch(prepareIntakeAtomicFinalize({
+      db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+    }).statements), undefined, name);
+    assert.deepEqual(
+      { ...raw.prepare('SELECT state,effect_state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id) },
+      { state: 'VERIFYING', effect_state: 'applied' },
+      name,
+    );
+    assert.equal(raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id, controlPlan.operation_id, name);
+    raw.close();
+  }
+});
+
+test('finalize still commits when the publisher claims the post between readback and finalize', async () => {
+  const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  const completion = intakeCompletionEvidence(controlPlan, observed);
+  raw.exec("UPDATE publication_state SET status='publishing',attempt_id='attempt-1234',generation=generation+1 WHERE post_id='I-ATOMIC-1'");
+  await d1.batch(prepareIntakeAtomicFinalize({
+    db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+  }).statements);
+  assert.equal(raw.prepare('SELECT state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id).state, 'COMPLETE');
+  raw.close();
+});
+
+test('publication occupancy finds a planned slot or post already in publication_state, in any status', async () => {
+  const { raw, d1 } = fixture();
+  const { intakePlan } = plans();
+  assert.deepEqual(await readPublicationOccupancy({ db: d1, intakePlan }), []);
+
+  // A cancelled post keeps its skipped row, and scheduled_at is unique across
+  // every status, so its slot is still taken.
+  raw.exec(
+    "INSERT INTO publication_state (post_id,status,scheduled_at,updated_at,generation,skipped_at,skip_reason) " +
+    "VALUES ('C-CANCELLED','skipped','2026-09-30T10:00:00.000Z','2026-09-29T09:00:00.000Z',2,'2026-09-29T09:00:00.000Z','owner')",
+  );
+  assert.deepEqual(
+    (await readPublicationOccupancy({ db: d1, intakePlan })).map((row) => ({ ...row })),
+    [{ post_id: 'C-CANCELLED', scheduled_at: '2026-09-30T10:00:00.000Z', status: 'skipped' }],
+  );
   raw.close();
 });

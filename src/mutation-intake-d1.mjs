@@ -105,6 +105,57 @@ function assertStmt(db, predicateSql, predicateArgs, operationId, recordedAt) {
   );
 }
 
+// Intake creates each publication_state row as 'scheduled'. The publisher
+// then moves it through publishing, posted and reconciliation under an
+// attempt without touching the schedule, so an applied intake stays applied
+// while its post publishes. Deferral, replacement and owner operations change
+// the assignment or the schedule, so a replay after them is a contradiction
+// here. The readback and the finalize assertion evaluate this same SQL.
+const PUBLICATION_ROW_SQL =
+  'p.post_id=c.content_id AND p.scheduled_at=? AND p.scheduled_date=? AND p.scheduled_time=? ' +
+  'AND p.timezone=? AND p.slot IS ? AND (' +
+  "(p.status='scheduled' AND p.attempt_id IS NULL) OR " +
+  "(p.status IN ('publishing','posted','needs_reconciliation') AND p.attempt_id IS NOT NULL))";
+
+function publicationRowArgs(intakeItem) {
+  return [
+    intakeItem.resolved_at,
+    intakeItem.scheduled_date,
+    intakeItem.scheduled_time,
+    intakeItem.timezone,
+    intakeItem.slot_label ?? null,
+  ];
+}
+
+// The apply batch inserts each item's publication_state row, which is unique
+// on post_id and on scheduled_at across every status (a cancelled post keeps
+// its skipped row). A collision would abort the batch only after dispatch, so
+// a fresh plan is checked against publication_state before anything is
+// claimed. A replay never runs this: its rows already exist.
+export async function readPublicationOccupancy({ db, intakePlan }) {
+  const d1 = ensureDb(db);
+  if (!Array.isArray(intakePlan?.items) || intakePlan.items.length === 0) {
+    throw new Error('intake plan items are required');
+  }
+  const groups = await Promise.all(intakePlan.items.map(async (item) => {
+    const result = await stmt(
+      d1,
+      'SELECT post_id,scheduled_at,status FROM publication_state WHERE post_id=? OR scheduled_at=?',
+      item.content_id,
+      item.resolved_at,
+    ).all();
+    return Array.isArray(result) ? result : (result?.results ?? []);
+  }));
+  const seen = new Set();
+  const occupied = [];
+  for (const row of groups.flat()) {
+    if (seen.has(row.post_id)) continue;
+    seen.add(row.post_id);
+    occupied.push(Object.freeze({ post_id: row.post_id, scheduled_at: row.scheduled_at, status: row.status }));
+  }
+  return Object.freeze(occupied);
+}
+
 function validatePair(controlPlan, intakePlan) {
   requiredString(controlPlan?.operation_id, 'mutation operation id');
   requiredString(intakePlan?.operation_id, 'intake operation id');
@@ -261,11 +312,13 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       'SELECT c.current_revision AS content_revision,c.intake_state,' +
         'r.content_digest AS revision_digest,a.assignment_version,' +
         'a.content_revision AS assignment_content_revision,a.content_digest AS assignment_digest,' +
-        'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state ' +
+        'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state,' +
+        'EXISTS (SELECT 1 FROM publication_state p WHERE ' + PUBLICATION_ROW_SQL + ') AS publication_exact ' +
         'FROM queue_content c ' +
         'JOIN queue_content_revisions r ON r.content_id=c.content_id AND r.revision=c.current_revision ' +
         'JOIN queue_assignments a ON a.content_id=c.content_id AND a.assignment_id=? ' +
         'WHERE c.content_id=? ORDER BY a.assignment_version DESC LIMIT 1',
+      ...publicationRowArgs(intakeItem),
       intakeItem.assignment_id,
       intakeItem.content_id,
     );
@@ -282,7 +335,8 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       Number(row.policy_version) === Number(intakeItem.policy_version) &&
       row.resolved_at === intakeItem.resolved_at &&
       row.status === 'active' &&
-      row.lifecycle_state === 'scheduled'
+      row.lifecycle_state === 'scheduled' &&
+      Number(row.publication_exact) === 1
     );
 
     items.push(Object.freeze({
@@ -587,6 +641,25 @@ export function prepareIntakeAtomicApply({
       recordedAt,
       recordedAt,
     ));
+    // The publisher fences every post on its publication_state row and treats
+    // a missing row as protected, so an assignment without one would never
+    // post or defer and would hold publication unhealthy once overdue. The row
+    // is written with the assignment, so active assignments and
+    // publication_state keep exact set parity.
+    statements.push(stmt(
+      d1,
+      'INSERT INTO publication_state (' +
+        'post_id,status,scheduled_at,scheduled_date,scheduled_time,timezone,slot,title,updated_at,generation' +
+        ") VALUES (?,'scheduled',?,?,?,?,?,?,?,1)",
+      item.content_id,
+      item.resolved_at,
+      item.scheduled_date,
+      item.scheduled_time,
+      item.timezone,
+      item.slot_label,
+      item.title,
+      recordedAt,
+    ));
     statements.push(stmt(
       d1,
       "INSERT INTO queue_assignment_events (assignment_id,assignment_version,event_type,event_at,detail) " +
@@ -722,7 +795,8 @@ export function prepareIntakeAtomicFinalize({
         "WHERE c.content_id=? AND c.current_revision=? AND c.intake_state='scheduled' " +
         'AND r.content_digest=? AND a.assignment_version=? AND a.content_revision=? AND a.content_digest=? ' +
         "AND a.target_account=? AND a.policy_version=? AND a.resolved_at=? AND a.status='active' " +
-        "AND a.lifecycle_state='scheduled')",
+        "AND a.lifecycle_state='scheduled' AND EXISTS (SELECT 1 FROM publication_state p WHERE " +
+        PUBLICATION_ROW_SQL + '))',
       [
         intakeItem.assignment_id,
         intakeItem.content_id,
@@ -734,6 +808,7 @@ export function prepareIntakeAtomicFinalize({
         intakeItem.target_account,
         intakeItem.policy_version,
         intakeItem.resolved_at,
+        ...publicationRowArgs(intakeItem),
       ],
       controlPlan.operation_id,
       recordedAt,

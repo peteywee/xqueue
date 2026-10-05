@@ -11,6 +11,7 @@ import {
   proveBoundaryObservationParity,
   proveLiveParity,
   staticParityRows,
+  traceGuardedIntakeRows,
 } from '../src/static-dynamic-parity.mjs';
 
 function dynamicFromStatic(rows) {
@@ -299,4 +300,158 @@ test('matching inflight reconciliation blocks both paths without auto-deferral',
     postId,
     status: 'needs_reconciliation',
   });
+});
+
+// Option B: the accepted static baseline must be present unchanged, and every
+// other active assignment must be the exact result of a COMPLETE guarded intake.
+function guardedExtra(index, at) {
+  const id = 'I-GUARDED-' + index;
+  const digest = String(index).repeat(64).slice(0, 64).replace(/[^0-9a-f]/g, 'a');
+  return {
+    row: {
+      assignment_id: id, assignment_version: 1, content_id: id, content_revision: 1, content_digest: digest,
+      target_account: 'x-primary', policy_version: 1, resolved_at: at.resolved_at, scheduled_date: at.scheduled_date,
+      scheduled_time: at.scheduled_time, timezone: at.timezone, slot_label: at.slot_label, lifecycle_state: 'scheduled',
+    },
+    item: {
+      item_key: id, resulting_content_revision: 1, resulting_assignment_version: 1, readback_status: 'applied',
+      readback_digest: 'e'.repeat(64), operation_id: 'mutation-intake-' + String(index).repeat(24).slice(0, 24),
+      operation_kind: 'intake', operation_state: 'COMPLETE', effect_state: 'applied',
+      intake_operation_id: 'intake-' + index, intake_status: 'complete', intake_content_digest: digest,
+      intake_target_account: 'x-primary', intake_policy_version: 1,
+      intake_resolved_at: at.resolved_at, intake_scheduled_date: at.scheduled_date, intake_scheduled_time: at.scheduled_time,
+      intake_timezone: at.timezone, intake_slot_label: at.slot_label,
+    },
+  };
+}
+
+function guardedScenario() {
+  const baseline = staticParityRows(buildProductionShadow());
+  const last = baseline.at(-1);
+  const policy = baseline[0].policy_version;
+  const account = baseline[0].target_account;
+  const slots = [1, 2].map((days) => {
+    const at = new Date(Date.parse(last.resolved_at) + days * 86_400_000);
+    return {
+      resolved_at: at.toISOString(),
+      scheduled_date: at.toISOString().slice(0, 10),
+      scheduled_time: '05:00',
+      timezone: last.timezone,
+      slot_label: 'lull',
+    };
+  });
+  const extras = slots.map((at, index) => {
+    const { row, item } = guardedExtra(index + 1, at);
+    return {
+      row: { ...row, policy_version: policy, target_account: account },
+      item: { ...item, intake_policy_version: policy, intake_target_account: account },
+    };
+  });
+  const dynamicRows = dynamicFromStatic([...baseline, ...extras.map((extra) => extra.row)]);
+  return { baseline, dynamicRows, items: extras.map((extra) => extra.item) };
+}
+
+test('guarded intake extras join the baseline as the expected set, and full parity holds', () => {
+  const { baseline, dynamicRows, items } = guardedScenario();
+  const trace = traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: items });
+  assert.equal(trace.staticCount, 180);
+  assert.equal(trace.guardedIntakeCount, 2);
+  assert.equal(trace.guardedOperations.length, 2);
+  assert.equal(assertExactStaticDynamicRows(trace.expectedRows, dynamicRows).count, 182);
+  const proof = proveBoundaryObservationParity({
+    staticRows: trace.expectedRows,
+    dynamicRows,
+    publicationRows: scheduledPublicationRows(dynamicRows),
+    deferralRows: [],
+    graceMinutes: 20,
+  });
+  assert.equal(proof.assignmentCount, 182);
+  // With no guarded intake, the expected set is exactly the baseline.
+  const plain = traceGuardedIntakeRows({ staticRows: baseline, dynamicRows: dynamicFromStatic(baseline), guardedItems: [] });
+  assert.equal(plain.expectedRows.length, 180);
+});
+
+test('an extra assignment without exact applied guarded intake evidence fails the proof', () => {
+  const cases = [
+    ['no evidence', (items) => items.slice(1), /has no guarded intake evidence/],
+    ['not COMPLETE', (items) => [{ ...items[0], operation_state: 'VERIFYING' }, items[1]], /is not COMPLETE\/applied/],
+    ['ambiguous effect', (items) => [{ ...items[0], effect_state: 'ambiguous' }, items[1]], /is not COMPLETE\/applied/],
+    ['dispatched effect', (items) => [{ ...items[0], effect_state: 'dispatched' }, items[1]], /is not COMPLETE\/applied/],
+    ['readback not applied', (items) => [{ ...items[0], readback_status: 'conflict' }, items[1]], /readback is not applied/],
+    ['readback digest missing', (items) => [{ ...items[0], readback_digest: null }, items[1]], /readback is not applied/],
+    ['intake incomplete', (items) => [{ ...items[0], intake_status: 'claimed' }, items[1]], /complete intake operation/],
+    ['intake item missing', (items) => [{ ...items[0], intake_content_digest: null }, items[1]], /complete intake operation/],
+    ['duplicate evidence', (items) => [...items, items[0]], /duplicate guarded intake item/],
+  ];
+  for (const [name, mutate, pattern] of cases) {
+    const { baseline, dynamicRows, items } = guardedScenario();
+    assert.throws(
+      () => traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: mutate(items) }),
+      pattern,
+      name,
+    );
+  }
+});
+
+test('reconstructed rows must match the runtime exactly, field by field', () => {
+  for (const [field, value] of [
+    ['intake_resolved_at', '2030-01-01T00:00:00.000Z'],
+    ['intake_slot_label', 'rush'],
+    ['intake_content_digest', 'f'.repeat(64)],
+    ['resulting_assignment_version', 2],
+    ['resulting_content_revision', 2],
+    ['intake_target_account', 'x-secondary'],
+    ['intake_policy_version', (item) => item.intake_policy_version + 1],
+  ]) {
+    const { baseline, dynamicRows, items } = guardedScenario();
+    const changed = typeof value === 'function' ? value(items[0]) : value;
+    const trace = traceGuardedIntakeRows({
+      staticRows: baseline, dynamicRows, guardedItems: [{ ...items[0], [field]: changed }, items[1]],
+    });
+    assert.throws(() => assertExactStaticDynamicRows(trace.expectedRows, dynamicRows), /exact row parity failed/, field);
+  }
+});
+
+test('only an operation proven to have changed nothing is set aside', () => {
+  const { baseline, dynamicRows, items } = guardedScenario();
+  const discarded = { ...items[0], item_key: 'I-NEVER-APPLIED', operation_id: 'mutation-intake-discarded', operation_state: 'DISCARDED', effect_state: 'not_applied', intake_status: null, intake_content_digest: null };
+  const retried = { ...items[0], operation_id: 'mutation-intake-first-try', operation_state: 'DEFERRED', effect_state: 'none', readback_status: 'pending', readback_digest: null };
+  const trace = traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: [discarded, retried, ...items] });
+  assert.equal(trace.guardedIntakeCount, 2);
+  assert.equal(trace.guardedNotAppliedCount, 2);
+  assert.equal(assertExactStaticDynamicRows(trace.expectedRows, dynamicRows).count, 182);
+  // Setting aside never stands in for evidence of an active assignment.
+  assert.throws(
+    () => traceGuardedIntakeRows({ staticRows: baseline, dynamicRows, guardedItems: [{ ...items[0], effect_state: 'not_applied' }, items[1]] }),
+    /has no guarded intake evidence/,
+  );
+});
+
+test('the static baseline must be present unchanged and guarded intake cannot replace it', () => {
+  const { baseline, dynamicRows, items } = guardedScenario();
+  const missing = dynamicRows.filter((row) => row.content_id !== baseline[5].content_id);
+  assert.throws(
+    () => traceGuardedIntakeRows({ staticRows: baseline, dynamicRows: missing, guardedItems: items }),
+    new RegExp('static assignments missing from the dynamic runtime: ' + baseline[5].content_id),
+  );
+  assert.throws(
+    () => traceGuardedIntakeRows({
+      staticRows: baseline, dynamicRows, guardedItems: [...items, { ...items[0], item_key: baseline[0].content_id }],
+    }),
+    /shadows a static assignment/,
+  );
+  // An applied guarded intake whose assignment vanished fails too.
+  const vanished = dynamicRows.filter((row) => row.content_id !== items[1].item_key);
+  assert.throws(
+    () => traceGuardedIntakeRows({ staticRows: baseline, dynamicRows: vanished, guardedItems: items }),
+    /applied guarded intake item is not an active assignment/,
+  );
+  // A drifted baseline row still fails exact parity.
+  const drifted = dynamicFromStatic([
+    { ...baseline[0], slot_label: 'drift' },
+    ...baseline.slice(1),
+    ...dynamicRows.slice(180),
+  ]);
+  const trace = traceGuardedIntakeRows({ staticRows: baseline, dynamicRows: drifted, guardedItems: items });
+  assert.throws(() => assertExactStaticDynamicRows(trace.expectedRows, drifted), /exact row parity failed/);
 });

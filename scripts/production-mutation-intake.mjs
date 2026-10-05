@@ -20,6 +20,7 @@ export const REQUIRED_MUTATION_MIGRATIONS = Object.freeze([
   '0015_mutation_control_plane.sql',
   '0016_mutation_completion_item_guard.sql',
   '0017_publication_mutation_mutex.sql',
+  '0018_intake_frontier_seed.sql',
 ]);
 
 // Names alone do not prove content (0017 gained its authority guards after it

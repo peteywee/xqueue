@@ -324,7 +324,7 @@ const ALLOWED_TABLES = new Set([
 ]);
 
 const WRITE_STATEMENT_RE =
-  /\b(?:INSERT\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+  /\b(?:INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE|DROP\s+TABLE|ALTER\s+TABLE|CREATE\s+TABLE)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
 
 const writeTargets = [];
 for (const { path, text } of workerFiles) {
@@ -388,8 +388,70 @@ gate(
     .join(' ') || 'declared tables only',
 );
 
+// Worker entry modules also import shared modules from src/, which run with
+// the same D1 binding, so publication-plane and authority tables are checked
+// across the whole imported graph. The one writer outside the publisher is
+// guarded intake creating a new post's 'scheduled' publication_state row
+// together with its assignment: a plain INSERT, never an update, delete,
+// replace or upsert.
+const IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"](\.{1,2}\/[^'"]+\.m?js)['"]/g;
+function importedGraph(entries) {
+  const seen = new Set();
+  const pending = [...entries];
+  while (pending.length > 0) {
+    const path = pending.pop();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const text = readFileSync(join(ROOT, path), 'utf8');
+    for (const match of text.matchAll(IMPORT_RE)) {
+      pending.push(relative(ROOT, resolve(ROOT, dirname(path), match[1])));
+    }
+  }
+  return [...seen].sort();
+}
+
+const AUTHORITY_TABLES = ['authority_state', 'authority_events'];
+const GUARDED_TABLES = new Set([
+  ...LEDGER_TABLES,
+  ...FENCE_TABLES,
+  ...HALT_TABLES,
+  ...LEASE_TABLES,
+  ...AUTHORITY_TABLES,
+]);
+const INTAKE_PUBLICATION_WRITER = 'src/mutation-intake-d1.mjs';
+// The exact statement, through the end of its SQL string: column list, then
+// VALUES with status 'scheduled' and generation 1, and nothing after it.
+const SANCTIONED_INTAKE_INSERT_RE =
+  /^INSERT INTO publication_state \(' \+\s*'post_id,status,scheduled_at,scheduled_date,scheduled_time,timezone,slot,title,updated_at,generation' \+\s*"\) VALUES \(\?,'scheduled',\?,\?,\?,\?,\?,\?,\?,1\)",/;
+const importedSharedFiles = readAll(
+  importedGraph(workerFiles.filter(({ path }) => /\.m?js$/.test(path)).map(({ path }) => path))
+    .filter((path) => !path.startsWith('cloudflare/src/'))
+    .map((path) => join(ROOT, path)),
+);
+const sharedGuardedWrites = [];
+for (const { path, text } of importedSharedFiles) {
+  for (const match of text.matchAll(WRITE_STATEMENT_RE)) {
+    const table = match[1].toLowerCase();
+    if (!GUARDED_TABLES.has(table)) continue;
+    const line = text.slice(0, match.index).split('\n').length;
+    const sanctioned = path === INTAKE_PUBLICATION_WRITER &&
+      SANCTIONED_INTAKE_INSERT_RE.test(text.slice(match.index));
+    sharedGuardedWrites.push({ where: path + ':' + line, table, sanctioned });
+  }
+}
+const unsanctionedSharedWrites = sharedGuardedWrites.filter((write) => !write.sanctioned);
+const sanctionedSharedWrites = sharedGuardedWrites.filter((write) => write.sanctioned);
+gate(
+  'Worker-imported src writes no publication or authority table except intake scheduling',
+  importedSharedFiles.some(({ path }) => path === INTAKE_PUBLICATION_WRITER) &&
+    unsanctionedSharedWrites.length === 0 &&
+    sanctionedSharedWrites.length <= 1,
+  unsanctionedSharedWrites.map((write) => write.where + '(' + write.table + ')').join(' ') ||
+    importedSharedFiles.length + ' imported src modules; ' + sanctionedSharedWrites.length + ' scheduled-row insert',
+);
+
 const runtimeOwnerClearHits = findMatches(
-  workerFiles,
+  [...workerFiles, ...importedSharedFiles],
   /\bSET\s+halted\s*=\s*0\b|\bactor_class\s*=\s*['"]owner['"]\b/i,
 );
 gate(

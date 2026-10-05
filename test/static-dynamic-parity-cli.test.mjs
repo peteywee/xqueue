@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import * as parity from '../src/static-dynamic-parity.mjs';
+
 function text(path) {
   return readFileSync(new URL('../' + path, import.meta.url), 'utf8');
 }
@@ -15,6 +17,23 @@ test('live parity proof is preview-pinned and contains no D1 mutation command', 
   assert.doesNotMatch(source, /\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP)\b/);
   assert.doesNotMatch(source, /xqueue-production/);
   assert.doesNotMatch(source, /--file/);
+});
+
+test('SQL the live parity proof imports from src is read-only too', () => {
+  const statements = Object.entries(parity).filter(([name, value]) => /_SQL$/.test(name) && typeof value === 'string');
+  assert.ok(statements.some(([name]) => name === 'GUARDED_INTAKE_EVIDENCE_SQL'));
+  for (const [name, sql] of statements) {
+    assert.match(sql.trim(), /^SELECT\b/i, name);
+    assert.doesNotMatch(sql, /\b(?:INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE)\b/i, name);
+    assert.equal(sql.trim().replace(/;$/, '').includes(';'), false, name + ' is one statement');
+  }
+  // Every SQL constant the script imports comes from that module.
+  const source = text('scripts/preview-static-dynamic-parity.mjs');
+  for (const [, names] of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*'([^']+)'/g)) {
+    for (const imported of names.split(',').map((part) => part.trim()).filter((part) => /_SQL$/.test(part))) {
+      assert.equal(typeof parity[imported], 'string', imported + ' comes from src/static-dynamic-parity.mjs');
+    }
+  }
 });
 
 test('parity workflow is downstream of successful recovery and read-only', () => {

@@ -1,4 +1,4 @@
-import { parseProductionPublisherDeploymentId } from './production-authority-sql.mjs';
+import { parseProductionPublisherDeploymentId } from './production-publisher-identity.mjs';
 import { runIntakeMutation } from './mutation-intake-runner.mjs';
 
 const SHA40_RE = /^[0-9a-f]{40}$/i;

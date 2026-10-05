@@ -19,6 +19,8 @@ import {
   proveBoundaryObservationParity,
   proveLiveParity,
   staticParityRows,
+  GUARDED_INTAKE_EVIDENCE_SQL,
+  traceGuardedIntakeRows,
 } from '../src/static-dynamic-parity.mjs';
 
 function run(command, args) {
@@ -171,8 +173,16 @@ function main() {
   const config = JSON.parse(readFileSync(PREVIEW_CONFIG, 'utf8'));
   assertPreviewConfig(config);
 
-  const staticRows = staticParityRows(buildProductionShadow());
+  const baselineRows = staticParityRows(buildProductionShadow());
   const dynamicRows = dynamicParityRows(readDynamicRows());
+  // The accepted static baseline must be present unchanged; every other active
+  // assignment must be the exact result of a COMPLETE guarded intake.
+  const trace = traceGuardedIntakeRows({
+    staticRows: baselineRows,
+    dynamicRows,
+    guardedItems: query(GUARDED_INTAKE_EVIDENCE_SQL),
+  });
+  const staticRows = trace.expectedRows;
 
   const publicationRows = readPublicationRows();
   const deferralRows = readDeferralRows();
@@ -214,7 +224,7 @@ function main() {
   }
 
   const evidence = {
-    format: 1,
+    format: 2,
     issue: 93,
     environment: 'preview',
     database: PREVIEW_DB,
@@ -228,6 +238,10 @@ function main() {
     dynamicAuthorityCandidate: 'preview-d1',
     graceMinutes: 20,
     assignmentCount: boundary.assignmentCount,
+    staticBaselineCount: trace.staticCount,
+    guardedIntakeCount: trace.guardedIntakeCount,
+    guardedNotAppliedCount: trace.guardedNotAppliedCount,
+    guardedIntakeOperations: trace.guardedOperations,
     canonicalRowsHash: boundary.canonicalRowsHash,
     boundaryObservationCount: boundary.observationCount,
     boundaryObservationDigest: boundary.observationDigest,
@@ -257,6 +271,8 @@ function main() {
       createdAt: runtimeHead.created_at,
     },
     checks: {
+      staticBaselineSubset: 'pass',
+      guardedIntakeExtrasTraced: 'pass',
       exactAssignmentIdentity: 'pass',
       exactResolvedUtcAndLocalSlot: 'pass',
       exactContentDigest: 'pass',
@@ -278,7 +294,8 @@ function main() {
   writeFileSync(output, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
 
   console.log('XQUEUE STATIC/DYNAMIC PARITY PROOF: PASS');
-  console.log('  assignments          ' + evidence.assignmentCount);
+  console.log('  assignments          ' + evidence.assignmentCount +
+    ' (static ' + evidence.staticBaselineCount + ' + guarded intake ' + evidence.guardedIntakeCount + ')');
   console.log('  canonical rows hash  ' + evidence.canonicalRowsHash);
   console.log('  boundary observations ' + evidence.boundaryObservationCount);
   console.log('  observation digest   ' + evidence.boundaryObservationDigest);

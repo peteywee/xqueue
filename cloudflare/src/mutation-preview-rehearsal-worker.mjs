@@ -4,7 +4,7 @@ import {
   planIntake,
 } from '../../src/continuous-queue-intake.mjs';
 import { createIntakeMutationControlPlan } from '../../src/mutation-intake-adapter.mjs';
-import { projectIntakeRuntimeRevision } from '../../src/mutation-intake-d1.mjs';
+import { projectIntakeRuntimeRevision, readPublicationOccupancy } from '../../src/mutation-intake-d1.mjs';
 import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import { createD1MutationTransport } from '../../src/mutation-control-transport.mjs';
 import { verifyPreviewIntakeEvidence } from '../../src/mutation-preview-evidence.mjs';
@@ -193,6 +193,9 @@ export async function runPreviewIntakeRehearsal(
     baselineAssignmentHash: assignmentHash(activeAssignments),
     runtimeState,
   });
+  if ((await readPublicationOccupancy({ db, intakePlan })).length > 0) {
+    throw new Error('preview planned intake collides with existing publication_state rows');
+  }
 
   const transport = previewTransport(db, bookmark, createTransport);
   const [haltState, laneState, observedRuntimeState] = await Promise.all([

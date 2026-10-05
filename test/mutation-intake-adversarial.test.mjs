@@ -221,6 +221,30 @@ test('exact replay is idempotent and does not capture a second checkpoint', asyn
   fx.raw.close();
 });
 
+test('a completed intake still replays as already_applied after the publisher posts it', async () => {
+  const fx = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const revision = await projected(intakePlan, controlPlan, state);
+  const run = (recordedAt) => runIntakeMutation({
+    intakePlan, controlPlan, runtimeRevision: revision, transport: fx.transport, recordedAt,
+  });
+
+  assert.equal((await run('2026-09-29T10:05:00.000Z')).status, 'applied');
+  for (const [phase, sql] of [
+    ['publishing', "UPDATE publication_state SET status='publishing',attempt_id='attempt-adv-1',publishing_at='2026-09-30T10:00:05.000Z',generation=generation+1 WHERE post_id='I-ADV-1'"],
+    ['needs_reconciliation', "UPDATE publication_state SET status='needs_reconciliation',failed_at='2026-09-30T10:00:09.000Z',generation=generation+1 WHERE post_id='I-ADV-1'"],
+    ['posted', "UPDATE publication_state SET status='posted',tweet_id='1999',posted_at='2026-09-30T10:01:00.000Z',generation=generation+1 WHERE post_id='I-ADV-1'"],
+  ]) {
+    fx.raw.exec(sql);
+    assert.equal((await run('2026-09-30T10:02:00.000Z')).status, 'already_applied', phase);
+  }
+
+  // Leaving the publisher's lifecycle (an owner skip) is still a contradiction.
+  fx.raw.exec("UPDATE publication_state SET status='skipped',skipped_at='2026-09-30T10:03:00.000Z',skip_reason='x' WHERE post_id='I-ADV-1'");
+  assert.equal((await run('2026-09-30T10:04:00.000Z')).status, 'blocked');
+  fx.raw.close();
+});
+
 test('halt-generation race after preflight fails closed before canonical apply', async () => {
   const fx = fixture();
   const { intakePlan, controlPlan, state } = plans();

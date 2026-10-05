@@ -10,7 +10,7 @@ import {
   createIntakeMutationControlPlan,
   intakeMutationOperationId,
 } from '../../src/mutation-intake-adapter.mjs';
-import { projectIntakeRuntimeRevision } from '../../src/mutation-intake-d1.mjs';
+import { projectIntakeRuntimeRevision, readPublicationOccupancy } from '../../src/mutation-intake-d1.mjs';
 import { createD1MutationTransport } from '../../src/mutation-control-transport.mjs';
 import { runIntakeMutation } from '../../src/mutation-intake-runner.mjs';
 import {
@@ -1080,6 +1080,25 @@ export async function runProductionIntakeRequest(
     throw productionFault(
       'INTAKE_CONFLICT',
       error instanceof Error ? error.message : String(error),
+      { httpStatus: 409 },
+    );
+  }
+
+  let occupied;
+  try {
+    occupied = await readPublicationOccupancy({ db, intakePlan });
+  } catch (error) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_UNAVAILABLE',
+      error instanceof Error ? error.message : String(error),
+      { httpStatus: 503, retryable: true },
+    );
+  }
+  if (occupied.length > 0) {
+    throw productionFault(
+      'PRE_DISPATCH_STATE_CONFLICT',
+      'planned intake collides with existing publication_state rows: ' +
+        occupied.slice(0, 8).map((row) => row.post_id + '@' + row.scheduled_at).join(','),
       { httpStatus: 409 },
     );
   }
