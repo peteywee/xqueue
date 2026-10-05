@@ -451,6 +451,37 @@ export function replaySchema(local, names) {
   }
 }
 
+// Guarded intake appends after the intake frontier. 0018 seeds it where 0007
+// could not (assignments loaded after 0007 ran), so the frontier must exist at
+// or after the last active slot whenever there are active assignments.
+export const INTAKE_FRONTIER_SQL =
+  "SELECT (SELECT COUNT(*) FROM queue_assignments WHERE status='active') AS active_assignments, " +
+  "(SELECT MAX(resolved_at) FROM queue_assignments WHERE status='active') AS last_active_slot, " +
+  '(SELECT COUNT(*) FROM queue_intake_frontier) AS frontier_rows, ' +
+  '(SELECT resolved_at FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_resolved_at, ' +
+  '(SELECT pending_operation_id FROM queue_intake_frontier WHERE singleton_id=1) AS frontier_pending;';
+
+export function readIntakeFrontier(run) {
+  const row = d1Query(run, INTAKE_FRONTIER_SQL)?.[0]?.results?.[0] ?? null;
+  if (!row) throw new Error('intake frontier facts could not be read');
+  return Object.freeze({
+    activeAssignments: Number(row.active_assignments),
+    lastActiveSlot: row.last_active_slot ?? null,
+    frontierRows: Number(row.frontier_rows),
+    frontierResolvedAt: row.frontier_resolved_at ?? null,
+    frontierPending: row.frontier_pending ?? null,
+  });
+}
+
+export function intakeFrontierReady(facts) {
+  if (!facts) return false;
+  if (facts.activeAssignments === 0) return true;
+  return facts.frontierRows === 1 &&
+    typeof facts.frontierResolvedAt === 'string' &&
+    facts.frontierResolvedAt >= facts.lastActiveSlot &&
+    facts.frontierPending === null;
+}
+
 function readSingletons(run) {
   const payload = d1Query(run, Object.values(SINGLETON_SQL).map((sql) => sql + ';').join(' '));
   const tables = Object.keys(SINGLETON_SQL);
@@ -611,6 +642,8 @@ export async function main(
       pendingReplayObjects: expectedAfter ? expectedAfter.change.objects.length : null,
     },
     publicationBefore: epochs(safetyBefore),
+    // Observe evidence: 0018 seeds a missing frontier during the apply.
+    intakeFrontierBefore: readIntakeFrontier(run),
     nextDue: safetyBefore.nextDue,
     compatibility,
     // Activation evidence only: the schema is safe under either publisher.
@@ -726,6 +759,7 @@ export async function main(
   const appliedAfter = await attempt('migrations', () => readAppliedMigrations(run));
   const remoteAfter = await attempt('schema', () => readRemoteSchema(run));
   const singletons = await attempt('singletons', () => readSingletons(run));
+  const intakeFrontier = await attempt('intakeFrontier', () => readIntakeFrontier(run));
   const safetyAfter = await attempt('publication', () => readPublicationSafety(run));
   const postCheckpoint = await attempt('postCheckpoint', async () => {
     const bookmark = await captureBookmark();
@@ -743,6 +777,8 @@ export async function main(
     migrationsExact: appliedAfter !== null && JSON.stringify(appliedAfter) === JSON.stringify(expectedApplied),
     schema: schemaAfter,
     singletonsExact: singletons !== null && JSON.stringify(singletons) === JSON.stringify(expectedChange.singletons),
+    intakeFrontier,
+    intakeFrontierReady: intakeFrontierReady(intakeFrontier),
     singletons,
     publicationAfter,
     authorityUnchanged: publicationAfter !== null && JSON.stringify([
@@ -778,6 +814,12 @@ export async function main(
   }
   if (singletons !== null && !readback.singletonsExact) {
     failures.push({ id: 'singletons_readback_mismatch', detail: 'Lane singletons are not the migration initial state.' });
+  }
+  if (intakeFrontier !== null && !readback.intakeFrontierReady) {
+    failures.push({
+      id: 'intake_frontier_not_ready',
+      detail: 'Active assignments exist but the intake frontier is missing, pending, or before the last active slot.',
+    });
   }
   if (publicationAfter !== null && !readback.authorityUnchanged) {
     failures.push({ id: 'authority_changed_during_apply', detail: 'Publication authority or halt moved during the apply.' });

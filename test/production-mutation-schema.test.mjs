@@ -207,7 +207,7 @@ test('plan accepts only the exact mutation-control suffix on an exact production
 
   assert.equal(planSchemaMigration({ applied: NAMES, local: LOCAL }).status, 'already_active');
 
-  const partial = planSchemaMigration({ applied: [...APPLIED_0014, NAMES.at(-3)], local: LOCAL });
+  const partial = planSchemaMigration({ applied: [...APPLIED_0014, REQUIRED_MUTATION_MIGRATIONS[0]], local: LOCAL });
   assert.equal(partial.status, 'blocked');
   assert.ok(partial.blockers.some((item) => item.id === 'unexpected_pending_migrations'));
 
@@ -843,4 +843,40 @@ test('the Workers scope probe never treats a missing account as proof', async ()
     await defaultProbeWorkersAccess({ token: 't', accountId: 'acct', fetchImpl: async () => ({ ok: false, status: 403 }) }),
     'denied',
   );
+});
+
+const ACTIVE_ASSIGNMENT_SQL = `
+  INSERT INTO queue_content (content_id,pillar,current_revision,status,generation,created_at,updated_at)
+    VALUES ('A1','A',1,'active',1,'2026-09-02T00:00:00.000Z','2026-09-02T00:00:00.000Z');
+  INSERT INTO queue_content_revisions (content_id,revision,title,body,publication_text,content_digest,figure,source_ref,created_at)
+    VALUES ('A1',1,'t','b','b','${'3'.repeat(64)}',NULL,'s','2026-09-02T00:00:00.000Z');
+  INSERT INTO queue_assignments (assignment_id,assignment_version,content_id,content_revision,content_digest,target_account,
+    policy_version,resolved_at,scheduled_date,scheduled_time,timezone,slot_label,status,superseded_by_version,generation,created_at,updated_at)
+    VALUES ('A1',1,'A1',1,'${'3'.repeat(64)}','x-primary',1,'2027-01-07T20:30:00.000Z','2027-01-07','14:30','America/Chicago',
+    'lull','active',NULL,1,'2026-09-02T00:00:00.000Z','2026-09-02T00:00:00.000Z');
+`;
+
+test('the apply seeds a missing intake frontier, and observe reports it absent first', async () => {
+  const sim = simulatedProduction({ drift: ACTIVE_ASSIGNMENT_SQL });
+  assert.equal(sim.db.prepare('SELECT COUNT(*) n FROM queue_intake_frontier').get().n, 0, 'production shape: no frontier');
+  const observe = await runMain(['--environment', 'production'], { run: sim.run });
+  assert.equal(observe.evidence.status, 'ready');
+  assert.deepEqual({ ...observe.evidence.intakeFrontierBefore }, {
+    activeAssignments: 1, lastActiveSlot: '2027-01-07T20:30:00.000Z', frontierRows: 0, frontierResolvedAt: null, frontierPending: null,
+  });
+
+  const bookmarks = [BOOKMARK_1, BOOKMARK_2];
+  const { evidence } = await runMain(APPLY, { run: sim.run, captureBookmark: async () => bookmarks.shift() });
+  assert.equal(evidence.status, 'applied');
+  assert.equal(evidence.readback.intakeFrontierReady, true);
+  assert.equal(evidence.readback.intakeFrontier.frontierResolvedAt, '2027-01-07T20:30:00.000Z');
+});
+
+test('an apply whose frontier seed did not land is not reported as applied', async () => {
+  const sim = simulatedProduction({ drift: ACTIVE_ASSIGNMENT_SQL, skipSqlFor: '0018_intake_frontier_seed.sql' });
+  const bookmarks = [BOOKMARK_1, BOOKMARK_2];
+  const { evidence } = await runMain(APPLY, { run: sim.run, captureBookmark: async () => bookmarks.shift() });
+  assert.equal(evidence.status, 'requires_reconciliation');
+  assert.equal(evidence.readback.schema.identical, true, '0018 adds no schema objects');
+  assert.deepEqual(evidence.blockers.map((item) => item.id), ['intake_frontier_not_ready']);
 });

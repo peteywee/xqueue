@@ -410,3 +410,88 @@ test('exact completion readback refuses corrupted canonical item state', async (
 
   raw.close();
 });
+
+// The publisher fences every post on its publication_state row and treats a
+// missing row as protected, so guarded intake must keep active assignments and
+// publication_state in exact set parity.
+async function appliedIntake() {
+  const { raw, d1 } = fixture();
+  const { intakePlan, controlPlan, state } = plans();
+  const runtimeRevision = await projected(intakePlan, controlPlan, state);
+  const checkpoint = intakeMutationCheckpointEvidence(controlPlan, 'bookmark_12345', '2026-09-29T10:04:00.000Z');
+  const apply = prepareIntakeAtomicApply({
+    db: d1, controlPlan, intakePlan, runtimeRevision, checkpointEvidence: checkpoint, recordedAt: '2026-09-29T10:05:00.000Z',
+  });
+  await d1.batch(apply.statements);
+  return { raw, d1, intakePlan, controlPlan, runtimeRevision };
+}
+
+test('guarded intake writes a scheduled publication_state row with every assignment', async () => {
+  const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+  assert.deepEqual(
+    { ...raw.prepare(
+      'SELECT status,scheduled_at,scheduled_date,scheduled_time,timezone,slot,title,attempt_id,tweet_id,generation ' +
+        'FROM publication_state WHERE post_id=?',
+    ).get('I-ATOMIC-1') },
+    {
+      status: 'scheduled',
+      scheduled_at: '2026-09-30T10:00:00.000Z',
+      scheduled_date: '2026-09-30',
+      scheduled_time: '05:00',
+      timezone: 'America/Chicago',
+      slot: 'lull',
+      title: 'Atomic test',
+      attempt_id: null,
+      tweet_id: null,
+      generation: 1,
+    },
+  );
+  const parity = (sql) => raw.prepare(sql).get().n;
+  assert.equal(parity(
+    "SELECT COUNT(*) n FROM queue_assignments a LEFT JOIN publication_state p ON p.post_id=a.content_id WHERE a.status='active' AND p.post_id IS NULL",
+  ), 0);
+  assert.equal(parity(
+    "SELECT COUNT(*) n FROM publication_state p LEFT JOIN queue_assignments a ON a.content_id=p.post_id AND a.status='active' WHERE a.content_id IS NULL",
+  ), 0);
+
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  const completion = intakeCompletionEvidence(controlPlan, observed);
+  await d1.batch(prepareIntakeAtomicFinalize({
+    db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+  }).statements);
+  assert.equal(raw.prepare('SELECT state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id).state, 'COMPLETE');
+  raw.close();
+});
+
+test('completion readback refuses a missing or inexact publication_state row', async () => {
+  for (const [name, corrupt] of [
+    ['missing', "DELETE FROM publication_state WHERE post_id='I-ATOMIC-1'"],
+    ['wrong time', "UPDATE publication_state SET scheduled_at='2026-09-30T11:00:00.000Z' WHERE post_id='I-ATOMIC-1'"],
+    ['wrong slot', "UPDATE publication_state SET slot='rush' WHERE post_id='I-ATOMIC-1'"],
+    ['not scheduled', "UPDATE publication_state SET status='skipped',skipped_at='2026-09-29T10:05:30.000Z',skip_reason='x' WHERE post_id='I-ATOMIC-1'"],
+    ['claimed by an attempt', "UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'"],
+  ]) {
+    const { raw, d1, intakePlan, controlPlan } = await appliedIntake();
+    raw.exec(corrupt);
+    const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+    assert.notEqual(observed.items[0].readback_status, 'applied', name);
+    assert.throws(() => intakeCompletionEvidence(controlPlan, observed), /completion readback is not exact/, name);
+    raw.close();
+  }
+});
+
+test('finalize aborts atomically if the publication_state row changed after readback', async () => {
+  const { raw, d1, intakePlan, controlPlan, runtimeRevision } = await appliedIntake();
+  const observed = await readIntakeMutationCompletion({ db: d1, controlPlan, intakePlan });
+  const completion = intakeCompletionEvidence(controlPlan, observed);
+  raw.exec("UPDATE publication_state SET attempt_id='attempt-1234' WHERE post_id='I-ATOMIC-1'");
+  await assert.rejects(d1.batch(prepareIntakeAtomicFinalize({
+    db: d1, controlPlan, intakePlan, runtimeRevision, completionEvidence: completion, recordedAt: '2026-09-29T10:06:00.000Z',
+  }).statements));
+  assert.deepEqual(
+    { ...raw.prepare('SELECT state,effect_state FROM mutation_operations WHERE operation_id=?').get(controlPlan.operation_id) },
+    { state: 'VERIFYING', effect_state: 'applied' },
+  );
+  assert.equal(raw.prepare('SELECT active_operation_id FROM mutation_lane_state WHERE singleton_id=1').get().active_operation_id, controlPlan.operation_id);
+  raw.close();
+});

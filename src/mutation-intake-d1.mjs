@@ -261,10 +261,14 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       'SELECT c.current_revision AS content_revision,c.intake_state,' +
         'r.content_digest AS revision_digest,a.assignment_version,' +
         'a.content_revision AS assignment_content_revision,a.content_digest AS assignment_digest,' +
-        'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state ' +
+        'a.target_account,a.policy_version,a.resolved_at,a.status,a.lifecycle_state,' +
+        'p.status AS publication_status,p.scheduled_at AS publication_scheduled_at,' +
+        'p.scheduled_date AS publication_scheduled_date,p.scheduled_time AS publication_scheduled_time,' +
+        'p.timezone AS publication_timezone,p.slot AS publication_slot,p.attempt_id AS publication_attempt_id ' +
         'FROM queue_content c ' +
         'JOIN queue_content_revisions r ON r.content_id=c.content_id AND r.revision=c.current_revision ' +
         'JOIN queue_assignments a ON a.content_id=c.content_id AND a.assignment_id=? ' +
+        'LEFT JOIN publication_state p ON p.post_id=c.content_id ' +
         'WHERE c.content_id=? ORDER BY a.assignment_version DESC LIMIT 1',
       intakeItem.assignment_id,
       intakeItem.content_id,
@@ -282,7 +286,14 @@ export async function readIntakeMutationCompletion({ db, controlPlan, intakePlan
       Number(row.policy_version) === Number(intakeItem.policy_version) &&
       row.resolved_at === intakeItem.resolved_at &&
       row.status === 'active' &&
-      row.lifecycle_state === 'scheduled'
+      row.lifecycle_state === 'scheduled' &&
+      row.publication_status === 'scheduled' &&
+      row.publication_scheduled_at === intakeItem.resolved_at &&
+      row.publication_scheduled_date === intakeItem.scheduled_date &&
+      row.publication_scheduled_time === intakeItem.scheduled_time &&
+      row.publication_timezone === intakeItem.timezone &&
+      (row.publication_slot ?? null) === (intakeItem.slot_label ?? null) &&
+      row.publication_attempt_id == null
     );
 
     items.push(Object.freeze({
@@ -587,6 +598,25 @@ export function prepareIntakeAtomicApply({
       recordedAt,
       recordedAt,
     ));
+    // The publisher fences every post on its publication_state row and treats
+    // a missing row as protected, so an assignment without one would never
+    // post or defer and would hold publication unhealthy once overdue. The row
+    // is written with the assignment, so active assignments and
+    // publication_state keep exact set parity.
+    statements.push(stmt(
+      d1,
+      'INSERT INTO publication_state (' +
+        'post_id,status,scheduled_at,scheduled_date,scheduled_time,timezone,slot,title,updated_at,generation' +
+        ") VALUES (?,'scheduled',?,?,?,?,?,?,?,1)",
+      item.content_id,
+      item.resolved_at,
+      item.scheduled_date,
+      item.scheduled_time,
+      item.timezone,
+      item.slot_label,
+      item.title,
+      recordedAt,
+    ));
     statements.push(stmt(
       d1,
       "INSERT INTO queue_assignment_events (assignment_id,assignment_version,event_type,event_at,detail) " +
@@ -722,7 +752,9 @@ export function prepareIntakeAtomicFinalize({
         "WHERE c.content_id=? AND c.current_revision=? AND c.intake_state='scheduled' " +
         'AND r.content_digest=? AND a.assignment_version=? AND a.content_revision=? AND a.content_digest=? ' +
         "AND a.target_account=? AND a.policy_version=? AND a.resolved_at=? AND a.status='active' " +
-        "AND a.lifecycle_state='scheduled')",
+        "AND a.lifecycle_state='scheduled' AND EXISTS (SELECT 1 FROM publication_state p " +
+        "WHERE p.post_id=c.content_id AND p.status='scheduled' AND p.scheduled_at=a.resolved_at " +
+        'AND p.attempt_id IS NULL))',
       [
         intakeItem.assignment_id,
         intakeItem.content_id,
