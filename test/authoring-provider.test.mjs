@@ -117,6 +117,42 @@ test('provider timeout fails closed without producing a candidate', async () => 
   );
 });
 
+test('provider timeout aborts the provider request instead of leaving it running', async () => {
+  let signal;
+  const provider = createGenerationProvider({
+    name: 'slow-provider',
+    model: 'fake',
+    async generate(request) {
+      signal = request.signal;
+      return new Promise(() => {});
+    },
+  });
+  await assert.rejects(
+    generateBoundedCandidates(provider, {
+      unit: unit(), artifactKind: 'lesson', candidateCount: 1, createdAt: when, timeoutMs: 10,
+    }),
+    (error) => error?.code === 'generation_timeout',
+  );
+  assert.ok(signal instanceof AbortSignal);
+  assert.equal(signal.aborted, true);
+});
+
+test('a provider that finishes in time is not aborted', async () => {
+  let signal;
+  const provider = createGenerationProvider({
+    name: 'prompt-provider',
+    model: 'fake',
+    async generate(request) {
+      signal = request.signal;
+      return [{ title: 'On time', body: 'A provider that answers before the deadline keeps its request; nothing is cancelled after success.' }];
+    },
+  });
+  await generateBoundedCandidates(provider, {
+    unit: unit(), artifactKind: 'lesson', candidateCount: 1, createdAt: when, timeoutMs: 1000,
+  });
+  assert.equal(signal.aborted, false);
+});
+
 test('oversized generated bodies are rejected before candidate materialization', async () => {
   const provider = createGenerationProvider({
     name: 'verbose-provider',
