@@ -735,7 +735,7 @@ export function expectedTrustRoot(descriptor) {
 
 // wrangler dev lets same-named process.env and .env entries override committed
 // vars, with process.env taking precedence over .env (observed with wrangler
-// 4.131). The child therefore carries every committed var explicitly, which
+// 4.131; re-observed with 4.149 in local dev). The child therefore carries every committed var explicitly, which
 // also shadows any .env entry. The Worker's Cloudflare credential is
 // MUTATION_D1_API_TOKEN; CLOUDFLARE_API_TOKEN is wrangler's own launch
 // credential and is never bound into the Worker.
@@ -975,7 +975,7 @@ export async function invokeEphemeralWorker({
   await probePort(port);
   // An empty --env-file makes wrangler skip .env and .dev.vars entirely while
   // still binding declared secrets from the process environment (observed with
-  // wrangler 4.131), so no local file can override a binding.
+  // wrangler 4.131; re-observed with 4.149 in local dev), so no local file can override a binding.
   const envDir = mkdtempSync(join(tmpdir(), 'xqueue-mutation-env-'));
   const envFile = join(envDir, 'empty.env');
 

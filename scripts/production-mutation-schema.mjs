@@ -99,7 +99,7 @@ export function localMigrations(dir = PRODUCTION_MIGRATIONS_DIR) {
     });
 }
 
-// wrangler 4.131 applies every non-hidden top-level *.sql file in
+// wrangler 4.131 (re-observed with 4.149) applies every non-hidden top-level *.sql file in
 // migrations_dir, ordered by leading number and then by name. The plan must
 // cover exactly that set, and every such file must be the committed blob.
 export function migrationFileBlockers({ dir = PRODUCTION_MIGRATIONS_DIR, local, committed }) {
