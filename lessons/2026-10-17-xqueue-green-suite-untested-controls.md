@@ -37,7 +37,12 @@ audit measured which code those tests actually execute
 - `cloudflare/src/publisher-worker.mjs`, the scheduled entry point that starts
   every production publishing run: **8.79%** of lines executed. Its three
   runtime branches (authority disabled, success, unhandled error) never ran.
-  The only tests touching it matched its source text with regexes.
+  The tests that referenced it inspected it statically:
+  - source-text regexes (`credential-separation.test.mjs`)
+  - its config `main` path (`deployment-config-preservation.test.mjs`)
+  - the publisher module-graph digest (`production-intake-launch.test.mjs`)
+
+  None of them executed it.
 - `prepareSelectedMedia` in `cloudflare/src/production-publisher.mjs`, the
   check that re-reads a figure's bytes and re-verifies size and SHA-256 before
   upload: never executed (lines 145-213 uncovered). It was exported for
@@ -126,8 +131,14 @@ Merged in PR #174 (`c48ca66` → `main` `d7a8cab`).
 77.32% → 88.37%.
 
 **Negative test:**
-- Each new test was run against a sabotaged copy of the check it covers:
-  10/10 caught (5 media, 5 entry point).
+- Before merge: 10 deliberate breaks (5 media, 5 entry point), each caught by
+  at least one new test. That left 5 of the 12 new publisher tests never
+  individually seen to fail, yet commit `5515d70` and the #174 description
+  said "each test". That was an overclaim, found by review of this record.
+- Closed after merge (2026-10-17): 5 more breaks, one per remaining test
+  (media no-figure, missing snapshot, missing body, honest bytes; entry
+  invalid time). Each was caught by exactly its intended test. All 12 new
+  publisher tests have now been seen to fail.
 - Counterfactual on the *old* suite (117 files, the new test files excluded):
   - body re-hash deleted → 1 failure, the digest pin
   - entry point made to rethrow → 1 failure, the digest pin
@@ -149,8 +160,10 @@ checked, and those were fixed before merge (`c48ca66`).
 - In-process coverage undercounts scripts that tests spawn with a custom
   environment, so script-level numbers are low-bound only.
 - When the gap began is unknown (beyond the shallow clone).
-- Mutation here was hand-picked (19 mutants across three files), not
-  systematic. Surviving faults outside those mutants are possible.
+- Mutation here was hand-picked, not systematic. There were 15 breaks across
+  the two publisher files: `production-publisher.mjs` (10) and
+  `publisher-worker.mjs` (5). The adapter's breaks belong to the companion
+  timeout record. Faults outside these breaks may survive the suite.
 
 ## 9. Policy or control extracted
 
@@ -180,9 +193,14 @@ checked, and those were fixed before merge (`c48ca66`).
 - Counterintuitive part: the old suite *did* fail when the check was deleted.
   It just failed for the wrong reason, and its own message told you how to
   make it pass.
-- Must redact: Worker hostnames, D1/R2 names, the X account handle, the
-  publisher's internal file paths in public posts (the repo is private per the
-  README). The storage checksum trust detail stays generic.
+- Must redact: Worker hostnames, D1/R2 names, the X account handle, and the
+  publisher's internal file paths in posts. The storage checksum trust detail
+  stays generic in posts.
+- Repo visibility: the README says the repo "should remain private", but
+  GitHub reports it **public** (checked 2026-10-17). This record and
+  everything else in the repo are publicly readable. The trust detail is
+  already public in the code's own comments. Whether to make the repo
+  private is the owner's decision.
 
 **Counterfactual** (win record): without the new tests, deleting the media
 body re-hash and re-recording the publisher digest leaves the suite at

@@ -17,8 +17,8 @@ negative_test: yes
 concept:
   name: Secondary risk
   source: book
-  citation: "Ch. 20 — Edwards, Managing Project Risks (2nd ed.), Wiley — MGMT440"
-  known_to_me: partial      # inferred from Patrick's own compilation of MGMT440; Patrick to confirm
+  citation: "Ch. 20 — Edwards, Managing Project Risks (2nd ed.), Wiley — MGMT440 (definition as summarized in The Whole Degree Ch. 20 and its glossary; Edwards' own text not read)"
+  known_to_me: yes          # Patrick's library already teaches it: content/20-pillar-a.md A67 and content/40-pillar-c.md C5, both titled "Secondary risk"
   name_state: verified
 pillar: A                  # tells cleanly in kitchen terms; the code can be a footnote
 publish_state: drafted
@@ -55,8 +55,13 @@ bound on the work, not only on the wait.
   Failed generations write no telemetry (tracked in #175).
 - **Unknown:** whether the provider billed for work after the client gave up.
   Billing behavior was not tested, and no claim is made.
-- Blast radius: owner-local authoring CLI only. No publishing path uses this
-  code, and no Worker bundle contains it (verified by dry-run bundle builds).
+- Blast radius: owner-local authoring CLI only. Statically, only
+  `scripts/authoring-cli.mjs` imports these modules. Checked 2026-10-17 by
+  building the status, authority and intake bundles and searching them for
+  this code:
+  `pnpm wrangler deploy --config <wrangler.status|authority|mutation-production-intake>.jsonc --dry-run --outdir <dir>`,
+  then `grep -c -E "generation_timeout|openai-responses|generateBoundedCandidates" <dir>/*.js`.
+  Result: 0 matches in all three.
 
 ## 4. Diagnosis
 
@@ -78,8 +83,11 @@ nothing did.
 
 ## 5. The professional concept
 
-**Secondary risk:** "a risk created by a risk response" (*The Whole Degree*,
-Ch. 20, from Edwards, *Managing Project Risks*, MGMT440). The original risk
+**Secondary risk:** "a risk created by a risk response". The wording is from
+the *The Whole Degree* glossary entry for Ch. 20, which summarizes Edwards,
+*Managing Project Risks* (MGMT440). It was not checked against Edwards' own
+text. Patrick's library already teaches this concept twice: A67 (kitchen) and
+C5 (product build). This record adds a third domain: software. The original risk
 was a hung provider freezing the CLI. The response, a timeout, mitigated it,
 and in doing so created a new risk that did not exist before: an abandoned
 paid request still running, with its result thrown away.
@@ -113,6 +121,10 @@ candidate IDs are unchanged.
 - With only the wrapper fix (the adapter does not forward the signal), 1 still
   fails: the adapter-level test.
 - Each half of the fix is therefore independently pinned.
+- Adapter tests: before merge, 9 deliberate breaks to `providers/openai.mjs`
+  failed 6 of its then-7 tests. The constructor-refusal test was shown to fail
+  after merge (2026-10-17) by removing the output-budget guard. All 8 adapter
+  tests, including the timeout test, have now been seen to fail.
 
 ## 8. Residual risk and unknowns
 
@@ -123,8 +135,12 @@ candidate IDs are unchanged.
   Recorded in review, not fixed.
 - Aborted generations still produce no usage or telemetry record (#175).
 - This is the only `Promise.race` timeout in `src`, `scripts`, `cloudflare`
-  and `probes`. The repo's other timeouts already use `AbortSignal.timeout`,
-  which cancels.
+  and `probes`. The repo's other timeouts were not audited one by one. Two
+  seen in passing do cancel:
+  - `scripts/production-mutation-intake.mjs` passes `AbortSignal.timeout` to
+    `fetch` (lines 469, 849, 886)
+  - `scripts/production-acceptance-batch.mjs` kills its child process when
+    its timer fires (around line 378)
 
 ## 9. Policy or control extracted
 
@@ -143,6 +159,10 @@ candidate IDs are unchanged.
   rings true on a real line.)
 - **Project work generally:** any mitigation whose side effect nobody owns,
   which is the textbook shape of secondary risk.
+- **Cross-domain:** with A67 (kitchen) and C5 (product build), this is the
+  third instance of secondary risk in Patrick's material, each from a
+  different domain. That is the threshold the lesson-ledger method names for
+  a cross-domain post.
 
 ## 11. Content hooks
 

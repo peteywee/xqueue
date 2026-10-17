@@ -1,5 +1,5 @@
 <!-- derived from lessons/2026-10-17-xqueue-green-suite-untested-controls.md | record status: verified | gate: passed 2026-10-17 -->
-<!-- DRAFT. Not published. Internal file names, hostnames and storage names are deliberately left out; the repo is private. -->
+<!-- DRAFT. Not published. Internal file names, hostnames and storage names are deliberately left out. Note: the repo is public as of 2026-10-17, although its README says it should be private. -->
 
 # My test suite was green. The code that starts every publish run had barely been run.
 
@@ -20,7 +20,8 @@ Node can tell you which lines executed during a test run:
 node --test --experimental-test-coverage test/*.test.mjs
 ```
 
-Most of the codebase came back in the 80s and 90s. Three files did not:
+Overall, 85% of lines ran under test. Three gaps stood out because of what that
+code does:
 
 | What it is | Lines executed under test |
 |---|---|
@@ -31,8 +32,8 @@ Most of the codebase came back in the 80s and 90s. Three files did not:
 The entry point was the one that bothered me. It runs every fifteen minutes in
 production. It decides whether publishing is even allowed, records a
 heartbeat, and turns any unexpected crash into a safe "stop, don't retry"
-result. The tests that mentioned it only checked its source text. Nothing had
-ever run it.
+result. The tests that mentioned it only inspected it from the outside: its
+text, its file path, its fingerprint. Nothing had ever run it.
 
 The image check matters for a different reason. The storage layer reports its
 own checksum for each file, and an earlier design decision trusts that report
@@ -87,9 +88,12 @@ Other tests drive the image check with a storage fake that lies. It reports
 the honest checksum while holding different bytes of the same length. The
 check catches it, and no bytes are handed on for upload.
 
-Every new test was then run against a deliberately broken copy of the thing it
-covers. In all ten cases, the matching test failed. A test you have never seen
-fail hasn't proven anything yet.
+Then the agent broke the code on purpose, aiming to see every new test fail at
+least once. The first pass fell short. Ten breaks were all caught, but five of
+the twelve tests had never failed on their own, and the change description
+said "each test" anyway. A review of this write-up caught that. Five more
+breaks, one per remaining test, closed it. A test you have never seen fail
+hasn't proven anything yet, and that includes the claim that it has.
 
 Coverage on the entry point went from 8.79% to 100% of lines. The publisher
 went from 77% to 88%. Then an independent review of the change found three
@@ -100,8 +104,8 @@ before merge.
 
 - The publisher still has roughly 12% of its lines untested, and another file
   sits at 49% branch coverage. Coverage measures execution, not correctness.
-- The mutations were hand-picked: nineteen deliberate faults across three
-  files. A systematic mutation run might find more gaps.
+- The breaks were hand-picked: fifteen across the two publisher files. A
+  systematic mutation run might find more gaps.
 - I don't know how long the gap existed. The history available when this was
   found didn't reach back far enough to say.
 
