@@ -20,8 +20,7 @@ Node can tell you which lines executed during a test run:
 node --test --experimental-test-coverage test/*.test.mjs
 ```
 
-Overall, 85% of lines ran under test. Three gaps stood out because of what that
-code does:
+Three gaps stood out because of what that code does:
 
 | What it is | Lines executed under test |
 |---|---|
@@ -88,17 +87,17 @@ Other tests drive the image check with a storage fake that lies. It reports
 the honest checksum while holding different bytes of the same length. The
 check catches it, and no bytes are handed on for upload.
 
-Then the agent broke the code on purpose, aiming to see every new test fail at
+Coverage on the entry point went from 8.79% to 100% of lines. The publisher
+went from 77% to 88%. Before merge, an independent review of the change found
+three places where the new tests claimed more than they checked. Those got
+fixed too.
+
+The agent also broke the code on purpose, aiming to see every new test fail at
 least once. The first pass fell short. Ten breaks were all caught, but five of
 the twelve tests had never failed on their own, and the change description
-said "each test" anyway. A review of this write-up caught that. Five more
-breaks, one per remaining test, closed it. A test you have never seen fail
-hasn't proven anything yet, and that includes the claim that it has.
-
-Coverage on the entry point went from 8.79% to 100% of lines. The publisher
-went from 77% to 88%. Then an independent review of the change found three
-places where the new tests claimed more than they checked. Those got fixed too,
-before merge.
+said "each test" anyway. After merge, a review of this write-up caught that.
+Five more breaks, one per remaining test, closed it. A test you have never
+seen fail hasn't proven anything yet, and that includes the claim that it has.
 
 ## What I still don't know
 

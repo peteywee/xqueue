@@ -35,7 +35,8 @@ audit measured which code those tests actually execute
 (`node --test --experimental-test-coverage`):
 
 - `cloudflare/src/publisher-worker.mjs`, the scheduled entry point that starts
-  every production publishing run: **8.79%** of lines executed. Its three
+  every production publishing run (cron `*/15 * * * *` in
+  `wrangler.authority.jsonc`): **8.79%** of lines executed. Its three
   runtime branches (authority disabled, success, unhandled error) never ran.
   The tests that referenced it inspected it statically:
   - source-text regexes (`credential-separation.test.mjs`)
@@ -133,12 +134,15 @@ Merged in PR #174 (`c48ca66` → `main` `d7a8cab`).
 **Negative test:**
 - Before merge: 10 deliberate breaks (5 media, 5 entry point), each caught by
   at least one new test. That left 5 of the 12 new publisher tests never
-  individually seen to fail, yet commit `5515d70` and the #174 description
-  said "each test". That was an overclaim, found by review of this record.
-- Closed after merge (2026-10-17): 5 more breaks, one per remaining test
-  (media no-figure, missing snapshot, missing body, honest bytes; entry
-  invalid time). Each was caught by exactly its intended test. All 12 new
-  publisher tests have now been seen to fail.
+  individually seen to fail, yet commit `5515d70` said "each test" for these
+  files, and the #174 description said "each new test" across all three
+  files. Both were overclaims, found by review of this record. (For the
+  adapter half, see the companion timeout record.)
+- Closed after merge (2026-10-17): 5 more breaks, one per remaining test:
+  media no-figure, missing snapshot, missing body, honest bytes, and entry
+  invalid time. The last was made in `production-publisher.mjs`, where the
+  `invalid_now` guard lives. Each was caught by exactly its intended test.
+  All 12 new publisher tests have now been seen to fail.
 - Counterfactual on the *old* suite (117 files, the new test files excluded):
   - body re-hash deleted → 1 failure, the digest pin
   - entry point made to rethrow → 1 failure, the digest pin

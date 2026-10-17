@@ -18,7 +18,7 @@ concept:
   name: Secondary risk
   source: book
   citation: "Ch. 20 — Edwards, Managing Project Risks (2nd ed.), Wiley — MGMT440 (definition as summarized in The Whole Degree Ch. 20 and its glossary; Edwards' own text not read)"
-  known_to_me: yes          # Patrick's library already teaches it: content/20-pillar-a.md A67 and content/40-pillar-c.md C5, both titled "Secondary risk"
+  known_to_me: partial      # inferred: queued posts A67 and C5 in Patrick's library are titled "Secondary risk", but the library is derived from The Whole Degree (PLAN.md). Patrick to confirm.
   name_state: verified
 pillar: A                  # tells cleanly in kitchen terms; the code can be a footnote
 publish_state: drafted
@@ -86,8 +86,10 @@ nothing did.
 **Secondary risk:** "a risk created by a risk response". The wording is from
 the *The Whole Degree* glossary entry for Ch. 20, which summarizes Edwards,
 *Managing Project Risks* (MGMT440). It was not checked against Edwards' own
-text. Patrick's library already teaches this concept twice: A67 (kitchen) and
-C5 (product build). This record adds a third domain: software. The original risk
+text. Two queued posts in Patrick's library cover the same concept: A67
+(kitchen) and C5 (product build). Per the generated compatibility schedule
+(`queue.json`), they are due 2026-11-12 and 2026-11-10 (America/Chicago) and
+not yet published. Production D1 was not checked. The original risk
 was a hung provider freezing the CLI. The response, a timeout, mitigated it,
 and in doing so created a new risk that did not exist before: an abandoned
 paid request still running, with its result thrown away.
@@ -122,9 +124,13 @@ candidate IDs are unchanged.
   fails: the adapter-level test.
 - Each half of the fix is therefore independently pinned.
 - Adapter tests: before merge, 9 deliberate breaks to `providers/openai.mjs`
-  failed 6 of its then-7 tests. The constructor-refusal test was shown to fail
-  after merge (2026-10-17) by removing the output-budget guard. All 8 adapter
-  tests, including the timeout test, have now been seen to fail.
+  were run before the timeout test was written. The file then had 7 tests; that
+  working state was never committed. The breaks failed 6 of those 7. The
+  constructor-refusal test was not seen to fail, so the #174 description's
+  "each new test" claim was premature for the adapter too.
+- Closed after merge (2026-10-17): removing the output-budget guard fails the
+  constructor-refusal test. All 8 committed adapter tests, including the
+  timeout test, have now been seen to fail.
 
 ## 8. Residual risk and unknowns
 
@@ -138,7 +144,7 @@ candidate IDs are unchanged.
   and `probes`. The repo's other timeouts were not audited one by one. Two
   seen in passing do cancel:
   - `scripts/production-mutation-intake.mjs` passes `AbortSignal.timeout` to
-    `fetch` (lines 469, 849, 886)
+    `fetch` (4 uses: lines 469, 849, 886, 1113)
   - `scripts/production-acceptance-batch.mjs` kills its child process when
     its timer fires (around line 378)
 
@@ -159,10 +165,10 @@ candidate IDs are unchanged.
   rings true on a real line.)
 - **Project work generally:** any mitigation whose side effect nobody owns,
   which is the textbook shape of secondary risk.
-- **Cross-domain:** with A67 (kitchen) and C5 (product build), this is the
-  third instance of secondary risk in Patrick's material, each from a
-  different domain. That is the threshold the lesson-ledger method names for
-  a cross-domain post.
+- **Related queued posts:** A67 (kitchen) and C5 (product build) cover the
+  same concept. They are posts, not lesson records. This is the first lesson
+  record for secondary risk, so the method's cross-domain threshold (three
+  lesson records from different projects) is not met.
 
 ## 11. Content hooks
 
