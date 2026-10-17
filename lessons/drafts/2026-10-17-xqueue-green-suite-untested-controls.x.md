@@ -13,6 +13,7 @@ One test failed, but only because a file fingerprint
 changed. Update the fingerprint, which is what that test
 tells you to do, and everything passes with the check gone.
 
-That method has a name: mutation testing. Break the code on
-purpose. If no test fails, it was never really tested.
+I looked up what that method is called: mutation testing.
+Break the code on purpose. If no test fails, it was never
+really tested.
 ```

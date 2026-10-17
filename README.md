@@ -168,5 +168,7 @@ See `docs/RUNBOOK.md` for the production procedure and scheduler command.
 
 ---
 
-This repository should remain private. `content/` contains original publishing
-material and `docs/PLAN.md` contains the strategy behind it.
+This repository is public by owner decision (2026-10-17). `content/` (original
+publishing material, including posts not yet published) and `docs/PLAN.md` (the
+strategy behind it) are therefore publicly readable. Credentials, secrets and
+private keys must never be committed.

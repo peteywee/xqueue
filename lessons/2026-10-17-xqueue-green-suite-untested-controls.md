@@ -18,7 +18,7 @@ concept:
   name: Mutation testing (mutation analysis)
   source: external
   citation: "Wikipedia, 'Mutation testing' (summary read 2026-10-17). Primary source cited there, not read: DeMillo, Lipton & Sayward, 'Hints on test data selection: Help for the practicing programmer', IEEE Computer 11(4):34-41, 1978."
-  known_to_me: partial      # inferred: the repo already runs 'mutation analysis' (test/autonomy/mutation.test.mjs). Patrick to confirm.
+  known_to_me: no           # Patrick, asked 2026-10-17: "I don't know". Logged in lessons/CONCEPT-GAPS.md.
   name_state: verified
 pillar: D                  # the transferable part is how the gap was found and proven
 publish_state: drafted
@@ -59,7 +59,9 @@ audit measured which code those tests actually execute
 including failure-path hardening tests", and every gate was green. A reasonable
 reading is that the production publishing path was exercised.
 
-**Patrick's own belief before the audit:** `unknown`. Not yet asked.
+**Patrick's own belief before the audit:** asked on 2026-10-17, he answered
+"I don't know" (declared). The audit was run by an agent at his request, so
+no personal expectation was recorded beforehand.
 
 ## 3. Impact
 
@@ -96,7 +98,9 @@ suite passes with the safety check deleted.
 **Mutation testing (mutation analysis):** deliberately introducing small
 faults into code to evaluate whether the tests detect them. It is used to
 "design new software tests" and "evaluate the quality of existing software
-tests" (Wikipedia summary). Coverage answers *what ran*; mutation answers
+tests" (Wikipedia summary). The repo already uses it in one subsystem
+(`test/autonomy/mutation.test.mjs`, run by `pnpm verify:autonomy`); it had never
+been pointed at the publisher. Coverage answers *what ran*; mutation answers
 *whether anything would notice if it were wrong*. Both were needed here:
 coverage found the gap, and mutation showed exactly what the existing
 tripwire did and did not protect.
@@ -200,11 +204,12 @@ checked, and those were fixed before merge (`c48ca66`).
 - Must redact: Worker hostnames, D1/R2 names, the X account handle, and the
   publisher's internal file paths in posts. The storage checksum trust detail
   stays generic in posts.
-- Repo visibility: the README says the repo "should remain private", but
-  GitHub reports it **public** (checked 2026-10-17). This record and
-  everything else in the repo are publicly readable. The trust detail is
-  already public in the code's own comments. Whether to make the repo
-  private is the owner's decision.
+- Repo visibility: when this record was written, the README said the repo
+  "should remain private", but GitHub reported it **public** (checked
+  2026-10-17). The owner then decided it stays public (declared 2026-10-17),
+  and the README now says so. This record and everything else in the repo
+  are publicly readable. The trust detail is already public in the code's
+  own comments.
 
 **Counterfactual** (win record): without the new tests, deleting the media
 body re-hash and re-recording the publisher digest leaves the suite at
