@@ -18,7 +18,7 @@ concept:
   name: Secondary risk
   source: book
   citation: "Ch. 20 — Edwards, Managing Project Risks (2nd ed.), Wiley — MGMT440 (definition as summarized in The Whole Degree Ch. 20 and its glossary; Edwards' own text not read)"
-  known_to_me: partial      # inferred: queued posts A67 and C5 in Patrick's library are titled "Secondary risk", but the library is derived from The Whole Degree (docs/PLAN.md). Patrick to confirm.
+  known_to_me: no           # Patrick, asked 2026-10-17: "I don't know". This holds although queued posts A67 and C5 cover the concept. Logged in lessons/CONCEPT-GAPS.md.
   name_state: verified
 pillar: A                  # tells cleanly in kitchen terms; the code can be a footnote
 publish_state: drafted
@@ -45,7 +45,8 @@ injected fetch, `timeoutMs = 200` and a request that takes 3 s:
 generation with … timeout/count/output budgets". A timeout budget reads as a
 bound on the work, not only on the wait.
 
-**Patrick's own belief before the audit:** `unknown`. Not yet asked.
+**Patrick's own belief before the audit:** asked on 2026-10-17, he answered
+"I don't know" (declared).
 
 ## 3. Impact
 
@@ -163,8 +164,8 @@ candidate IDs are unchanged.
   callee never sees.
 - **Kitchen:** a server voids a ticket at the POS, but the void never reaches
   the line, so the cook still fires it. The person waiting stopped; the work
-  did not. (This analogy is mine, not from an event; Patrick to confirm it
-  rings true on a real line.)
+  did not. (An analogy, not a reported event. Patrick confirmed on 2026-10-17
+  that it is true to a real line.)
 - **Project work generally:** any mitigation whose side effect nobody owns,
   which is the textbook shape of secondary risk.
 - **Related queued posts:** A67 (kitchen) and C5 (product build) cover the

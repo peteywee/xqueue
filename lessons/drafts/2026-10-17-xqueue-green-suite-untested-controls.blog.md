@@ -1,5 +1,5 @@
 <!-- derived from lessons/2026-10-17-xqueue-green-suite-untested-controls.md | record status: verified | gate: passed 2026-10-17 -->
-<!-- DRAFT. Not published. Internal file names, hostnames and storage names are deliberately left out. Note: the repo is public as of 2026-10-17, although its README says it should be private. -->
+<!-- DRAFT. Not published. Internal file names, hostnames and storage names are deliberately left out. Note: the repo is public by owner decision (2026-10-17). -->
 
 # My test suite was green. The code that starts every publish run had barely been run.
 
@@ -65,12 +65,13 @@ The suite protected the check's bytes. It never protected its behavior.
 
 ## The name for this
 
-Deliberately breaking code to see whether the tests notice is called mutation
-testing, or mutation analysis. My repo already used it in one subsystem, but I
-had not pointed it at the publisher. Coverage tells you what ran. Mutation
-tells you whether anything would notice if it were wrong. You need both:
-coverage found this gap, and mutation showed exactly what the existing
-tripwire did and did not cover.
+I had to look up what deliberately breaking code to test your tests is called.
+It's mutation testing, also called mutation analysis. So far I've only read a
+summary, not the original paper. It turns out my repo already uses it in one
+subsystem; it had just never been pointed at the publisher. Coverage tells you
+what ran. Mutation tells you whether anything would notice if it were wrong.
+You need both: coverage found this gap, and mutation showed exactly what the
+existing tripwire did and did not cover.
 
 ## The fix
 
