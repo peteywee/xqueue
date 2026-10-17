@@ -112,6 +112,7 @@ export function createOpenAIAuthoringProvider({
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: input.signal,
         });
       } catch (error) {
         throw new AuthoringContractError('openai_transport_failure', `OpenAI request failed: ${error?.message ?? 'transport error'}`);

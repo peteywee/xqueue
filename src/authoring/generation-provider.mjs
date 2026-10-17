@@ -94,10 +94,15 @@ export async function generateBoundedCandidates(provider, {
   }
   const inputDigest = digestObject(input);
 
+  // The timeout must cancel the provider's request, not only stop waiting for it.
+  const abort = new AbortController();
   let timer;
   try {
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new AuthoringContractError('generation_timeout', `provider exceeded ${timeoutMs}ms timeout`)), timeoutMs);
+      timer = setTimeout(() => {
+        reject(new AuthoringContractError('generation_timeout', `provider exceeded ${timeoutMs}ms timeout`));
+        abort.abort();
+      }, timeoutMs);
     });
     const raw = await Promise.race([
       Promise.resolve(provider.generate(Object.freeze({
@@ -109,6 +114,7 @@ export async function generateBoundedCandidates(provider, {
           noApprovalAuthority: true,
           noPublicationAuthority: true,
         }),
+        signal: abort.signal,
       }))),
       timeout,
     ]);
