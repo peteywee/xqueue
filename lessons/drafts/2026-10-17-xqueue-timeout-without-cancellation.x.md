@@ -16,7 +16,7 @@ purpose. I don't know if it ever happened for real.
 Same shape on a line. A server voids a ticket, the void
 never reaches the window, and the cook fires it anyway.
 
-Project management calls this a secondary risk: a new risk
-created by your response to the first one. The cancel has
-to reach the work, not just the person who was waiting.
+My project risk course called this secondary risk: a new
+risk created by your response to the first one. The cancel
+has to reach the work, not just the person who was waiting.
 ```

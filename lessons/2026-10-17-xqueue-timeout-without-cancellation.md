@@ -18,7 +18,7 @@ concept:
   name: Secondary risk
   source: book
   citation: "Ch. 20 — Edwards, Managing Project Risks (2nd ed.), Wiley — MGMT440 (definition as summarized in The Whole Degree Ch. 20 and its glossary; Edwards' own text not read)"
-  known_to_me: partial      # inferred: queued posts A67 and C5 in Patrick's library are titled "Secondary risk", but the library is derived from The Whole Degree (PLAN.md). Patrick to confirm.
+  known_to_me: partial      # inferred: queued posts A67 and C5 in Patrick's library are titled "Secondary risk", but the library is derived from The Whole Degree (docs/PLAN.md). Patrick to confirm.
   name_state: verified
 pillar: A                  # tells cleanly in kitchen terms; the code can be a footnote
 publish_state: drafted
@@ -124,8 +124,10 @@ candidate IDs are unchanged.
   fails: the adapter-level test.
 - Each half of the fix is therefore independently pinned.
 - Adapter tests: before merge, 9 deliberate breaks to `providers/openai.mjs`
-  were run before the timeout test was written. The file then had 7 tests; that
-  working state was never committed. The breaks failed 6 of those 7. The
+  failed 6 tests. The order is *declared* from the session log, not
+  recoverable from the repo: the breaks ran before the timeout test was
+  written, while the file had 7 tests, a state that was never committed.
+  Git shows only the committed 8-test file (`ff6164e`). The
   constructor-refusal test was not seen to fail, so the #174 description's
   "each new test" claim was premature for the adapter too.
 - Closed after merge (2026-10-17): removing the output-budget guard fails the

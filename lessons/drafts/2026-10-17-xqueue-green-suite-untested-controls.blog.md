@@ -89,15 +89,16 @@ check catches it, and no bytes are handed on for upload.
 
 Coverage on the entry point went from 8.79% to 100% of lines. The publisher
 went from 77% to 88%. Before merge, an independent review of the change found
-three places where the new tests claimed more than they checked. Those got
-fixed too.
+three new test assertions that claimed more than they checked: one in the
+publisher tests, two in the model adapter's. Those got fixed too.
 
 The agent also broke the code on purpose, aiming to see every new test fail at
-least once. The first pass fell short. Ten breaks were all caught, but five of
-the twelve tests had never failed on their own, and the change description
-said "each test" anyway. After merge, a review of this write-up caught that.
-Five more breaks, one per remaining test, closed it. A test you have never
-seen fail hasn't proven anything yet, and that includes the claim that it has.
+least once. The first pass fell short. Nineteen breaks were all caught, but six
+new tests had never failed on their own (five publisher, one adapter), and the
+change description said "each new test" anyway. After merge, a review of this
+write-up caught that. Six more breaks, one per remaining test, closed it. A
+test you have never seen fail hasn't proven anything yet, and that includes the
+claim that it has.
 
 ## What I still don't know
 
