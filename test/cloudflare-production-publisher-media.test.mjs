@@ -153,7 +153,7 @@ test('bytes that differ from an R2-asserted checksum are caught by the body re-h
   assert.equal(bucket.calls.filter((call) => call === 'get').length, 1, 'the body was actually read');
 });
 
-test('a body whose length differs from the manifest is refused before hashing', async () => {
+test('a body whose length differs from the manifest is refused', async () => {
   const result = await prepareSelectedMedia(
     { MEDIA: scriptedBucket({ body: Buffer.concat([HONEST, Buffer.from('+')]) }) },
     POST,

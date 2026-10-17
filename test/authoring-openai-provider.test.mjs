@@ -175,7 +175,7 @@ test('a generation timeout cancels the in-flight OpenAI request', async () => {
 
   assert.ok(signal instanceof AbortSignal, 'fetch received the abort signal');
   assert.equal(aborted, true, 'the request was cancelled, not abandoned');
-  assert.ok(Date.now() - started < 5000);
+  assert.ok(Date.now() - started < 1000, 'cancelled near the 20ms deadline, not when the request would finish');
 });
 
 test('text output is read from output_text or assembled from output_text content parts', async () => {
@@ -214,7 +214,7 @@ test('every failed exchange fails closed with a distinct code', async () => {
   for (const [code, fetchImpl] of cases) {
     const provider = createOpenAIAuthoringProvider({ apiKey: KEY, model: 'm', fetchImpl });
     await rejectsWithCode(provider.generate(minimalInput()), code);
-    assert.equal(provider.getLastUsage(), null, `${code} records no usage`);
+    assert.equal(provider.getLastUsage(), null, `${code} records no usage on a fresh provider`);
   }
 });
 
